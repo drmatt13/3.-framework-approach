@@ -1,0 +1,11 @@
+tensorflow
+xgboost
+numpy
+pandas
+scikit-learn
+matplotlib
+seaborn
+joblib
+psycopg[binary]
+python-dotenv
+questionary
