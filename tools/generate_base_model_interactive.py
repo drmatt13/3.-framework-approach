@@ -35,7 +35,7 @@ CUSTOM_STYLE = Style.from_dict(
         "answer": "fg:#3fb0f0 bold",  # Selected answer after choice
         "pointer": "fg:#f8b808 bold",  # Arrow pointer (>)
         "highlighted": "fg:#ffffff bg:#222222 bold",  # Highlighted option in menu
-        "selected": "fg:#00ff00",  # Selected checkbox item (if used)
+        "selected": "fg:#8ab4f8 bold",  # Selected checkbox item (if used)
     }
 )
 
@@ -70,6 +70,29 @@ def _is_int(s: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _supports_early_stopping_defaults(library: str, model: str | None, task: str) -> bool:
+    if task == "regression":
+        return False
+    if library == "xgboost":
+        return True
+    return library == "scikit-learn" and model in {"logistic_regression", "random_forest"}
+
+
+def _supports_default_max_iter(library: str, model: str | None, task: str) -> bool:
+    return library == "scikit-learn" and model == "logistic_regression" and task in {
+        "binary_classification",
+        "multiclass_classification",
+    }
+
+
+def _recommended_es_defaults(library: str, model: str | None) -> tuple[bool, float, int]:
+    if library == "xgboost":
+        return True, 0.1, 20
+    if library == "scikit-learn" and model in {"logistic_regression", "random_forest"}:
+        return True, 0.1, 5
+    return True, 0.1, 5
 
 
 def main() -> int:
@@ -139,8 +162,8 @@ def main() -> int:
     booster = None
     if library == "xgboost":
         booster = questionary.select(
-            "Select xgboost booster (optional):",
-            choices=["(skip)"] + XGBOOST_BOOSTERS,
+            "Default xgboost booster:",
+            choices=XGBOOST_BOOSTERS,
             use_shortcuts=True,
             style=CUSTOM_STYLE,
         ).ask()
@@ -148,9 +171,6 @@ def main() -> int:
         if booster is None:
             print("Cancelled.")
             return 0
-
-        if booster == "(skip)":
-            booster = None
 
     # TensorFlow training knobs (ONLY where necessary)
     optimizer = None
@@ -198,6 +218,75 @@ def main() -> int:
             print("Cancelled.")
             return 0
 
+    default_early_stopping = None
+    default_validation_fraction = None
+    default_n_iter_no_change = None
+    default_max_iter = None
+
+    if _supports_default_max_iter(library, model, task):
+        default_max_iter = _ask_text(
+            "Default max iterations for template --max-iter:",
+            default="1000",
+            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+        )
+        if default_max_iter is None:
+            print("Cancelled.")
+            return 0
+        default_max_iter = int(default_max_iter)
+
+    if _supports_early_stopping_defaults(library, model, task):
+        recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change = _recommended_es_defaults(
+            library,
+            model,
+        )
+
+        default_early_stopping = questionary.confirm(
+            "Enable early stopping by default in the generated template (--early-stopping)?",
+            default=bool(recommended_early_stopping),
+            style=CUSTOM_STYLE,
+        ).ask()
+
+        if default_early_stopping is None:
+            print("Cancelled.")
+            return 0
+
+        use_recommended_defaults = questionary.confirm(
+            "Use recommended preset values for --validation-fraction and --n-iter-no-change?",
+            default=True,
+            style=CUSTOM_STYLE,
+        ).ask()
+
+        if use_recommended_defaults is None:
+            print("Cancelled.")
+            return 0
+
+        if use_recommended_defaults:
+            default_validation_fraction = recommended_validation_fraction
+            default_n_iter_no_change = recommended_n_iter_no_change
+        else:
+            default_validation_fraction = _ask_text(
+                "Default validation fraction for template --validation-fraction (0 < value < 1):",
+                default=str(recommended_validation_fraction),
+                validate_fn=lambda s: True
+                if (_is_float(s) and 0.0 < float(s) < 1.0)
+                else "Must be a number where 0 < value < 1",
+            )
+            if default_validation_fraction is None:
+                print("Cancelled.")
+                return 0
+
+            default_n_iter_no_change = _ask_text(
+                "Default n_iter_no_change for template --n-iter-no-change:",
+                default=str(recommended_n_iter_no_change),
+                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+            )
+            if default_n_iter_no_change is None:
+                print("Cancelled.")
+                return 0
+
+            default_validation_fraction = float(default_validation_fraction)
+            default_n_iter_no_change = int(default_n_iter_no_change)
+
     models_dir = script_dir.parent / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
 
@@ -233,8 +322,16 @@ def main() -> int:
     if model is not None:
         cmd.extend(["--model", model])
 
-    if booster is not None:
+    if library == "xgboost":
         cmd.extend(["--booster", booster])
+
+    if _supports_early_stopping_defaults(library, model, task):
+        cmd.extend(["--default-early-stopping", "true" if default_early_stopping else "false"])
+        cmd.extend(["--default-validation-fraction", str(float(default_validation_fraction))])
+        cmd.extend(["--default-n-iter-no-change", str(int(default_n_iter_no_change))])
+
+    if default_max_iter is not None:
+        cmd.extend(["--default-max-iter", str(int(default_max_iter))])
 
     # Add TensorFlow-only flags where necessary
     if library == "tensorflow":

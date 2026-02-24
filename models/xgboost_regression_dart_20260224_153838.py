@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import math
 import pickle
 import platform
 import time
@@ -10,8 +11,8 @@ from pathlib import Path
 
 import pandas as pd
 import sklearn
+import xgboost as xgb
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import max_error, mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
@@ -19,10 +20,10 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
-#   --library scikit-learn
-#   --model random_forest
+#   --library xgboost
 #   --task regression
 #   --name <model_name>
+#   --booster gbtree|gblinear|dart
 #   --save-model true|false
 #   --random-state <int>
 #   --test-size <float>
@@ -31,6 +32,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
+DEFAULT_BOOSTER = "dart"
 METRIC_DECIMALS = 4
 RUN_SCHEMA_VERSION = "1.0"
 RUN_METADATA_PROFILE = "compact"
@@ -39,6 +41,7 @@ RUN_METADATA_PROFILE = "compact"
 def _round_metric(value):
 	return None if value is None else round(float(value), METRIC_DECIMALS)
 
+
 # Helper function: find project root using a marker file.
 def _project_root() -> Path:
 	current = Path(__file__).resolve().parent
@@ -46,6 +49,7 @@ def _project_root() -> Path:
 		if (candidate / "requirements.txt").exists():
 			return candidate
 	return Path(__file__).resolve().parents[1]
+
 
 # Helper function: parse boolean CLI input.
 def _parse_bool(value: str) -> bool:
@@ -71,6 +75,20 @@ def _artifact_map(base_dir: Path, artifacts: dict[str, Path]) -> dict[str, str]:
 		if path.exists():
 			resolved[key] = str(path.relative_to(base_dir))
 	return resolved
+
+
+def _json_safe(value):
+	if isinstance(value, float):
+		if not math.isfinite(value):
+			return None
+		return value
+	if isinstance(value, dict):
+		return {k: _json_safe(v) for k, v in value.items()}
+	if isinstance(value, list):
+		return [_json_safe(item) for item in value]
+	if isinstance(value, tuple):
+		return [_json_safe(item) for item in value]
+	return value
 
 
 def _compact_metadata(value):
@@ -100,12 +118,13 @@ def _compact_metadata(value):
 def _select_estimator_params(params: dict, keys: list[str]) -> dict:
 	return {key: params.get(key) for key in keys if key in params}
 
+
 # Command-line argument parsing.
-parser = argparse.ArgumentParser(description="Random Forest Regressor baseline")
-parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
-parser.add_argument("--model", choices=["random_forest"], default="random_forest")
+parser = argparse.ArgumentParser(description="XGBoost Regressor baseline")
+parser.add_argument("--library", choices=["xgboost"], default="xgboost")
 parser.add_argument("--task", choices=["regression"], default="regression")
 parser.add_argument("--name", default=Path(__file__).stem)
+parser.add_argument("--booster", choices=["gbtree", "gblinear", "dart"], default=DEFAULT_BOOSTER)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
@@ -121,10 +140,13 @@ SAVE_MODEL = args.save_model
 # Load data.
 project_root = _project_root()
 data_path = project_root / "data" / "template_data" / "california_housing.csv"
-df = pd.read_csv(data_path).dropna()
+df = pd.read_csv(data_path)
+df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
+df = df.dropna()
 
 y = df["median_house_value"]
-X = df.drop(columns=["median_house_value"])
+y = y.astype("float64") # type: ignore
+X = df.drop(columns=["median_house_value"]) # type: ignore
 
 # =============================================================
 # ============== ADDITIONAL FEATURE ENGINEERING ===============
@@ -165,7 +187,15 @@ preprocessor = ColumnTransformer(
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
-		("regressor", RandomForestRegressor(random_state=args.random_state)),
+		(
+			"regressor",
+			xgb.XGBRegressor(
+				booster=args.booster,
+				random_state=args.random_state,
+				objective="reg:squarederror",
+				eval_metric="rmse",
+			),
+		),
 	]
 )
 
@@ -188,35 +218,33 @@ train_residuals = y_train - train_predictions
 train_residual_mean = float(train_residuals.mean())
 train_residual_std = float(train_residuals.std())
 
-# ---- Test Metrics (generalization to unseen data) ----
+# Test metrics
 test_mse = mean_squared_error(y_test, predictions)
 test_mae = mean_absolute_error(y_test, predictions)
 test_rmse = root_mean_squared_error(y_test, predictions)
 test_r2 = r2_score(y_test, predictions)
 test_max_error = max_error(y_test, predictions)
 
-# ---- Train Metrics (model performance on training data) ----
-print("Train MSE:", train_mse)  # Mean Squared Error on training set (average squared residuals)
-print("Train MSE:", _round_metric(train_mse))  # Mean Squared Error on training set (average squared residuals)
-print("Train MAE:", _round_metric(train_mae))  # Mean Absolute Error on training set (average absolute prediction error)
-print("Train RMSE:", _round_metric(train_rmse))  # Root Mean Squared Error on training set (error in original target units)
-print("Train R2:", _round_metric(train_r2))  # R² on training set (variance explained by model)
-print("Train Max Error:", _round_metric(train_max_error))  # Largest absolute prediction error on training data
-print("Train Residual Mean:", _round_metric(train_residual_mean))  # Mean of residuals (should be near 0 if unbiased)
-print("Train Residual Std:", _round_metric(train_residual_std))  # Standard deviation of residuals (spread of errors)
+# ---- Train Metrics (model fit on data it learned from) ----
+print("Train MSE:", _round_metric(train_mse))  # Mean Squared Error on training set
+print("Train MAE:", _round_metric(train_mae))  # Mean Absolute Error on training set
+print("Train RMSE:", _round_metric(train_rmse))  # Root Mean Squared Error on training set
+print("Train R2:", _round_metric(train_r2))  # R² on training set
+print("Train Max Error:", _round_metric(train_max_error))  # Largest single absolute training error
+print("Train Residual Mean:", _round_metric(train_residual_mean))  # Mean residual on training set
+print("Train Residual Std:", _round_metric(train_residual_std))  # Residual spread on training set
 
-# ---- Test Metrics (model generalization to unseen data) ----
-print("Test MSE:", _round_metric(test_mse))  # Mean Squared Error on test set (average squared prediction errors)
-print("Test MAE:", _round_metric(test_mae))  # Mean Absolute Error on test set (average absolute difference from true values)
-print("Test RMSE:", _round_metric(test_rmse))  # Root Mean Squared Error on test set (interpretable error magnitude)
-print("Test R2:", _round_metric(test_r2))  # R² on test set (generalization performance)
+# ---- Test Metrics (model performance on unseen data) ----
+print("Test MSE:", _round_metric(test_mse))  # Mean Squared Error on test set
+print("Test MAE:", _round_metric(test_mae))  # Mean Absolute Error on test set
+print("Test RMSE:", _round_metric(test_rmse))  # Root Mean Squared Error on test set
+print("Test R2:", _round_metric(test_r2))  # R² score on test set
+print("Test Max Error:", _round_metric(test_max_error))  # Worst-case single test error
 
-print("Test Max Error:", _round_metric(test_max_error))  # Worst-case absolute prediction error on test set
+print("Target Mean:", _round_metric(y.mean()))  # Overall target mean
+print("Target Std:", _round_metric(y.std()))  # Overall target standard deviation
 
-print("Target Mean:", _round_metric(y.mean()))  # Overall target mean (prefer y_train.mean() to avoid leakage)
-print("Target Std:", _round_metric(y.std()))  # Overall target standard deviation (prefer y_train.std() for clean separation)
-
-print("First 5 predictions:", predictions[:5])  # Quick sanity check of predicted values and scale
+print("First 5 predictions:", predictions[:5])  # Quick output sanity check
 
 # =============================================================
 # ==================== MODEL CODE ENDS HERE ===================
@@ -334,20 +362,27 @@ print(results)
 		json.dump(feature_schema, schema_file, indent=2)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
-	regressor_params = model.named_steps["regressor"].get_params()
+	regressor_params = _json_safe(model.named_steps["regressor"].get_params())
 	estimator_params_compact = _select_estimator_params(
 		regressor_params,
 		[
+			"objective",
+			"booster",
+			"eval_metric",
 			"n_estimators",
-			"criterion",
 			"max_depth",
-			"max_features",
-			"min_samples_split",
-			"min_samples_leaf",
-			"bootstrap",
-			"max_samples",
+			"learning_rate",
+			"subsample",
+			"colsample_bytree",
+			"gamma",
+			"min_child_weight",
+			"reg_alpha",
+			"reg_lambda",
 			"random_state",
 			"n_jobs",
+			"tree_method",
+			"device",
+			"enable_categorical",
 		],
 	)
 
@@ -359,9 +394,9 @@ print(results)
 		"timestamp": timestamp,
 		"library": args.library,
 		"task": args.task,
-		"algorithm": "random_forest",
-		"estimator_class": "RandomForestRegressor",
-		"model_id": "sklearn.randomforestregressor",
+		"algorithm": "gradient_boosting",
+		"estimator_class": "XGBRegressor",
+		"model_id": "xgboost.xgbregressor",
 		"dataset": {
 			"path": str(data_path.relative_to(project_root)),
 			"sha256": data_hash,
@@ -401,6 +436,9 @@ print(results)
 			"estimator_params": _compact_metadata(estimator_params_compact),
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
+			"booster": args.booster,
+			"objective": "reg:squarederror",
+			"eval_metric": "rmse",
 		},
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
@@ -423,11 +461,12 @@ print(results)
 			"python": platform.python_version(),
 			"pandas": pd.__version__,
 			"scikit-learn": sklearn.__version__,
+			"xgboost": xgb.__version__,
 		},
 	}
-	run_metadata = _compact_metadata(run_metadata)
+	run_metadata = _compact_metadata(_json_safe(run_metadata))
 	with (run_dir / "run.json").open("w", encoding="utf-8") as run_file:
-		json.dump(run_metadata, run_file, indent=2)
+		json.dump(run_metadata, run_file, indent=2, allow_nan=False)
 
 	registry_path = model_root_dir / "model_registry.csv"
 	if registry_path.exists():
@@ -450,11 +489,18 @@ print(results)
 				"dataset_sha256": data_hash,
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
+				"booster": args.booster,
 				"random_state": int(args.random_state),
 				"mse": float(test_mse),
 				"mae": float(test_mae),
 				"rmse": float(test_rmse),
 				"r2": float(test_r2),
+				"max_error": float(test_max_error),
+				"train_mse": float(train_mse),
+				"train_mae": float(train_mae),
+				"train_rmse": float(train_rmse),
+				"train_r2": float(train_r2),
+				"train_max_error": float(train_max_error),
 				"n_train": int(len(X_train)),
 				"n_test": int(len(X_test)),
 			}

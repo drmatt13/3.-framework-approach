@@ -12,7 +12,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import sklearn
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import (
 	ConfusionMatrixDisplay,
 	accuracy_score,
@@ -35,23 +36,25 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
 #   --library scikit-learn
-#   --model random_forest
+#   --model logistic_regression
 #   --task binary_classification|multiclass_classification
 #   --name <model_name>
 #   --save-model true|false
 #   --random-state <int>
 #   --test-size <float>
+#   --max-iter <int>
+#   --early-stopping true|false
+#   --validation-fraction <float>
+#   --n-iter-no-change <int>
 # ---------------------------------------------------------------------
 
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
-DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
-DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
-DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
-DEFAULT_MAX_ESTIMATORS = 500
-DEFAULT_ESTIMATOR_STEP = 25
-MIN_ESTIMATORS_FOR_STOP = 100
+DEFAULT_EARLY_STOPPING = "True" == "True"
+DEFAULT_VALIDATION_FRACTION = float("0.1")
+DEFAULT_N_ITER_NO_CHANGE = int("5")
+DEFAULT_MAX_ITER = int("1000")
 METRIC_DECIMALS = 4
 RUN_SCHEMA_VERSION = "1.0"
 RUN_METADATA_PROFILE = "compact"
@@ -76,6 +79,19 @@ def _parse_bool(value: str) -> bool:
 	if normalized in {"0", "false", "no", "n"}:
 		return False
 	raise argparse.ArgumentTypeError("Expected true/false")
+
+
+def _resolved_n_iter(model_step) -> int | None:
+	n_iter_value = getattr(model_step, "n_iter_", None)
+	if n_iter_value is None:
+		return None
+	if hasattr(n_iter_value, "tolist"):
+		n_iter_value = n_iter_value.tolist()
+	if isinstance(n_iter_value, (list, tuple)):
+		if not n_iter_value:
+			return None
+		return int(max(n_iter_value))
+	return int(n_iter_value)
 
 
 def _post_transform_feature_count(preprocessor, sample_frame: pd.DataFrame) -> int | None:
@@ -122,24 +138,20 @@ def _select_estimator_params(params: dict, keys: list[str]) -> dict:
 	return {key: params.get(key) for key in keys if key in params}
 
 # Command-line argument parsing.
-parser = argparse.ArgumentParser(description="Random Forest Classifier baseline")
+parser = argparse.ArgumentParser(description="Logistic Regression baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
-parser.add_argument("--model", choices=["random_forest"], default="random_forest")
-parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
+parser.add_argument("--model", choices=["logistic_regression"], default="logistic_regression")
+parser.add_argument("--task", choices=["binary_classification"], default="binary_classification")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
+parser.add_argument("--max-iter", type=int, default=DEFAULT_MAX_ITER)
 parser.add_argument("--early-stopping", type=_parse_bool, default=DEFAULT_EARLY_STOPPING)
 parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
 parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
-
-project_root = _project_root()
-data_path = project_root / "data" / "template_data" / "{{DATA_FILE}}"
-df = pd.read_csv(data_path)
-df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -148,9 +160,14 @@ df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 # and artifact generation logic.
 
 # Load data.
-y = df["{{TARGET_COLUMN}}"]
-{{TARGET_PREPROCESS}} # type: ignore
-X = df.drop(columns={{FEATURE_DROP_COLUMNS}}) # type: ignore
+project_root = _project_root()
+data_path = project_root / "data" / "template_data" / "breast_cancer_wisconsin.csv"
+df = pd.read_csv(data_path)
+df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
+
+y = df["diagnosis"]
+y = y.map({"B": 0, "M": 1}).astype("int64") # type: ignore
+X = df.drop(columns=["diagnosis", "id"]) # type: ignore
 
 # =============================================================
 # ============== ADDITIONAL FEATURE ENGINEERING ===============
@@ -190,126 +207,77 @@ preprocessor = ColumnTransformer(
 )
 
 # Bundle preprocessing + model into one inference-ready pipeline.
-fit_time_seconds = 0.0
+# Input to inference should be raw feature columns.
 if args.early_stopping:
-	X_inner_train, X_valid, y_inner_train, y_valid = train_test_split(
-		X_train,
-		y_train,
-		test_size=args.validation_fraction,
+	classifier = SGDClassifier(
+		loss="log_loss",
+		max_iter=args.max_iter, # Upper bound on iterations; early stopping can halt earlier.
+		tol=1e-3, # This is the minimum change in the monitored metric to qualify as an improvement. Adjust as needed.
+		early_stopping=True, 
+		validation_fraction=args.validation_fraction,
+		n_iter_no_change=args.n_iter_no_change,
 		random_state=args.random_state,
-		stratify=y_train,
 	)
+	classifier_name = f"SGDClassifier(loss=log_loss, early_stopping=True, max_iter={args.max_iter})"
+else:
+	classifier = LogisticRegression(max_iter=args.max_iter)
+	classifier_name = f"LogisticRegression(max_iter={args.max_iter})"
 
-	inner_categorical_cols = X_inner_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-	inner_numerical_cols = X_inner_train.select_dtypes(include=["number"]).columns.tolist()
+model = Pipeline(
+	steps=[
+		("preprocess", preprocessor),
+		("classifier", classifier),
+	]
+)
 
+# Fit on training data (pipeline fits preprocessors + model).
+fit_started_at = time.perf_counter()
+model.fit(X_train, y_train)
+fit_time_seconds = float(time.perf_counter() - fit_started_at)
+
+classifier_step = model.named_steps["classifier"]
+resolved_n_iter = _resolved_n_iter(classifier_step)
+
+if args.early_stopping:
+	best_validation_score_raw = getattr(classifier_step, "best_score_", None)
+	if best_validation_score_raw is None:
+		validation_scores = getattr(classifier_step, "validation_scores_", None)
+		if validation_scores is not None:
+			if hasattr(validation_scores, "tolist"):
+				validation_scores = validation_scores.tolist()
+			if isinstance(validation_scores, (list, tuple)) and validation_scores:
+				best_validation_score_raw = max(validation_scores)
 	try:
-		inner_one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-	except TypeError:
-		inner_one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
+		best_validation_score = float(best_validation_score_raw) if best_validation_score_raw is not None else None
+	except (TypeError, ValueError):
+		best_validation_score = None
 
-	inner_preprocessor = ColumnTransformer(
-		transformers=[
-			("num", StandardScaler(), inner_numerical_cols),
-			("cat", inner_one_hot_encoder, inner_categorical_cols),
-		],
-		remainder="drop",
-	)
-
-	X_inner_train_processed = inner_preprocessor.fit_transform(X_inner_train)
-	X_valid_processed = inner_preprocessor.transform(X_valid)
-
-	search_classifier = RandomForestClassifier(
-		random_state=args.random_state,
-		warm_start=True,
-		n_estimators=0,
-	)
-
-	best_validation_balanced_accuracy = float("-inf")
-	best_n_estimators = DEFAULT_ESTIMATOR_STEP
-	rounds_without_improvement = 0
-	rounds_completed = 0
-
-	for n_estimators in range(DEFAULT_ESTIMATOR_STEP, DEFAULT_MAX_ESTIMATORS + 1, DEFAULT_ESTIMATOR_STEP):
-		search_classifier.set_params(n_estimators=n_estimators)
-		search_classifier.fit(X_inner_train_processed, y_inner_train)
-
-		validation_predictions = search_classifier.predict(X_valid_processed)
-		validation_balanced_accuracy = balanced_accuracy_score(y_valid, validation_predictions)
-		rounds_completed += 1
-
-		if validation_balanced_accuracy > (best_validation_balanced_accuracy + 1e-6):
-			best_validation_balanced_accuracy = float(validation_balanced_accuracy)
-			best_n_estimators = n_estimators
-			rounds_without_improvement = 0
-		else:
-			rounds_without_improvement += 1
-
-		if n_estimators >= MIN_ESTIMATORS_FOR_STOP and rounds_without_improvement >= args.n_iter_no_change:
-			break
-
-	model = Pipeline(
-		steps=[
-			("preprocess", preprocessor),
-			("classifier", RandomForestClassifier(random_state=args.random_state, n_estimators=best_n_estimators)),
-		]
-	)
-	fit_started_at = time.perf_counter()
-	model.fit(X_train, y_train)
-	fit_time_seconds = float(time.perf_counter() - fit_started_at)
-
-	model_selection = {
+	training_control = {
 		"enabled": True,
-		"type": "incremental_search",
-		"search_space": {
-			"n_estimators": {
-				"start": int(DEFAULT_ESTIMATOR_STEP),
-				"stop": int(DEFAULT_MAX_ESTIMATORS),
-				"step": int(DEFAULT_ESTIMATOR_STEP),
-			},
-		},
-		"metric": "balanced_accuracy",
-		"metric_split": "val",
-		"direction": "max",
-		"trials_completed": int(rounds_completed),
-		"best_trial_index": int(best_n_estimators // DEFAULT_ESTIMATOR_STEP),
-		"best_params": {"n_estimators": int(best_n_estimators)},
-		"best_score": _round_metric(best_validation_balanced_accuracy),
-		"stopped_early": bool(best_n_estimators < DEFAULT_MAX_ESTIMATORS),
+		"type": "iterative",
+		"max_steps_configured": int(args.max_iter),
+		"steps_completed": int(resolved_n_iter) if resolved_n_iter is not None else None,
 		"patience": int(args.n_iter_no_change),
+		"monitor_metric": "validation_score",
+		"monitor_split": "val",
+		"monitor_direction": "max",
+		"best_step": int(resolved_n_iter) if resolved_n_iter is not None else None,
+		"best_score": _round_metric(best_validation_score),
+		"stopped_early": bool(resolved_n_iter is not None and int(resolved_n_iter) < int(args.max_iter)),
 	}
 else:
-	model = Pipeline(
-		steps=[
-			("preprocess", preprocessor),
-			("classifier", RandomForestClassifier(random_state=args.random_state)),
-		]
-	)
-
-	# Fit on training data (pipeline fits preprocessors + model).
-	fit_started_at = time.perf_counter()
-	model.fit(X_train, y_train)
-	fit_time_seconds = float(time.perf_counter() - fit_started_at)
-
-	model_selection = {
+	training_control = {
 		"enabled": False,
-		"type": "incremental_search",
-		"search_space": {
-			"n_estimators": {
-				"start": int(DEFAULT_ESTIMATOR_STEP),
-				"stop": int(DEFAULT_MAX_ESTIMATORS),
-				"step": int(DEFAULT_ESTIMATOR_STEP),
-			},
-		},
-		"metric": "balanced_accuracy",
-		"metric_split": "val",
-		"direction": "max",
-		"trials_completed": 0,
-		"best_trial_index": None,
-		"best_params": {"n_estimators": int(model.named_steps["classifier"].n_estimators)},
+		"type": "iterative",
+		"max_steps_configured": int(args.max_iter),
+		"steps_completed": int(resolved_n_iter) if resolved_n_iter is not None else None,
+		"patience": int(args.n_iter_no_change),
+		"monitor_metric": None,
+		"monitor_split": None,
+		"monitor_direction": None,
+		"best_step": int(resolved_n_iter) if resolved_n_iter is not None else None,
 		"best_score": None,
 		"stopped_early": False,
-		"patience": int(args.n_iter_no_change),
 	}
 
 # Evaluate model on train/test splits.
@@ -343,6 +311,7 @@ test_logloss_value = None
 brier_score = None
 roc_curve_points = None
 y_test_binarized = None
+
 if hasattr(model, "predict_proba"):
 	train_probabilities = model.predict_proba(X_train)
 	probabilities = model.predict_proba(X_test)
@@ -363,6 +332,7 @@ if hasattr(model, "predict_proba"):
 				"threshold": thresholds,
 			}
 		)
+		# ROC curve points are saved for binary classification in this template.
 	else:
 		y_test_binarized = label_binarize(y_test, classes=classifier_classes)
 		test_roc_auc_macro_ovr = float(roc_auc_score(y_test_binarized, probabilities, multi_class="ovr", average="macro"))
@@ -372,25 +342,23 @@ if hasattr(model, "predict_proba"):
 # ---- Train Metrics (model fit on data it learned from) ----
 print("Train Accuracy:", _round_metric(train_accuracy))  # Proportion of correct predictions on training data
 print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged F1 on training set (equal weight per class)
-
 if train_logloss_value is not None:
-	print("Train Log Loss:", _round_metric(train_logloss_value))  # Cross-entropy loss on training set (probability confidence quality)
+	print("Train Log Loss:", _round_metric(train_logloss_value))  # Cross-entropy loss on training set (probability quality)
 
-# ---- Test Metrics (model generalization to unseen data) ----
-print("Test Accuracy:", _round_metric(test_accuracy))  # Overall proportion of correct predictions on unseen test data
-print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Average recall across classes (handles class imbalance)
-print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision (mean per-class precision)
-print("Test Recall Macro:", _round_metric(test_recall_macro))  # Macro-averaged recall (mean per-class recall)
-print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 score (harmonic mean of precision and recall per class)
-
-print("Test Support Total:", support_total)  # Total number of true test samples used for evaluation
-print("Test Support By Class:", support_by_class)  # True sample count per class (class distribution insight)
+# ---- Test Metrics (generalization to unseen data) ----
+print("Test Accuracy:", _round_metric(test_accuracy))  # Overall correctness on test set
+print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Mean recall across classes (robust to imbalance)
+print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision (mean of per-class precision)
+print("Test Recall Macro:", _round_metric(test_recall_macro))  # Macro-averaged recall (mean of per-class recall)
+print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 (harmonic mean of precision & recall per class)
+print("Test Support Total:", support_total)  # Total number of true samples in test set
+print("Test Support By Class:", support_by_class)  # True sample count per class (class distribution)
 
 if test_roc_auc_macro_ovr is not None:
-	print("Test ROC AUC Macro OVR:", _round_metric(test_roc_auc_macro_ovr))  # One-vs-Rest macro ROC-AUC (probability ranking quality)
+	print("Test ROC AUC Macro OVR:", _round_metric(test_roc_auc_macro_ovr))  # One-vs-Rest macro ROC-AUC (ranking quality across classes)
 
 if test_pr_auc_macro_ovr is not None:
-	print("Test PR AUC Macro OVR:", _round_metric(test_pr_auc_macro_ovr))  # One-vs-Rest macro Precision-Recall AUC (imbalance-sensitive metric)
+	print("Test PR AUC Macro OVR:", _round_metric(test_pr_auc_macro_ovr))  # One-vs-Rest macro PR-AUC (precision-recall tradeoff)
 
 if test_logloss_value is not None:
 	print("Test Log Loss:", _round_metric(test_logloss_value))  # Cross-entropy loss on test set (penalizes confident wrong predictions)
@@ -398,12 +366,12 @@ if test_logloss_value is not None:
 if brier_score is not None:
 	print("Test Brier Score:", _round_metric(brier_score))  # Mean squared error of predicted probabilities (calibration metric)
 
-if model_selection["enabled"]:
-	print("Model Selection Best Trial:", model_selection["best_trial_index"])
-	print("Model Selection Best Params:", model_selection["best_params"])
-	print("Model Selection Best Score:", model_selection["best_score"])
+if training_control["enabled"]:
+	print("Training Control Best Step:", training_control["best_step"])
+	print("Training Control Best Score:", training_control["best_score"])
 
-print("First 5 predictions:", predictions[:5])  # Sample predictions for quick sanity check of output classes
+print("Classifier:", classifier_name)  # Model identifier for experiment tracking
+print("First 5 predictions:", predictions[:5])  # Quick sanity check of output classes
 
 # =============================================================
 # ==================== MODEL CODE ENDS HERE ===================
@@ -412,6 +380,7 @@ print("First 5 predictions:", predictions[:5])  # Sample predictions for quick s
 
 # Artifact export and registry logging.
 if SAVE_MODEL:
+	project_root = _project_root()
 	model_name = args.name.strip() or Path(__file__).stem
 	model_root_dir = project_root / "artifacts" / "models" / model_name
 	timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -431,11 +400,14 @@ if SAVE_MODEL:
 		directory.mkdir(parents=True, exist_ok=True)
 
 	with (model_dir / "model.pkl").open("wb") as model_file:
+		# Saves full inference-ready pipeline: preprocess + classifier.
 		pickle.dump(model, model_file)
 
 	with (preprocess_dir / "preprocessor.pkl").open("wb") as preprocess_file:
 		pickle.dump(model.named_steps["preprocess"], preprocess_file)
 
+	n_val_metrics = int(len(X_train) * float(args.validation_fraction)) if training_control["enabled"] else 0
+	n_train_effective_metrics = int(len(X_train) - n_val_metrics)
 	metrics = {
 		"train": {
 			"accuracy": _round_metric(train_accuracy),
@@ -464,8 +436,8 @@ if SAVE_MODEL:
 			"support_by_class": support_by_class,
 		},
 		"data_sizes": {
-			"n_train": int(len(X_train)),
-			"n_val": int(len(X_valid)) if model_selection["enabled"] else 0,
+			"n_train": n_train_effective_metrics,
+			"n_val": n_val_metrics,
 			"n_test": int(len(X_test)),
 		},
 		"primary_metric": {
@@ -479,7 +451,7 @@ if SAVE_MODEL:
 			"calibrated": False if hasattr(model, "predict_proba") else None,
 			"calibration_method": None,
 		},
-		"model_selection": model_selection,
+		"training_control": training_control,
 	}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
 		json.dump(metrics, metrics_file, indent=2)
@@ -538,6 +510,8 @@ if SAVE_MODEL:
 	)
 	predictions_preview.to_csv(eval_dir / "predictions_preview.csv", index=False)
 
+	# Example inference rows are kept in raw feature format on purpose.
+	# Do NOT pre-one-hot-encode these rows; model.pkl handles preprocessing.
 	inference_rows = X_test.iloc[:5].to_dict(orient="records")
 	expected_values = y_test.iloc[:5].tolist()
 	inference_script = f'''import pickle
@@ -569,7 +543,7 @@ print(results)
 		inference_file.write(inference_script)
 
 	feature_schema = {
-		"target": "{{TARGET_COLUMN}}",
+		"target": "diagnosis",
 		"feature_columns": X.columns.tolist(),
 		"categorical_columns": categorical_cols,
 		"numerical_columns": numerical_cols,
@@ -579,25 +553,52 @@ print(results)
 		json.dump(feature_schema, schema_file, indent=2)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
-	n_val = int(len(X_valid)) if model_selection["enabled"] else 0
-	n_train_effective = int(len(X_inner_train)) if model_selection["enabled"] else int(len(X_train))
-	classifier_params = model.named_steps["classifier"].get_params()
-	estimator_params_compact = _select_estimator_params(
-		classifier_params,
-		[
-			"n_estimators",
-			"criterion",
-			"max_depth",
-			"max_features",
-			"min_samples_split",
-			"min_samples_leaf",
-			"class_weight",
-			"bootstrap",
-			"max_samples",
-			"random_state",
-			"n_jobs",
-		],
-	)
+	n_val = int(len(X_train) * float(args.validation_fraction)) if training_control["enabled"] else 0
+	n_train_effective = int(len(X_train) - n_val)
+	estimator_class = classifier_step.__class__.__name__
+	estimator_params = classifier_step.get_params()
+	if estimator_class == "SGDClassifier":
+		estimator_params_compact = _select_estimator_params(
+			estimator_params,
+			[
+				"loss",
+				"penalty",
+				"alpha",
+				"l1_ratio",
+				"fit_intercept",
+				"max_iter",
+				"tol",
+				"shuffle",
+				"random_state",
+				"learning_rate",
+				"eta0",
+				"power_t",
+				"early_stopping",
+				"validation_fraction",
+				"n_iter_no_change",
+				"class_weight",
+				"n_jobs",
+				"warm_start",
+				"average",
+			],
+		)
+	else:
+		estimator_params_compact = _select_estimator_params(
+			estimator_params,
+			[
+				"penalty",
+				"C",
+				"fit_intercept",
+				"solver",
+				"max_iter",
+				"multi_class",
+				"class_weight",
+				"random_state",
+				"n_jobs",
+				"l1_ratio",
+				"tol",
+			],
+		)
 
 	run_metadata = {
 		"schema_version": RUN_SCHEMA_VERSION,
@@ -607,9 +608,9 @@ print(results)
 		"timestamp": timestamp,
 		"library": args.library,
 		"task": args.task,
-		"algorithm": "random_forest",
-		"estimator_class": "RandomForestClassifier",
-		"model_id": "sklearn.randomforestclassifier",
+		"algorithm": "logistic_regression",
+		"estimator_class": estimator_class,
+		"model_id": "sklearn.sgdclassifier.log_loss" if estimator_class == "SGDClassifier" else "sklearn.logisticregression",
 		"dataset": {
 			"path": str(data_path.relative_to(project_root)),
 			"sha256": data_hash,
@@ -622,10 +623,10 @@ print(results)
 			"random_state": int(args.random_state),
 			"stratify": True,
 			"validation": {
-				"enabled": bool(model_selection["enabled"]),
-				"strategy": "explicit_split" if model_selection["enabled"] else None,
-				"validation_fraction": float(args.validation_fraction) if model_selection["enabled"] else None,
-				"random_state": int(args.random_state) if model_selection["enabled"] else None,
+				"enabled": bool(training_control["enabled"]),
+				"strategy": "fraction" if training_control["enabled"] else None,
+				"validation_fraction": float(args.validation_fraction) if training_control["enabled"] else None,
+				"random_state": int(args.random_state) if training_control["enabled"] else None,
 			},
 			"sizes": {
 				"n_rows": data_rows,
@@ -649,13 +650,23 @@ print(results)
 			"estimator_params": _compact_metadata(estimator_params_compact),
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
+			"max_iter": int(args.max_iter),
 		},
-		"model_selection": model_selection,
+		"optimization": {
+			"optimizer": "sgd" if estimator_class == "SGDClassifier" else None,
+			"learning_rate": estimator_params.get("eta0") if estimator_class == "SGDClassifier" else None,
+			"batch_size": None,
+			"epochs_configured": None,
+			"epochs_completed": None,
+			"gradient_clip_norm": None,
+			"lr_scheduler": estimator_params.get("learning_rate") if estimator_class == "SGDClassifier" else None,
+		},
+		"training_control": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),
 			"random_state_effective": int(args.random_state),
-			"n_jobs": classifier_params.get("n_jobs"),
+			"n_jobs": estimator_params.get("n_jobs"),
 		},
 		"artifacts": _artifact_map(
 			run_dir,
@@ -704,11 +715,10 @@ print(results)
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
-				"model_selection_enabled": bool(model_selection["enabled"]),
-				"model_selection_best_score": float(model_selection["best_score"]) if model_selection["best_score"] is not None else None,
-				"model_selection_best_trial_index": int(model_selection["best_trial_index"]) if model_selection["best_trial_index"] is not None else None,
-				"model_selection_best_n_estimators": int(model_selection["best_params"]["n_estimators"]) if model_selection["best_params"] is not None else None,
-				"model_selection_stopped_early": bool(model_selection["stopped_early"]),
+				"training_control_enabled": bool(training_control["enabled"]),
+				"training_control_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
+				"training_control_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
+				"training_control_stopped_early": bool(training_control["stopped_early"]),
 				"accuracy": float(test_accuracy),
 				"balanced_accuracy": float(test_balanced_accuracy),
 				"precision_macro": float(test_precision_macro),
@@ -722,7 +732,7 @@ print(results)
 				"train_accuracy": float(train_accuracy),
 				"train_f1_macro": float(train_f1_macro),
 				"train_log_loss": float(train_logloss_value) if train_logloss_value is not None else None,
-				"n_train": int(len(X_train)),
+				"n_train": n_train_effective,
 				"n_test": int(len(X_test)),
 			}
 		]

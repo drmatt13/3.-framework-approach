@@ -139,13 +139,80 @@ def main() -> int:
             return result.returncode
 
     # ---------------------------------------------------------
-    # xgboost (not invoked yet; uncomment when templates/workflow are ready)
+    # xgboost (invoked)
     # ---------------------------------------------------------
-    # [python_executable, str(generator_path), "--library", "xgboost", "--task", "regression", "--name", f"xgboost_regression_{run_stamp}"]
-    # [python_executable, str(generator_path), "--library", "xgboost", "--task", "binary_classification", "--name", f"xgboost_binary_{run_stamp}"]
-    # [python_executable, str(generator_path), "--library", "xgboost", "--task", "multiclass_classification", "--name", f"xgboost_multiclass_{run_stamp}"]
-    # Optional booster examples:
-    # [python_executable, str(generator_path), "--library", "xgboost", "--task", "regression", "--booster", "gbtree", "--name", f"xgboost_regression_gbtree_{run_stamp}"]
+    #   --library=xgboost
+    #   --task=regression|binary_classification|multiclass_classification
+    #   --name=...
+    #   (optional) --booster=gbtree|gblinear|dart
+
+    xgboost_jobs = [
+        (
+            [
+            python_executable,
+            str(generator_path),
+            "--library",
+            "xgboost",
+            "--task",
+            "regression",
+            ],
+            f"xgboost_regression_{run_stamp}",
+        ),
+        (
+            [
+            python_executable,
+            str(generator_path),
+            "--library",
+            "xgboost",
+            "--task",
+            "binary_classification",
+            ],
+            f"xgboost_binary_{run_stamp}",
+        ),
+        (
+            [
+            python_executable,
+            str(generator_path),
+            "--library",
+            "xgboost",
+            "--task",
+            "multiclass_classification",
+            ],
+            f"xgboost_multiclass_{run_stamp}",
+        ),
+        (
+            [
+            python_executable,
+            str(generator_path),
+            "--library",
+            "xgboost",
+            "--task",
+            "regression",
+            "--booster",
+            "dart",
+            ],
+            f"xgboost_regression_dart_{run_stamp}",
+        ),
+    ]
+
+    print("\nRunning xgboost generation + training matrix...")
+    for command, model_name in xgboost_jobs:
+        generate_command = command + ["--name", model_name]
+        print("\nRunning:")
+        print("  " + " ".join(generate_command))
+        result = subprocess.run(generate_command, cwd=workspace_root)
+        if result.returncode != 0:
+            print("\nStopped due to generation failure.", file=sys.stderr)
+            return result.returncode
+
+        model_script = models_dir / f"{model_name}.py"
+        run_command = [python_executable, str(model_script), "--save-model=true"]
+        print("\nRunning:")
+        print("  " + " ".join(run_command))
+        result = subprocess.run(run_command, cwd=workspace_root)
+        if result.returncode != 0:
+            print("\nStopped due to command failure.", file=sys.stderr)
+            return result.returncode
 
     # ---------------------------------------------------------
     # tensorflow (not invoked yet; uncomment when templates/workflow are ready)
@@ -165,8 +232,8 @@ def main() -> int:
     # [python_executable, str(generator_path), "--library", "tensorflow", "--model", "cnn", "--task", "binary_classification", "--optimizer", "adam", "--learning_rate", "0.001", "--epochs", "10", "--batch_size", "32", "--name", f"tensorflow_cnn_binary_{run_stamp}"]
     # [python_executable, str(generator_path), "--library", "tensorflow", "--model", "cnn", "--task", "multiclass_classification", "--optimizer", "adam", "--learning_rate", "0.001", "--epochs", "10", "--batch_size", "32", "--name", f"tensorflow_cnn_multiclass_{run_stamp}"]
 
-    print("\nDone. Generated and ran one model for each scikit-learn task combination.")
-    print("xgboost/tensorflow commands are left commented in this script for later.")
+    print("\nDone. Generated and ran scikit-learn and xgboost task combinations.")
+    print("tensorflow commands are left commented in this script for later.")
     return 0
 
 

@@ -26,7 +26,11 @@ import sys
 #   --model=random_forest 
 #   --task=regression|binary_classification|multiclass_classification 
 #   --name=...
-
+#
+#   Generated classification template runtime options (configurable defaults):
+#   --early-stopping=true|false
+#   --validation-fraction=<float>
+#   --n-iter-no-change=<int>
 
 # xgboost
 # ---------------------------------------------------------
@@ -37,7 +41,11 @@ import sys
 #
 #   (optional)
 #   --booster=gbtree|gblinear|dart
-
+#
+#   Generated classification template runtime options (configurable defaults):
+#   --early-stopping=true|false
+#   --validation-fraction=<float>
+#   --n-iter-no-change=<int>
 
 # tensorflow
 # ---------------------------------------------------------
@@ -89,6 +97,28 @@ OPTIMIZER_CLASS_MAP = {
     "adamw": "tf.keras.optimizers.AdamW",
 }
 
+DEFAULT_EARLY_STOPPING_BY_TEMPLATE = {
+    ("scikit-learn", "logistic_regression", "classification"): True,
+    ("scikit-learn", "random_forest", "classification"): True,
+    ("xgboost", None, "classification"): True,
+}
+
+DEFAULT_VALIDATION_FRACTION_BY_TEMPLATE = {
+    ("scikit-learn", "logistic_regression", "classification"): 0.1,
+    ("scikit-learn", "random_forest", "classification"): 0.1,
+    ("xgboost", None, "classification"): 0.1,
+}
+
+DEFAULT_N_ITER_NO_CHANGE_BY_TEMPLATE = {
+    ("scikit-learn", "logistic_regression", "classification"): 5,
+    ("scikit-learn", "random_forest", "classification"): 5,
+    ("xgboost", None, "classification"): 20,
+}
+
+DEFAULT_MAX_ITER_BY_TEMPLATE = {
+    ("scikit-learn", "logistic_regression", "classification"): 1000,
+}
+
 
 # ---------------------------------------------------------
 # Templates
@@ -115,6 +145,29 @@ def render_template(template: str, replacements: dict[str, str]) -> str:
     return rendered
 
 
+def _parse_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y"}:
+        return True
+    if normalized in {"0", "false", "no", "n"}:
+        return False
+    raise argparse.ArgumentTypeError("Expected true/false")
+
+
+def _supports_early_stopping_defaults(args: argparse.Namespace) -> bool:
+    family = task_family(args.task)
+    if family != "classification":
+        return False
+    if args.library == "xgboost":
+        return True
+    return args.library == "scikit-learn" and args.model in {"logistic_regression", "random_forest"}
+
+
+def _supports_max_iter_default(args: argparse.Namespace) -> bool:
+    family = task_family(args.task)
+    return args.library == "scikit-learn" and args.model == "logistic_regression" and family == "classification"
+
+
 def template_filename(args: argparse.Namespace) -> str:
     family = task_family(args.task)
 
@@ -131,7 +184,11 @@ def template_filename(args: argparse.Namespace) -> str:
             )
 
     if args.library == "xgboost":
-        return "xgboost_template.py"
+        return (
+            "xgboost_regression_template.py"
+            if family == "regression"
+            else "xgboost_classification_template.py"
+        )
 
     if args.library == "tensorflow":
         if args.model == "dense_nn":
@@ -153,6 +210,35 @@ def template_filename(args: argparse.Namespace) -> str:
 def template_replacements(args: argparse.Namespace) -> dict[str, str]:
     family = task_family(args.task)
     replacements: dict[str, str] = {}
+
+    if _supports_early_stopping_defaults(args):
+        key = (args.library, args.model if args.library == "scikit-learn" else None, family)
+        early_stopping_default = args.default_early_stopping
+        if early_stopping_default is None:
+            early_stopping_default = DEFAULT_EARLY_STOPPING_BY_TEMPLATE[key]
+
+        validation_fraction_default = args.default_validation_fraction
+        if validation_fraction_default is None:
+            validation_fraction_default = DEFAULT_VALIDATION_FRACTION_BY_TEMPLATE[key]
+
+        n_iter_no_change_default = args.default_n_iter_no_change
+        if n_iter_no_change_default is None:
+            n_iter_no_change_default = DEFAULT_N_ITER_NO_CHANGE_BY_TEMPLATE[key]
+
+        replacements.update(
+            {
+                "EARLY_STOPPING_DEFAULT": "True" if early_stopping_default else "False",
+                "VALIDATION_FRACTION_DEFAULT": str(validation_fraction_default),
+                "N_ITER_NO_CHANGE_DEFAULT": str(n_iter_no_change_default),
+            }
+        )
+
+    if _supports_max_iter_default(args):
+        key = ("scikit-learn", "logistic_regression", family)
+        max_iter_default = args.default_max_iter
+        if max_iter_default is None:
+            max_iter_default = DEFAULT_MAX_ITER_BY_TEMPLATE[key]
+        replacements.update({"MAX_ITER_DEFAULT": str(int(max_iter_default))})
 
     if args.library == "scikit-learn" and args.model == "logistic_regression":
         if args.task == "binary_classification":
@@ -204,54 +290,33 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         if args.task == "regression":
             replacements.update(
                 {
-                    "XGB_ESTIMATOR": "XGBRegressor",
                     "TASK_VALUE": args.task,
-                    "SKLEARN_METRIC_IMPORT": "from sklearn.metrics import mean_squared_error",
                     "DATA_FILE": "california_housing.csv",
                     "TARGET_COLUMN": "median_house_value",
                     "FEATURE_DROP_COLUMNS": '["median_house_value"]',
-                    "TARGET_PREPROCESS": "",
-                    "STRATIFY_ARG": "",
-                    "XGB_TASK_KWARGS": 'objective="reg:squarederror", eval_metric="rmse"',
-                    "PREDICTION_POST_PROCESS": "",
-                    "METRIC_LABEL": "MSE",
-                    "METRIC_CALL": "mean_squared_error(y_test, predictions)",
+                    "TARGET_PREPROCESS": 'y = y.astype("float64")',
                     "BOOSTER": booster,
                 }
             )
         elif args.task == "binary_classification":
             replacements.update(
                 {
-                    "XGB_ESTIMATOR": "XGBClassifier",
                     "TASK_VALUE": args.task,
-                    "SKLEARN_METRIC_IMPORT": "from sklearn.metrics import accuracy_score",
                     "DATA_FILE": "breast_cancer_wisconsin.csv",
                     "TARGET_COLUMN": "diagnosis",
                     "FEATURE_DROP_COLUMNS": '["diagnosis", "id"]',
                     "TARGET_PREPROCESS": 'y = y.map({"B": 0, "M": 1}).astype("int64")',
-                    "STRATIFY_ARG": "stratify=y",
-                    "XGB_TASK_KWARGS": 'objective="binary:logistic", eval_metric="logloss"',
-                    "PREDICTION_POST_PROCESS": "",
-                    "METRIC_LABEL": "Accuracy",
-                    "METRIC_CALL": "accuracy_score(y_test, predictions)",
                     "BOOSTER": booster,
                 }
             )
         else:
             replacements.update(
                 {
-                    "XGB_ESTIMATOR": "XGBClassifier",
                     "TASK_VALUE": args.task,
-                    "SKLEARN_METRIC_IMPORT": "from sklearn.metrics import accuracy_score",
                     "DATA_FILE": "iris.csv",
                     "TARGET_COLUMN": "species",
                     "FEATURE_DROP_COLUMNS": '["species"]',
                     "TARGET_PREPROCESS": 'y = y.astype("category").cat.codes.astype("int64")',
-                    "STRATIFY_ARG": "stratify=y",
-                    "XGB_TASK_KWARGS": 'objective="multi:softprob", num_class=3, eval_metric="mlogloss"',
-                    "PREDICTION_POST_PROCESS": "if predictions.ndim > 1:\n    predictions = np.argmax(predictions, axis=1)",
-                    "METRIC_LABEL": "Accuracy",
-                    "METRIC_CALL": "accuracy_score(y_test, predictions)",
                     "BOOSTER": booster,
                 }
             )
@@ -311,6 +376,24 @@ def validate_args(args: argparse.Namespace) -> None:
         allowed = ", ".join(sorted(TASKS))
         raise ValueError(f"Invalid --task '{args.task}'. Allowed: {allowed}")
 
+    if args.default_validation_fraction is not None and not (0.0 < args.default_validation_fraction < 1.0):
+        raise ValueError("Invalid --default-validation-fraction. Allowed range: 0 < value < 1")
+    if args.default_n_iter_no_change is not None and args.default_n_iter_no_change <= 0:
+        raise ValueError("Invalid --default-n-iter-no-change. Must be a positive integer")
+    if args.default_max_iter is not None and args.default_max_iter <= 0:
+        raise ValueError("Invalid --default-max-iter. Must be a positive integer")
+
+    early_stopping_defaults_provided = any(
+        value is not None
+        for value in (
+            args.default_early_stopping,
+            args.default_validation_fraction,
+            args.default_n_iter_no_change,
+        )
+    )
+
+    max_iter_default_provided = args.default_max_iter is not None
+
     if args.library == "xgboost":
         if args.model is not None:
             raise ValueError("Invalid flags: xgboost does not use --model. Omit --model entirely.")
@@ -319,6 +402,13 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"Invalid xgboost --booster '{args.booster}'. Allowed: {allowed}")
         if args.optimizer is not None or args.learning_rate is not None or args.epochs is not None or args.batch_size is not None:
             raise ValueError("Invalid flags: --optimizer/--learning_rate/--epochs/--batch_size are tensorflow-only")
+        if early_stopping_defaults_provided and not _supports_early_stopping_defaults(args):
+            raise ValueError(
+                "Invalid flags: --default-early-stopping/--default-validation-fraction/"
+                "--default-n-iter-no-change are only supported for classification templates"
+            )
+        if max_iter_default_provided:
+            raise ValueError("Invalid flag: --default-max-iter is not supported for xgboost")
         return
 
     if args.library == "scikit-learn":
@@ -335,6 +425,15 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError("Invalid flags: --booster is xgboost-only")
         if args.optimizer is not None or args.learning_rate is not None or args.epochs is not None or args.batch_size is not None:
             raise ValueError("Invalid flags: --optimizer/--learning_rate/--epochs/--batch_size are tensorflow-only")
+        if early_stopping_defaults_provided and not _supports_early_stopping_defaults(args):
+            raise ValueError(
+                "Invalid flags: --default-early-stopping/--default-validation-fraction/"
+                "--default-n-iter-no-change are only supported for classification templates"
+            )
+        if max_iter_default_provided and not _supports_max_iter_default(args):
+            raise ValueError(
+                "Invalid flag: --default-max-iter is only supported for scikit-learn logistic_regression classification templates"
+            )
         return
 
     if args.library == "tensorflow":
@@ -360,6 +459,13 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError("--epochs is required for tensorflow")
         if args.batch_size is None:
             raise ValueError("--batch_size is required for tensorflow")
+        if early_stopping_defaults_provided:
+            raise ValueError(
+                "Invalid flags: --default-early-stopping/--default-validation-fraction/"
+                "--default-n-iter-no-change are not supported for tensorflow"
+            )
+        if max_iter_default_provided:
+            raise ValueError("Invalid flag: --default-max-iter is not supported for tensorflow")
         return
 
     raise ValueError(f"Unsupported library: {args.library}")
@@ -393,6 +499,30 @@ def main():
         required=False,
         choices=["gbtree", "gblinear", "dart"],
         help="xgboost booster (optional; xgboost only)",
+    )
+    parser.add_argument(
+        "--default-max-iter",
+        type=int,
+        required=False,
+        help="Default value injected into generated logistic classification template --max-iter flag",
+    )
+    parser.add_argument(
+        "--default-early-stopping",
+        type=_parse_bool,
+        required=False,
+        help="Default value injected into generated classification template --early-stopping flag",
+    )
+    parser.add_argument(
+        "--default-validation-fraction",
+        type=float,
+        required=False,
+        help="Default value injected into generated classification template --validation-fraction flag",
+    )
+    parser.add_argument(
+        "--default-n-iter-no-change",
+        type=int,
+        required=False,
+        help="Default value injected into generated classification template --n-iter-no-change flag",
     )
     parser.add_argument(
         "--optimizer",

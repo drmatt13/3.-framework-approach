@@ -3,6 +3,7 @@ import hashlib
 import json
 import pickle
 import platform
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -50,11 +51,15 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
-EARLY_STOPPING = True
-DEFAULT_MAX_ITER = 1000
+DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
+DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
+DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
+DEFAULT_MAX_ITER = int("{{MAX_ITER_DEFAULT}}")
 METRIC_DECIMALS = 4
+RUN_SCHEMA_VERSION = "1.0"
+RUN_METADATA_PROFILE = "compact"
 
-
+# Helper function: round metrics for cleaner output.
 def _round_metric(value):
 	return None if value is None else round(float(value), METRIC_DECIMALS)
 
@@ -75,6 +80,63 @@ def _parse_bool(value: str) -> bool:
 		return False
 	raise argparse.ArgumentTypeError("Expected true/false")
 
+
+def _resolved_n_iter(model_step) -> int | None:
+	n_iter_value = getattr(model_step, "n_iter_", None)
+	if n_iter_value is None:
+		return None
+	if hasattr(n_iter_value, "tolist"):
+		n_iter_value = n_iter_value.tolist()
+	if isinstance(n_iter_value, (list, tuple)):
+		if not n_iter_value:
+			return None
+		return int(max(n_iter_value))
+	return int(n_iter_value)
+
+
+def _post_transform_feature_count(preprocessor, sample_frame: pd.DataFrame) -> int | None:
+	try:
+		transformed = preprocessor.transform(sample_frame)
+		return int(transformed.shape[1])
+	except Exception:
+		return None
+
+
+def _artifact_map(base_dir: Path, artifacts: dict[str, Path]) -> dict[str, str]:
+	resolved: dict[str, str] = {}
+	for key, path in artifacts.items():
+		if path.exists():
+			resolved[key] = str(path.relative_to(base_dir))
+	return resolved
+
+
+def _compact_metadata(value):
+	if isinstance(value, dict):
+		compacted = {}
+		for key, item in value.items():
+			compacted_item = _compact_metadata(item)
+			if compacted_item is None:
+				continue
+			if isinstance(compacted_item, (dict, list)) and len(compacted_item) == 0:
+				continue
+			compacted[key] = compacted_item
+		return compacted
+	if isinstance(value, list):
+		compacted_list = []
+		for item in value:
+			compacted_item = _compact_metadata(item)
+			if compacted_item is None:
+				continue
+			if isinstance(compacted_item, (dict, list)) and len(compacted_item) == 0:
+				continue
+			compacted_list.append(compacted_item)
+		return compacted_list
+	return value
+
+
+def _select_estimator_params(params: dict, keys: list[str]) -> dict:
+	return {key: params.get(key) for key in keys if key in params}
+
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Logistic Regression baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
@@ -85,9 +147,9 @@ parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
 parser.add_argument("--max-iter", type=int, default=DEFAULT_MAX_ITER)
-parser.add_argument("--early-stopping", type=_parse_bool, default=EARLY_STOPPING)
-parser.add_argument("--validation-fraction", type=float, default=0.1)
-parser.add_argument("--n-iter-no-change", type=int, default=5)
+parser.add_argument("--early-stopping", type=_parse_bool, default=DEFAULT_EARLY_STOPPING)
+parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
+parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 
@@ -104,8 +166,8 @@ df = pd.read_csv(data_path)
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 
 y = df["{{TARGET_COLUMN}}"]
-{{TARGET_PREPROCESS}}
-X = df.drop(columns={{FEATURE_DROP_COLUMNS}})
+{{TARGET_PREPROCESS}} # type: ignore
+X = df.drop(columns={{FEATURE_DROP_COLUMNS}}) # type: ignore
 
 # =============================================================
 # ============== ADDITIONAL FEATURE ENGINEERING ===============
@@ -169,11 +231,60 @@ model = Pipeline(
 )
 
 # Fit on training data (pipeline fits preprocessors + model).
+fit_started_at = time.perf_counter()
 model.fit(X_train, y_train)
+fit_time_seconds = float(time.perf_counter() - fit_started_at)
+
+classifier_step = model.named_steps["classifier"]
+resolved_n_iter = _resolved_n_iter(classifier_step)
+
+if args.early_stopping:
+	best_validation_score_raw = getattr(classifier_step, "best_score_", None)
+	if best_validation_score_raw is None:
+		validation_scores = getattr(classifier_step, "validation_scores_", None)
+		if validation_scores is not None:
+			if hasattr(validation_scores, "tolist"):
+				validation_scores = validation_scores.tolist()
+			if isinstance(validation_scores, (list, tuple)) and validation_scores:
+				best_validation_score_raw = max(validation_scores)
+	try:
+		best_validation_score = float(best_validation_score_raw) if best_validation_score_raw is not None else None
+	except (TypeError, ValueError):
+		best_validation_score = None
+
+	training_control = {
+		"enabled": True,
+		"type": "iterative",
+		"max_steps_configured": int(args.max_iter),
+		"steps_completed": int(resolved_n_iter) if resolved_n_iter is not None else None,
+		"patience": int(args.n_iter_no_change),
+		"monitor_metric": "validation_score",
+		"monitor_split": "val",
+		"monitor_direction": "max",
+		"best_step": int(resolved_n_iter) if resolved_n_iter is not None else None,
+		"best_score": _round_metric(best_validation_score),
+		"stopped_early": bool(resolved_n_iter is not None and int(resolved_n_iter) < int(args.max_iter)),
+	}
+else:
+	training_control = {
+		"enabled": False,
+		"type": "iterative",
+		"max_steps_configured": int(args.max_iter),
+		"steps_completed": int(resolved_n_iter) if resolved_n_iter is not None else None,
+		"patience": int(args.n_iter_no_change),
+		"monitor_metric": None,
+		"monitor_split": None,
+		"monitor_direction": None,
+		"best_step": int(resolved_n_iter) if resolved_n_iter is not None else None,
+		"best_score": None,
+		"stopped_early": False,
+	}
 
 # Evaluate model on train/test splits.
+predict_started_at = time.perf_counter()
 train_predictions = model.predict(X_train)
 predictions = model.predict(X_test)
+predict_time_seconds = float(time.perf_counter() - predict_started_at)
 classifier_classes = model.named_steps["classifier"].classes_
 train_accuracy = accuracy_score(y_train, train_predictions)
 train_f1_macro = f1_score(y_train, train_predictions, average="macro", zero_division=0)
@@ -255,6 +366,10 @@ if test_logloss_value is not None:
 if brier_score is not None:
 	print("Test Brier Score:", _round_metric(brier_score))  # Mean squared error of predicted probabilities (calibration metric)
 
+if training_control["enabled"]:
+	print("Training Control Best Step:", training_control["best_step"])
+	print("Training Control Best Score:", training_control["best_score"])
+
 print("Classifier:", classifier_name)  # Model identifier for experiment tracking
 print("First 5 predictions:", predictions[:5])  # Quick sanity check of output classes
 
@@ -291,6 +406,8 @@ if SAVE_MODEL:
 	with (preprocess_dir / "preprocessor.pkl").open("wb") as preprocess_file:
 		pickle.dump(model.named_steps["preprocess"], preprocess_file)
 
+	n_val_metrics = int(len(X_train) * float(args.validation_fraction)) if training_control["enabled"] else 0
+	n_train_effective_metrics = int(len(X_train) - n_val_metrics)
 	metrics = {
 		"train": {
 			"accuracy": _round_metric(train_accuracy),
@@ -303,13 +420,38 @@ if SAVE_MODEL:
 			"precision_macro": _round_metric(test_precision_macro),
 			"recall_macro": _round_metric(test_recall_macro),
 			"f1_macro": _round_metric(test_f1_macro),
-			"roc_auc_macro_ovr": _round_metric(test_roc_auc_macro_ovr),
-			"pr_auc_macro_ovr": _round_metric(test_pr_auc_macro_ovr),
+			"roc_auc": {
+				"average": "macro",
+				"multi_class": "ovr",
+				"value": _round_metric(test_roc_auc_macro_ovr),
+			},
+			"pr_auc": {
+				"average": "macro",
+				"multi_class": "ovr",
+				"value": _round_metric(test_pr_auc_macro_ovr),
+			},
 			"log_loss": _round_metric(test_logloss_value),
 			"brier_score": _round_metric(brier_score),
 			"support_total": support_total,
 			"support_by_class": support_by_class,
 		},
+		"data_sizes": {
+			"n_train": n_train_effective_metrics,
+			"n_val": n_val_metrics,
+			"n_test": int(len(X_test)),
+		},
+		"primary_metric": {
+			"name": "f1_macro" if args.task == "multiclass_classification" else "roc_auc",
+			"split": "test",
+			"direction": "max",
+			"value": _round_metric(test_f1_macro) if args.task == "multiclass_classification" else _round_metric(test_roc_auc_macro_ovr),
+		},
+		"probabilities": {
+			"source": "predict_proba" if hasattr(model, "predict_proba") else None,
+			"calibrated": False if hasattr(model, "predict_proba") else None,
+			"calibration_method": None,
+		},
+		"training_control": training_control,
 	}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
 		json.dump(metrics, metrics_file, indent=2)
@@ -410,48 +552,144 @@ print(results)
 	with (data_dir / "feature_schema.json").open("w", encoding="utf-8") as schema_file:
 		json.dump(feature_schema, schema_file, indent=2)
 
+	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
+	n_val = int(len(X_train) * float(args.validation_fraction)) if training_control["enabled"] else 0
+	n_train_effective = int(len(X_train) - n_val)
+	estimator_class = classifier_step.__class__.__name__
+	estimator_params = classifier_step.get_params()
+	if estimator_class == "SGDClassifier":
+		estimator_params_compact = _select_estimator_params(
+			estimator_params,
+			[
+				"loss",
+				"penalty",
+				"alpha",
+				"l1_ratio",
+				"fit_intercept",
+				"max_iter",
+				"tol",
+				"shuffle",
+				"random_state",
+				"learning_rate",
+				"eta0",
+				"power_t",
+				"early_stopping",
+				"validation_fraction",
+				"n_iter_no_change",
+				"class_weight",
+				"n_jobs",
+				"warm_start",
+				"average",
+			],
+		)
+	else:
+		estimator_params_compact = _select_estimator_params(
+			estimator_params,
+			[
+				"penalty",
+				"C",
+				"fit_intercept",
+				"solver",
+				"max_iter",
+				"multi_class",
+				"class_weight",
+				"random_state",
+				"n_jobs",
+				"l1_ratio",
+				"tol",
+			],
+		)
+
 	run_metadata = {
+		"schema_version": RUN_SCHEMA_VERSION,
+		"metadata_profile": RUN_METADATA_PROFILE,
 		"run_id": run_id,
-		"library": args.library,
-		"model": args.model,
 		"name": model_name,
-		"task": args.task,
 		"timestamp": timestamp,
+		"library": args.library,
+		"task": args.task,
+		"algorithm": "logistic_regression",
+		"estimator_class": estimator_class,
+		"model_id": "sklearn.sgdclassifier.log_loss" if estimator_class == "SGDClassifier" else "sklearn.logisticregression",
 		"dataset": {
 			"path": str(data_path.relative_to(project_root)),
 			"sha256": data_hash,
 			"rows": data_rows,
 			"columns": data_columns,
 		},
-		"artifacts": {
-			"model": str((model_dir / "model.pkl").relative_to(project_root)),
-			"preprocess": str((preprocess_dir / "preprocessor.pkl").relative_to(project_root)),
-			"eval_metrics": str((eval_dir / "metrics.json").relative_to(project_root)),
-			"eval_confusion_matrix": str((eval_dir / "confusion_matrix.csv").relative_to(project_root)),
-			"eval_confusion_matrix_plot": str((eval_dir / "confusion_matrix.png").relative_to(project_root)),
-			"eval_predictions_preview": str((eval_dir / "predictions_preview.csv").relative_to(project_root)),
-			"eval_roc_curve": str((eval_dir / "roc_curve.csv").relative_to(project_root)) if roc_curve_points is not None else None,
-			"eval_roc_curve_plot": str((eval_dir / "roc_curve.png").relative_to(project_root)) if test_roc_auc_macro_ovr is not None else None,
-			"feature_schema": str((data_dir / "feature_schema.json").relative_to(project_root)),
-			"inference_example": str((inference_dir / "inference_example.py").relative_to(project_root)),
+		"data_split": {
+			"strategy": "train_test_split",
+			"test_size": float(args.test_size),
+			"random_state": int(args.random_state),
+			"stratify": True,
+			"validation": {
+				"enabled": bool(training_control["enabled"]),
+				"strategy": "fraction" if training_control["enabled"] else None,
+				"validation_fraction": float(args.validation_fraction) if training_control["enabled"] else None,
+				"random_state": int(args.random_state) if training_control["enabled"] else None,
+			},
+			"sizes": {
+				"n_rows": data_rows,
+				"n_train": n_train_effective,
+				"n_val": n_val,
+				"n_test": int(len(X_test)),
+			},
+		},
+		"preprocessing": {
+			"pipeline_class": "Pipeline",
+			"scaler": "StandardScaler",
+			"encoder": "OneHotEncoder",
+			"one_hot_handle_unknown": "ignore",
+			"imputer": None,
+			"feature_count": {
+				"raw": int(X.shape[1]),
+				"post_transform": post_transform_feature_count,
+			},
 		},
 		"params": {
+			"estimator_params": _compact_metadata(estimator_params_compact),
 			"test_size": float(args.test_size),
-			"random_state": args.random_state,
+			"random_state": int(args.random_state),
 			"max_iter": int(args.max_iter),
-			"early_stopping": bool(args.early_stopping),
-			"validation_fraction": float(args.validation_fraction),
-			"n_iter_no_change": int(args.n_iter_no_change),
-			"one_hot_handle_unknown": "ignore",
-			"scaler": "StandardScaler",
-			"classifier": classifier_name,
 		},
+		"optimization": {
+			"optimizer": "sgd" if estimator_class == "SGDClassifier" else None,
+			"learning_rate": estimator_params.get("eta0") if estimator_class == "SGDClassifier" else None,
+			"batch_size": None,
+			"epochs_configured": None,
+			"epochs_completed": None,
+			"gradient_clip_norm": None,
+			"lr_scheduler": estimator_params.get("learning_rate") if estimator_class == "SGDClassifier" else None,
+		},
+		"training_control": training_control,
+		"fit_summary": {
+			"fit_time_seconds": _round_metric(fit_time_seconds),
+			"predict_time_seconds": _round_metric(predict_time_seconds),
+			"random_state_effective": int(args.random_state),
+			"n_jobs": estimator_params.get("n_jobs"),
+		},
+		"artifacts": _artifact_map(
+			run_dir,
+			{
+				"model": model_dir / "model.pkl",
+				"preprocess": preprocess_dir / "preprocessor.pkl",
+				"eval_metrics": eval_dir / "metrics.json",
+				"eval_confusion_matrix": eval_dir / "confusion_matrix.csv",
+				"eval_confusion_matrix_plot": eval_dir / "confusion_matrix.png",
+				"eval_predictions_preview": eval_dir / "predictions_preview.csv",
+				"eval_roc_curve": eval_dir / "roc_curve.csv",
+				"eval_roc_curve_plot": eval_dir / "roc_curve.png",
+				"feature_schema": data_dir / "feature_schema.json",
+				"inference_example": inference_dir / "inference_example.py",
+			},
+		),
 		"versions": {
 			"python": platform.python_version(),
 			"pandas": pd.__version__,
 			"scikit-learn": sklearn.__version__,
 		},
 	}
+	run_metadata = _compact_metadata(run_metadata)
 	with (run_dir / "run.json").open("w", encoding="utf-8") as run_file:
 		json.dump(run_metadata, run_file, indent=2)
 
@@ -477,6 +715,10 @@ print(results)
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
+				"training_control_enabled": bool(training_control["enabled"]),
+				"training_control_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
+				"training_control_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
+				"training_control_stopped_early": bool(training_control["stopped_early"]),
 				"accuracy": float(test_accuracy),
 				"balanced_accuracy": float(test_balanced_accuracy),
 				"precision_macro": float(test_precision_macro),
@@ -490,7 +732,7 @@ print(results)
 				"train_accuracy": float(train_accuracy),
 				"train_f1_macro": float(train_f1_macro),
 				"train_log_loss": float(train_logloss_value) if train_logloss_value is not None else None,
-				"n_train": int(len(X_train)),
+				"n_train": n_train_effective,
 				"n_test": int(len(X_test)),
 			}
 		]

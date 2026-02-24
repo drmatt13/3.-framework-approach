@@ -46,9 +46,9 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
-DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
-DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
-DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
+DEFAULT_EARLY_STOPPING = "True" == "True"
+DEFAULT_VALIDATION_FRACTION = float("0.1")
+DEFAULT_N_ITER_NO_CHANGE = int("5")
 DEFAULT_MAX_ESTIMATORS = 500
 DEFAULT_ESTIMATOR_STEP = 25
 MIN_ESTIMATORS_FOR_STOP = 100
@@ -125,7 +125,7 @@ def _select_estimator_params(params: dict, keys: list[str]) -> dict:
 parser = argparse.ArgumentParser(description="Random Forest Classifier baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
 parser.add_argument("--model", choices=["random_forest"], default="random_forest")
-parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
+parser.add_argument("--task", choices=["multiclass_classification"], default="multiclass_classification")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
@@ -137,7 +137,7 @@ args = parser.parse_args()
 SAVE_MODEL = args.save_model
 
 project_root = _project_root()
-data_path = project_root / "data" / "template_data" / "{{DATA_FILE}}"
+data_path = project_root / "data" / "template_data" / "iris.csv"
 df = pd.read_csv(data_path)
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 
@@ -148,9 +148,9 @@ df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 # and artifact generation logic.
 
 # Load data.
-y = df["{{TARGET_COLUMN}}"]
-{{TARGET_PREPROCESS}} # type: ignore
-X = df.drop(columns={{FEATURE_DROP_COLUMNS}}) # type: ignore
+y = df["species"]
+y = y.astype("category").cat.codes.astype("int64") # type: ignore
+X = df.drop(columns=["species"]) # type: ignore
 
 # =============================================================
 # ============== ADDITIONAL FEATURE ENGINEERING ===============
@@ -569,7 +569,7 @@ print(results)
 		inference_file.write(inference_script)
 
 	feature_schema = {
-		"target": "{{TARGET_COLUMN}}",
+		"target": "species",
 		"feature_columns": X.columns.tolist(),
 		"categorical_columns": categorical_cols,
 		"numerical_columns": numerical_cols,
