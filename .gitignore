@@ -40,6 +40,8 @@ artifacts/
 # Dataset files (keep folder structure only)
 data/*
 !data/.gitkeep
+!data/template_data/
+!data/template_data/**
 
 # OS/editor files
 .DS_Store
