@@ -1,9 +1,42 @@
+import argparse
 from pathlib import Path
 
 import pandas as pd
 import tensorflow as tf
 import numpy as np
 from sklearn.model_selection import train_test_split
+
+SAVE_MODEL = False
+
+
+def _parse_bool(value: str) -> bool:
+	normalized = value.strip().lower()
+	if normalized in {"1", "true", "yes", "y"}:
+		return True
+	if normalized in {"0", "false", "no", "n"}:
+		return False
+	raise argparse.ArgumentTypeError("Expected true/false")
+
+
+parser = argparse.ArgumentParser(description="TensorFlow Dense NN classification baseline")
+parser.add_argument("--library", choices=["tensorflow"], default="tensorflow")
+parser.add_argument("--model", choices=["dense_nn"], default="dense_nn")
+parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
+parser.add_argument("--optimizer", choices=["adam", "sgd", "rmsprop", "adagrad", "adamw"], default="{{OPTIMIZER_NAME}}")
+parser.add_argument("--learning_rate", type=float, default={{LEARNING_RATE}})
+parser.add_argument("--epochs", type=int, default={{EPOCHS}})
+parser.add_argument("--batch_size", type=int, default={{BATCH_SIZE}})
+parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
+args = parser.parse_args()
+SAVE_MODEL = args.save_model
+
+optimizer_map = {
+	"adam": tf.keras.optimizers.Adam,
+	"sgd": tf.keras.optimizers.SGD,
+	"rmsprop": tf.keras.optimizers.RMSprop,
+	"adagrad": tf.keras.optimizers.Adagrad,
+	"adamw": tf.keras.optimizers.AdamW,
+}
 
 data_path = Path(__file__).resolve().parents[1] / "data" / "template_data" / "{{DATA_FILE}}"
 df = pd.read_csv(data_path)
@@ -32,12 +65,17 @@ model = tf.keras.Sequential([
 ])
 
 model.compile(
-	optimizer={{OPTIMIZER_CTOR}}(learning_rate={{LEARNING_RATE}}),
+	optimizer=optimizer_map[args.optimizer](learning_rate=args.learning_rate),
 	loss="{{LOSS_FN}}",
 	metrics=["accuracy"],
 )
 
-model.fit(X_train, y_train, epochs={{EPOCHS}}, batch_size={{BATCH_SIZE}}, verbose=1)
+model.fit(X_train, y_train, epochs=args.epochs, batch_size=args.batch_size, verbose=1)
 loss, metric = model.evaluate(X_test, y_test, verbose=0)
 print("Loss:", loss)
 print("Accuracy:", metric)
+
+if SAVE_MODEL:
+	model_path = Path(__file__).resolve().with_name(f"{Path(__file__).stem}_model.keras")
+	model.save(model_path)
+	print(f"Saved model to: {model_path}")

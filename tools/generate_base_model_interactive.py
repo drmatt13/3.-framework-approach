@@ -198,14 +198,26 @@ def main() -> int:
             print("Cancelled.")
             return 0
 
-    name = _ask_text(
-        "Enter output name (no .py):",
-        validate_fn=lambda s: True if s.strip() else "Name cannot be empty",
-    )
+    models_dir = script_dir.parent / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
 
-    if name is None:
-        print("Cancelled.")
-        return 0
+    name = None
+    while True:
+        name = _ask_text(
+            "Enter model name (no .py):",
+            validate_fn=lambda s: True if s.strip() else "Name cannot be empty",
+        )
+
+        if name is None:
+            print("Cancelled.")
+            return 0
+
+        output_candidate = models_dir / f"{name.strip()}.py"
+        if output_candidate.exists():
+            print(f"Name already exists: {output_candidate}")
+            print("Try another model name.\n")
+            continue
+        break
 
     cmd = [
         sys.executable,
@@ -235,7 +247,16 @@ def main() -> int:
     print("\nRunning:")
     print("  " + " ".join(cmd) + "\n")
 
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+
+    if result.returncode != 0 and "already exists for --name" in (result.stdout + result.stderr):
+        print("That name is taken. Re-run this interactive command and choose a different output name.")
+
     return result.returncode
 
 

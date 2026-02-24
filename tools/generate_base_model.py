@@ -154,6 +154,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         if args.task == "binary_classification":
             replacements.update(
                 {
+                    "TASK_VALUE": args.task,
                     "DATA_FILE": "breast_cancer_wisconsin.csv",
                     "TARGET_COLUMN": "diagnosis",
                     "FEATURE_DROP_COLUMNS": '["diagnosis", "id"]',
@@ -163,6 +164,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         else:
             replacements.update(
                 {
+                    "TASK_VALUE": args.task,
                     "DATA_FILE": "iris.csv",
                     "TARGET_COLUMN": "species",
                     "FEATURE_DROP_COLUMNS": '["species"]',
@@ -175,6 +177,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             replacements.update(
                 {
                     "RF_ESTIMATOR": "RandomForestRegressor",
+                    "TASK_VALUE": args.task,
                     "SKLEARN_METRIC_IMPORT": "from sklearn.metrics import mean_squared_error",
                     "DATA_FILE": "california_housing.csv",
                     "TARGET_COLUMN": "median_house_value",
@@ -200,6 +203,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             replacements.update(
                 {
                     "RF_ESTIMATOR": "RandomForestClassifier",
+                    "TASK_VALUE": args.task,
                     "SKLEARN_METRIC_IMPORT": "from sklearn.metrics import accuracy_score",
                     "DATA_FILE": data_file,
                     "TARGET_COLUMN": target_column,
@@ -217,6 +221,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             replacements.update(
                 {
                     "XGB_ESTIMATOR": "XGBRegressor",
+                    "TASK_VALUE": args.task,
                     "SKLEARN_METRIC_IMPORT": "from sklearn.metrics import mean_squared_error",
                     "DATA_FILE": "california_housing.csv",
                     "TARGET_COLUMN": "median_house_value",
@@ -234,6 +239,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             replacements.update(
                 {
                     "XGB_ESTIMATOR": "XGBClassifier",
+                    "TASK_VALUE": args.task,
                     "SKLEARN_METRIC_IMPORT": "from sklearn.metrics import accuracy_score",
                     "DATA_FILE": "breast_cancer_wisconsin.csv",
                     "TARGET_COLUMN": "diagnosis",
@@ -251,6 +257,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             replacements.update(
                 {
                     "XGB_ESTIMATOR": "XGBClassifier",
+                    "TASK_VALUE": args.task,
                     "SKLEARN_METRIC_IMPORT": "from sklearn.metrics import accuracy_score",
                     "DATA_FILE": "iris.csv",
                     "TARGET_COLUMN": "species",
@@ -269,6 +276,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         replacements.update(
             {
                 "OPTIMIZER_CTOR": OPTIMIZER_CLASS_MAP[args.optimizer],
+                "OPTIMIZER_NAME": args.optimizer,
                 "LEARNING_RATE": str(args.learning_rate),
                 "EPOCHS": str(args.epochs),
                 "BATCH_SIZE": str(args.batch_size),
@@ -279,6 +287,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             if args.task == "binary_classification":
                 replacements.update(
                     {
+                        "TASK_VALUE": args.task,
                         "DATA_FILE": "breast_cancer_wisconsin.csv",
                         "TARGET_COLUMN": "diagnosis",
                         "FEATURE_DROP_COLUMNS": '["diagnosis", "id"]',
@@ -291,6 +300,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             else:
                 replacements.update(
                     {
+                        "TASK_VALUE": args.task,
                         "DATA_FILE": "iris.csv",
                         "TARGET_COLUMN": "species",
                         "FEATURE_DROP_COLUMNS": '["species"]',
@@ -452,6 +462,12 @@ def main():
             models_dir = script_dir.parent / "models"
             models_dir.mkdir(parents=True, exist_ok=True)
             output_path = models_dir / f"{args.name}.py"
+
+        if output_path.exists():
+            raise ValueError(
+                f"A model file already exists for --name '{args.name}': {output_path.resolve()}\n"
+                "Pick a new --name (for example, --name your_model_v2) or provide --output to a different path."
+            )
 
         output_path.write_text(content.strip() + "\n", encoding="utf-8")
         print(f"Generated file: {output_path.resolve()}")
