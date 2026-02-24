@@ -52,6 +52,11 @@ SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 EARLY_STOPPING = True
 DEFAULT_MAX_ITER = 1000
+METRIC_DECIMALS = 4
+
+
+def _round_metric(value):
+	return None if value is None else round(float(value), METRIC_DECIMALS)
 
 # Helper function: find project root using a marker file.
 def _project_root() -> Path:
@@ -224,31 +229,31 @@ if hasattr(model, "predict_proba"):
 		brier_score = float(((probabilities - y_test_binarized) ** 2).sum(axis=1).mean())
 
 # ---- Train Metrics (model fit on data it learned from) ----
-print("Train Accuracy:", train_accuracy)  # Proportion of correct predictions on training data
-print("Train F1 Macro:", train_f1_macro)  # Macro-averaged F1 on training set (equal weight per class)
+print("Train Accuracy:", _round_metric(train_accuracy))  # Proportion of correct predictions on training data
+print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged F1 on training set (equal weight per class)
 if train_logloss_value is not None:
-	print("Train Log Loss:", train_logloss_value)  # Cross-entropy loss on training set (probability quality)
+	print("Train Log Loss:", _round_metric(train_logloss_value))  # Cross-entropy loss on training set (probability quality)
 
 # ---- Test Metrics (generalization to unseen data) ----
-print("Test Accuracy:", test_accuracy)  # Overall correctness on test set
-print("Test Balanced Accuracy:", test_balanced_accuracy)  # Mean recall across classes (robust to imbalance)
-print("Test Precision Macro:", test_precision_macro)  # Macro-averaged precision (mean of per-class precision)
-print("Test Recall Macro:", test_recall_macro)  # Macro-averaged recall (mean of per-class recall)
-print("Test F1 Macro:", test_f1_macro)  # Macro-averaged F1 (harmonic mean of precision & recall per class)
+print("Test Accuracy:", _round_metric(test_accuracy))  # Overall correctness on test set
+print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Mean recall across classes (robust to imbalance)
+print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision (mean of per-class precision)
+print("Test Recall Macro:", _round_metric(test_recall_macro))  # Macro-averaged recall (mean of per-class recall)
+print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 (harmonic mean of precision & recall per class)
 print("Test Support Total:", support_total)  # Total number of true samples in test set
 print("Test Support By Class:", support_by_class)  # True sample count per class (class distribution)
 
 if test_roc_auc_macro_ovr is not None:
-	print("Test ROC AUC Macro OVR:", test_roc_auc_macro_ovr)  # One-vs-Rest macro ROC-AUC (ranking quality across classes)
+	print("Test ROC AUC Macro OVR:", _round_metric(test_roc_auc_macro_ovr))  # One-vs-Rest macro ROC-AUC (ranking quality across classes)
 
 if test_pr_auc_macro_ovr is not None:
-	print("Test PR AUC Macro OVR:", test_pr_auc_macro_ovr)  # One-vs-Rest macro PR-AUC (precision-recall tradeoff)
+	print("Test PR AUC Macro OVR:", _round_metric(test_pr_auc_macro_ovr))  # One-vs-Rest macro PR-AUC (precision-recall tradeoff)
 
 if test_logloss_value is not None:
-	print("Test Log Loss:", test_logloss_value)  # Cross-entropy loss on test set (penalizes confident wrong predictions)
+	print("Test Log Loss:", _round_metric(test_logloss_value))  # Cross-entropy loss on test set (penalizes confident wrong predictions)
 
 if brier_score is not None:
-	print("Test Brier Score:", brier_score)  # Mean squared error of predicted probabilities (calibration metric)
+	print("Test Brier Score:", _round_metric(brier_score))  # Mean squared error of predicted probabilities (calibration metric)
 
 print("Classifier:", classifier_name)  # Model identifier for experiment tracking
 print("First 5 predictions:", predictions[:5])  # Quick sanity check of output classes
@@ -288,20 +293,20 @@ if SAVE_MODEL:
 
 	metrics = {
 		"train": {
-			"accuracy": float(train_accuracy),
-			"f1_macro": float(train_f1_macro),
-			"log_loss": float(train_logloss_value) if train_logloss_value is not None else None,
+			"accuracy": _round_metric(train_accuracy),
+			"f1_macro": _round_metric(train_f1_macro),
+			"log_loss": _round_metric(train_logloss_value),
 		},
 		"test": {
-			"accuracy": float(test_accuracy),
-			"balanced_accuracy": float(test_balanced_accuracy),
-			"precision_macro": float(test_precision_macro),
-			"recall_macro": float(test_recall_macro),
-			"f1_macro": float(test_f1_macro),
-			"roc_auc_macro_ovr": float(test_roc_auc_macro_ovr) if test_roc_auc_macro_ovr is not None else None,
-			"pr_auc_macro_ovr": float(test_pr_auc_macro_ovr) if test_pr_auc_macro_ovr is not None else None,
-			"log_loss": float(test_logloss_value) if test_logloss_value is not None else None,
-			"brier_score": float(brier_score) if brier_score is not None else None,
+			"accuracy": _round_metric(test_accuracy),
+			"balanced_accuracy": _round_metric(test_balanced_accuracy),
+			"precision_macro": _round_metric(test_precision_macro),
+			"recall_macro": _round_metric(test_recall_macro),
+			"f1_macro": _round_metric(test_f1_macro),
+			"roc_auc_macro_ovr": _round_metric(test_roc_auc_macro_ovr),
+			"pr_auc_macro_ovr": _round_metric(test_pr_auc_macro_ovr),
+			"log_loss": _round_metric(test_logloss_value),
+			"brier_score": _round_metric(brier_score),
 			"support_total": support_total,
 			"support_by_class": support_by_class,
 		},

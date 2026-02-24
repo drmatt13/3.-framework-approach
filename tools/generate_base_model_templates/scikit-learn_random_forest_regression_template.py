@@ -30,6 +30,11 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
+METRIC_DECIMALS = 4
+
+
+def _round_metric(value):
+	return None if value is None else round(float(value), METRIC_DECIMALS)
 
 # Helper function: find project root using a marker file.
 def _project_root() -> Path:
@@ -141,22 +146,24 @@ test_max_error = max_error(y_test, predictions)
 
 # ---- Train Metrics (model performance on training data) ----
 print("Train MSE:", train_mse)  # Mean Squared Error on training set (average squared residuals)
-print("Train MAE:", train_mae)  # Mean Absolute Error on training set (average absolute prediction error)
-print("Train RMSE:", train_rmse)  # Root Mean Squared Error on training set (error in original target units)
-print("Train R2:", train_r2)  # R² on training set (variance explained by model)
-print("Train Max Error:", train_max_error)  # Largest absolute prediction error on training data
-print("Train Residual Mean:", train_residual_mean)  # Mean of residuals (should be near 0 if unbiased)
-print("Train Residual Std:", train_residual_std)  # Standard deviation of residuals (spread of errors)
+print("Train MSE:", _round_metric(train_mse))  # Mean Squared Error on training set (average squared residuals)
+print("Train MAE:", _round_metric(train_mae))  # Mean Absolute Error on training set (average absolute prediction error)
+print("Train RMSE:", _round_metric(train_rmse))  # Root Mean Squared Error on training set (error in original target units)
+print("Train R2:", _round_metric(train_r2))  # R² on training set (variance explained by model)
+print("Train Max Error:", _round_metric(train_max_error))  # Largest absolute prediction error on training data
+print("Train Residual Mean:", _round_metric(train_residual_mean))  # Mean of residuals (should be near 0 if unbiased)
+print("Train Residual Std:", _round_metric(train_residual_std))  # Standard deviation of residuals (spread of errors)
 
-print("Test MSE:", test_mse)  # Mean Squared Error on test set (average squared prediction errors)
-print("Test MAE:", test_mae)  # Mean Absolute Error on test set (average absolute difference from true values)
-print("Test RMSE:", test_rmse)  # Root Mean Squared Error on test set (interpretable error magnitude)
-print("Test R2:", test_r2)  # R² on test set (generalization performance)
+# ---- Test Metrics (model generalization to unseen data) ----
+print("Test MSE:", _round_metric(test_mse))  # Mean Squared Error on test set (average squared prediction errors)
+print("Test MAE:", _round_metric(test_mae))  # Mean Absolute Error on test set (average absolute difference from true values)
+print("Test RMSE:", _round_metric(test_rmse))  # Root Mean Squared Error on test set (interpretable error magnitude)
+print("Test R2:", _round_metric(test_r2))  # R² on test set (generalization performance)
 
-print("Test Max Error:", test_max_error)  # Worst-case absolute prediction error on test set
+print("Test Max Error:", _round_metric(test_max_error))  # Worst-case absolute prediction error on test set
 
-print("Target Mean:", float(y.mean()))  # Overall target mean (prefer y_train.mean() to avoid leakage)
-print("Target Std:", float(y.std()))  # Overall target standard deviation (prefer y_train.std() for clean separation)
+print("Target Mean:", _round_metric(y.mean()))  # Overall target mean (prefer y_train.mean() to avoid leakage)
+print("Target Std:", _round_metric(y.std()))  # Overall target standard deviation (prefer y_train.std() for clean separation)
 
 print("First 5 predictions:", predictions[:5])  # Quick sanity check of predicted values and scale
 
@@ -193,24 +200,24 @@ if SAVE_MODEL:
 
 	metrics = {
 		"train": {
-			"mse": float(train_mse),
-			"mae": float(train_mae),
-			"rmse": float(train_rmse),
-			"r2": float(train_r2),
-			"max_error": float(train_max_error),
-			"residual_mean": float(train_residual_mean),
-			"residual_std": float(train_residual_std),
+			"mse": _round_metric(train_mse),
+			"mae": _round_metric(train_mae),
+			"rmse": _round_metric(train_rmse),
+			"r2": _round_metric(train_r2),
+			"max_error": _round_metric(train_max_error),
+			"residual_mean": _round_metric(train_residual_mean),
+			"residual_std": _round_metric(train_residual_std),
 		},
 		"test": {
-			"mse": float(test_mse),
-			"mae": float(test_mae),
-			"rmse": float(test_rmse),
-			"r2": float(test_r2),
-			"max_error": float(test_max_error),
+			"mse": _round_metric(test_mse),
+			"mae": _round_metric(test_mae),
+			"rmse": _round_metric(test_rmse),
+			"r2": _round_metric(test_r2),
+			"max_error": _round_metric(test_max_error),
 		},
 		"target_summary": {
-			"mean": float(y.mean()),
-			"std": float(y.std()),
+			"mean": _round_metric(y.mean()),
+			"std": _round_metric(y.std()),
 		},
 		"n_train": int(len(X_train)),
 		"n_test": int(len(X_test)),
