@@ -42,11 +42,11 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 #   --test-size <float>
 # ---------------------------------------------------------------------
 
-# Default values for optional parameters. These can be overridden via CLI when invoking the model.
+# Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 
-# Helper function to find project root by looking for a marker file (e.g., requirements.txt)
+# Helper function: find project root using a marker file.
 def _project_root() -> Path:
 	current = Path(__file__).resolve().parent
 	for candidate in [current, *current.parents]:
@@ -54,7 +54,7 @@ def _project_root() -> Path:
 			return candidate
 	return Path(__file__).resolve().parents[1]
 
-# Helper function to parse boolean command-line arguments
+# Helper function: parse boolean CLI input.
 def _parse_bool(value: str) -> bool:
 	normalized = value.strip().lower()
 	if normalized in {"1", "true", "yes", "y"}:
@@ -63,7 +63,7 @@ def _parse_bool(value: str) -> bool:
 		return False
 	raise argparse.ArgumentTypeError("Expected true/false")
 
-
+# Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Random Forest Classifier baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
 parser.add_argument("--model", choices=["random_forest"], default="random_forest")
@@ -83,9 +83,10 @@ df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
 # =============================================================
-# The following section contains model definition, training,
-# evaluation, and artifact generation logic.
+# This section contains model definition, training, evaluation,
+# and artifact generation logic.
 
+# Load data.
 y = df["{{TARGET_COLUMN}}"]
 {{TARGET_PREPROCESS}}
 X = df.drop(columns={{FEATURE_DROP_COLUMNS}})
@@ -93,12 +94,12 @@ X = df.drop(columns={{FEATURE_DROP_COLUMNS}})
 # =============================================================
 # ============== ADDITIONAL FEATURE ENGINEERING ===============
 # =============================================================
-# Insert optional feature transformations, encoding,
-# scaling, or derived feature logic below if required.
+# Add optional feature transformations or derived features below.
 
 #  -
 
-# Split BEFORE fitting transformers to avoid data leakage. For classification tasks, stratify by the target variable to maintain class distribution in train/test sets.
+# Split BEFORE fitting transformers to avoid data leakage.
+# For classification tasks, stratify to preserve class distribution.
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
@@ -107,16 +108,18 @@ X_train, X_test, y_train, y_test = train_test_split(
 	stratify=y,
 )
 
-# For classification tasks, it's important to stratify the split by the target variable to maintain the class distribution in both training and test sets. This helps ensure that the model is trained and evaluated on representative samples of each class, which is especially crucial for imbalanced datasets.
+# Define column groups from training data only.
+# Include "str" explicitly for pandas 3 compatibility.
 categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
 numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
 
-# OneHotEncoder's sparse_output parameter was introduced in scikit-learn 1.2. If using an older version, fall back to sparse=False.
+# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
 try:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
 except TypeError:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
 
+# Preprocess: scale numeric features and one-hot encode categorical features.
 preprocessor = ColumnTransformer(
 	transformers=[
 		("num", StandardScaler(), numerical_cols),
@@ -125,7 +128,7 @@ preprocessor = ColumnTransformer(
 	remainder="drop",
 )
 
-# The pipeline will apply preprocessing before fitting the classifier. This ensures that all transformations are properly applied during both training and inference, and helps prevent data leakage by fitting transformers only on the training data.
+# Bundle preprocessing + model into one inference-ready pipeline.
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
@@ -133,9 +136,10 @@ model = Pipeline(
 	]
 )
 
-# Fit the model on the training data. The pipeline will apply preprocessing before fitting the classifier.
+# Fit on training data (pipeline fits preprocessors + model).
 model.fit(X_train, y_train)
 
+# Evaluate model on train/test splits.
 train_predictions = model.predict(X_train)
 predictions = model.predict(X_test)
 classifier_classes = model.named_steps["classifier"].classes_
@@ -156,7 +160,7 @@ _, _, _, support_values = precision_recall_fscore_support(
 support_by_class = {str(label): int(count) for label, count in zip(classifier_classes, support_values)}
 support_total = int(len(y_test))
 
-
+# Calculate probability-based metrics when predict_proba is available.
 train_logloss_value = None
 test_roc_auc_macro_ovr = None
 test_pr_auc_macro_ovr = None
@@ -222,10 +226,9 @@ print("First 5 predictions:", predictions[:5])  # Sample predictions for quick s
 # =============================================================
 # ==================== MODEL CODE ENDS HERE ===================
 # =============================================================
-# End of model logic. No further training or inference code
-# should appear below this section.
+# End of model logic.
 
-# Artifact saving and registry logging logic starts here. This can be customized or removed as needed.
+# Artifact export and registry logging.
 if SAVE_MODEL:
 	model_name = args.name.strip() or Path(__file__).stem
 	model_root_dir = project_root / "artifacts" / "models" / model_name

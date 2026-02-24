@@ -27,11 +27,11 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 #   --test-size <float>
 # ---------------------------------------------------------------------
 
-# Default values for optional parameters. These can be overridden via CLI when invoking the model.
+# Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 
-# Helper function to find project root by looking for a marker file (e.g., requirements.txt)
+# Helper function: find project root using a marker file.
 def _project_root() -> Path:
 	current = Path(__file__).resolve().parent
 	for candidate in [current, *current.parents]:
@@ -39,7 +39,7 @@ def _project_root() -> Path:
 			return candidate
 	return Path(__file__).resolve().parents[1]
 
-# Helper function to parse boolean command-line arguments
+# Helper function: parse boolean CLI input.
 def _parse_bool(value: str) -> bool:
 	normalized = value.strip().lower()
 	if normalized in {"1", "true", "yes", "y"}:
@@ -48,7 +48,7 @@ def _parse_bool(value: str) -> bool:
 		return False
 	raise argparse.ArgumentTypeError("Expected true/false")
 
-# Command-line argument parsing
+# Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Random Forest Regressor baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
 parser.add_argument("--model", choices=["random_forest"], default="random_forest")
@@ -63,10 +63,10 @@ SAVE_MODEL = args.save_model
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
 # =============================================================
-# The following section contains model definition, training,
-# evaluation, and artifact generation logic.
+# This section contains model definition, training, evaluation,
+# and artifact generation logic.
 
-# Load data
+# Load data.
 project_root = _project_root()
 data_path = project_root / "data" / "template_data" / "california_housing.csv"
 df = pd.read_csv(data_path).dropna()
@@ -77,12 +77,11 @@ X = df.drop(columns=["median_house_value"])
 # =============================================================
 # ============== ADDITIONAL FEATURE ENGINEERING ===============
 # =============================================================
-# Insert optional feature transformations, encoding,
-# scaling, or derived feature logic below if required.
+# Add optional feature transformations or derived features below.
 
 #  -
 
-# 
+# Split BEFORE fitting transformers to avoid data leakage.
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
@@ -90,14 +89,18 @@ X_train, X_test, y_train, y_test = train_test_split(
 	random_state=args.random_state,
 )
 
+# Define column groups from training data only.
+# Include "str" explicitly for pandas 3 compatibility.
 categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
 numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
 
+# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
 try:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
 except TypeError:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
 
+# Preprocess: scale numeric features and one-hot encode categorical features.
 preprocessor = ColumnTransformer(
 	transformers=[
 		("num", StandardScaler(), numerical_cols),
@@ -106,6 +109,7 @@ preprocessor = ColumnTransformer(
 	remainder="drop",
 )
 
+# Bundle preprocessing + model into one inference-ready pipeline.
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
@@ -113,10 +117,10 @@ model = Pipeline(
 	]
 )
 
-# Fit the model on the training data (this also fits the preprocessors in the pipeline)
+# Fit on training data (pipeline fits preprocessors + model).
 model.fit(X_train, y_train)
 
-# Evaluate on test set using multiple metrics
+# Evaluate model on train/test splits.
 train_predictions = model.predict(X_train)
 predictions = model.predict(X_test)
 train_mse = mean_squared_error(y_train, train_predictions)
@@ -128,7 +132,7 @@ train_residuals = y_train - train_predictions
 train_residual_mean = float(train_residuals.mean())
 train_residual_std = float(train_residuals.std())
 
-# Test metrics
+# ---- Test Metrics (generalization to unseen data) ----
 test_mse = mean_squared_error(y_test, predictions)
 test_mae = mean_absolute_error(y_test, predictions)
 test_rmse = root_mean_squared_error(y_test, predictions)
@@ -144,7 +148,6 @@ print("Train Max Error:", train_max_error)  # Largest absolute prediction error 
 print("Train Residual Mean:", train_residual_mean)  # Mean of residuals (should be near 0 if unbiased)
 print("Train Residual Std:", train_residual_std)  # Standard deviation of residuals (spread of errors)
 
-# ---- Test Metrics (generalization to unseen data) ----
 print("Test MSE:", test_mse)  # Mean Squared Error on test set (average squared prediction errors)
 print("Test MAE:", test_mae)  # Mean Absolute Error on test set (average absolute difference from true values)
 print("Test RMSE:", test_rmse)  # Root Mean Squared Error on test set (interpretable error magnitude)
@@ -160,10 +163,9 @@ print("First 5 predictions:", predictions[:5])  # Quick sanity check of predicte
 # =============================================================
 # ==================== MODEL CODE ENDS HERE ===================
 # =============================================================
-# End of model logic. No further training or inference code
-# should appear below this section.
+# End of model logic.
 
-# Artifact saving and registry logging logic starts here. This can be customized or removed as needed.
+# Artifact export and registry logging.
 if SAVE_MODEL:
 	model_name = args.name.strip() or Path(__file__).stem
 	model_root_dir = project_root / "artifacts" / "models" / model_name
