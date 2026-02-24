@@ -39,6 +39,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 #   --name <model_name>
 #   --save-model true|false
 #   --random-state <int>
+#   --test-size <float>
 # ---------------------------------------------------------------------
 
 SAVE_MODEL = False
@@ -69,6 +70,7 @@ parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
+parser.add_argument("--test-size", type=float, default=0.2)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 
@@ -81,15 +83,18 @@ y = df["{{TARGET_COLUMN}}"]
 {{TARGET_PREPROCESS}}
 X = df.drop(columns={{FEATURE_DROP_COLUMNS}})
 
-# Additional Feature engineer here if needed
-# ******************************************
-# ******************************************
-# ******************************************
+# =============================================================
+# ============== ADDITIONAL FEATURE ENGINEERING ===============
+# =============================================================
+# Insert optional feature transformations, encoding,
+# scaling, or derived feature logic below if required.
+
+#  -
 
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
-	test_size=0.2,
+	test_size=args.test_size,
 	random_state=args.random_state,
 	stratify=y,
 )
@@ -172,22 +177,42 @@ if hasattr(model, "predict_proba"):
 		test_pr_auc_macro_ovr = float(average_precision_score(y_test_binarized, probabilities, average="macro"))
 		brier_score = float(((probabilities - y_test_binarized) ** 2).sum(axis=1).mean())
 
-print("Accuracy:", test_accuracy)
-print("Balanced Accuracy:", test_balanced_accuracy)
-print("Precision Macro:", test_precision_macro)
-print("Recall Macro:", test_recall_macro)
-print("F1 Macro:", test_f1_macro)
-print("Support:", support_total)
-if test_roc_auc_macro_ovr is not None:
-	print("ROC AUC Macro OVR:", test_roc_auc_macro_ovr)
-if test_pr_auc_macro_ovr is not None:
-	print("PR AUC Macro OVR:", test_pr_auc_macro_ovr)
-if test_logloss_value is not None:
-	print("Log Loss:", test_logloss_value)
-if brier_score is not None:
-	print("Brier Score:", brier_score)
-print("First 5 predictions:", predictions[:5])
+print("Train Accuracy:", train_accuracy)  # Proportion of correct predictions on training data
+print("Train F1 Macro:", train_f1_macro)  # Macro-averaged F1 on training set (equal weight per class)
 
+if train_logloss_value is not None:
+	print("Train Log Loss:", train_logloss_value)  # Cross-entropy loss on training set (probability confidence quality)
+
+print("Test Accuracy:", test_accuracy)  # Overall proportion of correct predictions on unseen test data
+print("Test Balanced Accuracy:", test_balanced_accuracy)  # Average recall across classes (handles class imbalance)
+print("Test Precision Macro:", test_precision_macro)  # Macro-averaged precision (mean per-class precision)
+print("Test Recall Macro:", test_recall_macro)  # Macro-averaged recall (mean per-class recall)
+print("Test F1 Macro:", test_f1_macro)  # Macro-averaged F1 score (harmonic mean of precision and recall per class)
+
+print("Test Support Total:", support_total)  # Total number of true test samples used for evaluation
+print("Test Support By Class:", support_by_class)  # True sample count per class (class distribution insight)
+
+if test_roc_auc_macro_ovr is not None:
+	print("Test ROC AUC Macro OVR:", test_roc_auc_macro_ovr)  # One-vs-Rest macro ROC-AUC (probability ranking quality)
+
+if test_pr_auc_macro_ovr is not None:
+	print("Test PR AUC Macro OVR:", test_pr_auc_macro_ovr)  # One-vs-Rest macro Precision-Recall AUC (imbalance-sensitive metric)
+
+if test_logloss_value is not None:
+	print("Test Log Loss:", test_logloss_value)  # Cross-entropy loss on test set (penalizes confident wrong predictions)
+
+if brier_score is not None:
+	print("Test Brier Score:", brier_score)  # Mean squared error of predicted probabilities (calibration metric)
+
+print("First 5 predictions:", predictions[:5])  # Sample predictions for quick sanity check of output classes
+
+# =============================================================
+# ==================== MODEL CODE ENDS HERE ===================
+# =============================================================
+# End of model logic. No further training or inference code
+# should appear below this section.
+
+# Artifact saving and registry logging logic starts here. This can be customized or removed as needed.
 if SAVE_MODEL:
 	model_name = args.name.strip() or Path(__file__).stem
 	model_root_dir = project_root / "artifacts" / "models" / model_name
@@ -356,7 +381,7 @@ print(results)
 			"inference_example": str((inference_dir / "inference_example.py").relative_to(project_root)),
 		},
 		"params": {
-			"test_size": 0.2,
+			"test_size": float(args.test_size),
 			"random_state": args.random_state,
 			"one_hot_handle_unknown": "ignore",
 			"scaler": "StandardScaler",

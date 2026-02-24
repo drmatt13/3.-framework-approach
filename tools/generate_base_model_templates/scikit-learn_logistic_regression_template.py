@@ -40,6 +40,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 #   --name <model_name>
 #   --save-model true|false
 #   --random-state <int>
+#   --test-size <float>
 #   --max-iter <int>
 #   --early-stopping true|false
 #   --validation-fraction <float>
@@ -77,6 +78,7 @@ parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
+parser.add_argument("--test-size", type=float, default=0.2)
 parser.add_argument("--max-iter", type=int, default=DEFAULT_MAX_ITER)
 parser.add_argument("--early-stopping", type=_parse_bool, default=EARLY_STOPPING)
 parser.add_argument("--validation-fraction", type=float, default=0.1)
@@ -102,15 +104,18 @@ y = df["{{TARGET_COLUMN}}"]
 {{TARGET_PREPROCESS}}
 X = df.drop(columns={{FEATURE_DROP_COLUMNS}})
 
-# Additional Feature engineer here if needed
-# ******************************************
-# ******************************************
-# ******************************************
+# =============================================================
+# ============== ADDITIONAL FEATURE ENGINEERING ===============
+# =============================================================
+# Insert optional feature transformations, encoding,
+# scaling, or derived feature logic below if required.
+
+#  -
 
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
-	test_size=0.2,
+	test_size=args.test_size,
 	random_state=args.random_state,
 	stratify=y,
 )
@@ -192,11 +197,14 @@ test_logloss_value = None
 brier_score = None
 roc_curve_points = None
 y_test_binarized = None
+
+# Only calculate log loss and ROC AUC for classification tasks where predict_proba is available
 if hasattr(model, "predict_proba"):
 	train_probabilities = model.predict_proba(X_train)
 	probabilities = model.predict_proba(X_test)
 	train_logloss_value = float(log_loss(y_train, train_probabilities, labels=classifier_classes))
 	test_logloss_value = float(log_loss(y_test, probabilities, labels=classifier_classes))
+	# For binary classification, calculate ROC AUC using the positive class probabilities. For multiclass, use the OVR macro average.
 	if args.task == "binary_classification":
 		positive_class = classifier_classes[-1]
 		positive_probabilities = probabilities[:, -1]
@@ -212,29 +220,42 @@ if hasattr(model, "predict_proba"):
 				"threshold": thresholds,
 			}
 		)
+		# ROC curve points are only saved for binary classification in this template to avoid excessive complexity in multiclass cases. Adjust as needed.
 	else:
 		y_test_binarized = label_binarize(y_test, classes=classifier_classes)
 		test_roc_auc_macro_ovr = float(roc_auc_score(y_test_binarized, probabilities, multi_class="ovr", average="macro"))
 		test_pr_auc_macro_ovr = float(average_precision_score(y_test_binarized, probabilities, average="macro"))
 		brier_score = float(((probabilities - y_test_binarized) ** 2).sum(axis=1).mean())
 
-# Print metrics
-print("Accuracy:", test_accuracy)
-print("Balanced Accuracy:", test_balanced_accuracy)
-print("Precision Macro:", test_precision_macro)
-print("Recall Macro:", test_recall_macro)
-print("F1 Macro:", test_f1_macro)
-print("Support:", support_total)
+# ---- Train Metrics (model fit on data it learned from) ----
+print("Train Accuracy:", train_accuracy)  # Proportion of correct predictions on training data
+print("Train F1 Macro:", train_f1_macro)  # Macro-averaged F1 on training set (equal weight per class)
+if train_logloss_value is not None:
+	print("Train Log Loss:", train_logloss_value)  # Cross-entropy loss on training set (probability quality)
+
+# ---- Test Metrics (generalization to unseen data) ----
+print("Test Accuracy:", test_accuracy)  # Overall correctness on test set
+print("Test Balanced Accuracy:", test_balanced_accuracy)  # Mean recall across classes (robust to imbalance)
+print("Test Precision Macro:", test_precision_macro)  # Macro-averaged precision (mean of per-class precision)
+print("Test Recall Macro:", test_recall_macro)  # Macro-averaged recall (mean of per-class recall)
+print("Test F1 Macro:", test_f1_macro)  # Macro-averaged F1 (harmonic mean of precision & recall per class)
+print("Test Support Total:", support_total)  # Total number of true samples in test set
+print("Test Support By Class:", support_by_class)  # True sample count per class (class distribution)
+
 if test_roc_auc_macro_ovr is not None:
-	print("ROC AUC Macro OVR:", test_roc_auc_macro_ovr)
+	print("Test ROC AUC Macro OVR:", test_roc_auc_macro_ovr)  # One-vs-Rest macro ROC-AUC (ranking quality across classes)
+
 if test_pr_auc_macro_ovr is not None:
-	print("PR AUC Macro OVR:", test_pr_auc_macro_ovr)
+	print("Test PR AUC Macro OVR:", test_pr_auc_macro_ovr)  # One-vs-Rest macro PR-AUC (precision-recall tradeoff)
+
 if test_logloss_value is not None:
-	print("Log Loss:", test_logloss_value)
+	print("Test Log Loss:", test_logloss_value)  # Cross-entropy loss on test set (penalizes confident wrong predictions)
+
 if brier_score is not None:
-	print("Brier Score:", brier_score)
-print("Classifier:", classifier_name)
-print("First 5 predictions:", predictions[:5])
+	print("Test Brier Score:", brier_score)  # Mean squared error of predicted probabilities (calibration metric)
+
+print("Classifier:", classifier_name)  # Model identifier for experiment tracking
+print("First 5 predictions:", predictions[:5])  # Quick sanity check of output classes
 
 # =============================================================
 # ==================== MODEL CODE ENDS HERE ===================
@@ -415,7 +436,7 @@ print(results)
 			"inference_example": str((inference_dir / "inference_example.py").relative_to(project_root)),
 		},
 		"params": {
-			"test_size": 0.2,
+			"test_size": float(args.test_size),
 			"random_state": args.random_state,
 			"max_iter": int(args.max_iter),
 			"early_stopping": bool(args.early_stopping),

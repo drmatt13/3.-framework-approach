@@ -11,7 +11,7 @@ import pandas as pd
 import sklearn
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
+from sklearn.metrics import max_error, mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -24,6 +24,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 #   --name <model_name>
 #   --save-model true|false
 #   --random-state <int>
+#   --test-size <float>
 # ---------------------------------------------------------------------
 
 # When invoking this model you can specify --save-model true to save the model and artifacts, or set SAVE_MODEL = True by default here.
@@ -55,6 +56,7 @@ parser.add_argument("--task", choices=["regression"], default="regression")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
+parser.add_argument("--test-size", type=float, default=0.2)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 
@@ -85,7 +87,7 @@ X = df.drop(columns=["median_house_value"])
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
-	test_size=0.2,
+	test_size=args.test_size,
 	random_state=args.random_state,
 )
 
@@ -123,17 +125,46 @@ model = Pipeline(
 # Fit the model on the training data (this also fits the preprocessors in the pipeline)
 model.fit(X_train, y_train)
 
+# Evaluate on test set using multiple metrics
+train_predictions = model.predict(X_train)
 predictions = model.predict(X_test)
-test_loss = mean_squared_error(y_test, predictions)
+train_mse = mean_squared_error(y_train, train_predictions)
+train_mae = mean_absolute_error(y_train, train_predictions)
+train_rmse = root_mean_squared_error(y_train, train_predictions)
+train_r2 = r2_score(y_train, train_predictions)
+train_max_error = max_error(y_train, train_predictions)
+train_residuals = y_train - train_predictions
+train_residual_mean = float(train_residuals.mean())
+train_residual_std = float(train_residuals.std())
+
+# Test metrics
+test_mse = mean_squared_error(y_test, predictions)
 test_mae = mean_absolute_error(y_test, predictions)
 test_rmse = root_mean_squared_error(y_test, predictions)
 test_r2 = r2_score(y_test, predictions)
+test_max_error = max_error(y_test, predictions)
 
-print("Test Loss:", test_loss)   # Mean Squared Error (average of squared prediction errors)
-print("Test MAE:", test_mae)     # Mean Absolute Error (average absolute difference from true values)
-print("Test RMSE:", test_rmse)   # Root Mean Squared Error (error in original units, penalizes large mistakes)
-print("Test R2:", test_r2)       # R² score (proportion of variance explained)
-print("First 5 predictions:", predictions[:5])
+# ---- Train Metrics (model fit on data it learned from) ----
+print("Train MSE:", train_mse)  # Mean Squared Error on training set (average squared residuals; penalizes large errors heavily)
+print("Train MAE:", train_mae)  # Mean Absolute Error on training set (average absolute prediction error)
+print("Train RMSE:", train_rmse)  # Root Mean Squared Error on training set (error in original target units)
+print("Train R2:", train_r2)  # R² on training set (proportion of variance explained by model)
+print("Train Max Error:", train_max_error)  # Largest single absolute prediction error on training set
+print("Train Residual Mean:", train_residual_mean)  # Mean of residuals (should be ~0 for unbiased linear regression)
+print("Train Residual Std:", train_residual_std)  # Standard deviation of residuals (spread of prediction errors)
+
+# ---- Test Metrics (model performance on unseen data) ----
+print("Test MSE:", test_mse)  # Mean Squared Error on test set (average squared prediction errors)
+print("Test MAE:", test_mae)  # Mean Absolute Error on test set (average absolute difference from true values)
+print("Test RMSE:", test_rmse)  # Root Mean Squared Error on test set (interpretable error in target units)
+print("Test R2:", test_r2)  # R² score on test set (generalization performance)
+
+print("Test Max Error:", test_max_error)  # Largest single absolute prediction error on test set (worst-case mistake)
+
+print("Target Mean:", float(y.mean()))  # Overall target mean (use y_train.mean() in production to avoid leakage)
+print("Target Std:", float(y.std()))  # Overall target standard deviation (prefer y_train.std() for clean separation)
+
+print("First 5 predictions:", predictions[:5])  # Sample of predicted values (quick sanity check for scale and realism)
 
 # =============================================================
 # ==================== MODEL CODE ENDS HERE ===================
@@ -170,10 +201,26 @@ if SAVE_MODEL:
 		pickle.dump(model.named_steps["preprocess"], preprocess_file)
 
 	metrics = {
-		"mse": float(test_loss),
-		"mae": float(test_mae),
-		"rmse": float(test_rmse),
-		"r2": float(test_r2),
+		"train": {
+			"mse": float(train_mse),
+			"mae": float(train_mae),
+			"rmse": float(train_rmse),
+			"r2": float(train_r2),
+			"max_error": float(train_max_error),
+			"residual_mean": float(train_residual_mean),
+			"residual_std": float(train_residual_std),
+		},
+		"test": {
+			"mse": float(test_mse),
+			"mae": float(test_mae),
+			"rmse": float(test_rmse),
+			"r2": float(test_r2),
+			"max_error": float(test_max_error),
+		},
+		"target_summary": {
+			"mean": float(y.mean()),
+			"std": float(y.std()),
+		},
 		"n_train": int(len(X_train)),
 		"n_test": int(len(X_test)),
 	}
@@ -252,7 +299,7 @@ print(results)
 			"inference_example": str((inference_dir / "inference_example.py").relative_to(project_root)),
 		},
 		"params": {
-			"test_size": 0.2,
+			"test_size": float(args.test_size),
 			"random_state": args.random_state,
 			"one_hot_handle_unknown": "ignore",
 			"scaler": "StandardScaler",
@@ -289,7 +336,7 @@ print(results)
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
-				"mse": float(test_loss),
+				"mse": float(test_mse),
 				"mae": float(test_mae),
 				"rmse": float(test_rmse),
 				"r2": float(test_r2),
