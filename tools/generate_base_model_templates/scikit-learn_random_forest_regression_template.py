@@ -17,6 +17,10 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+# =============================================================
+# =============== CONFIGURATION / CLI FLAGS ===================
+# =============================================================
+
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
 #   --library scikit-learn
@@ -32,8 +36,6 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 METRIC_DECIMALS = 4
-RUN_SCHEMA_VERSION = "1.0"
-RUN_METADATA_PROFILE = "compact"
 
 # Helper function: round metrics for cleaner output.
 def _round_metric(value):
@@ -56,50 +58,6 @@ def _parse_bool(value: str) -> bool:
 		return False
 	raise argparse.ArgumentTypeError("Expected true/false")
 
-
-def _post_transform_feature_count(preprocessor, sample_frame: pd.DataFrame) -> int | None:
-	try:
-		transformed = preprocessor.transform(sample_frame)
-		return int(transformed.shape[1])
-	except Exception:
-		return None
-
-
-def _artifact_map(base_dir: Path, artifacts: dict[str, Path]) -> dict[str, str]:
-	resolved: dict[str, str] = {}
-	for key, path in artifacts.items():
-		if path.exists():
-			resolved[key] = str(path.relative_to(base_dir))
-	return resolved
-
-
-def _compact_metadata(value):
-	if isinstance(value, dict):
-		compacted = {}
-		for key, item in value.items():
-			compacted_item = _compact_metadata(item)
-			if compacted_item is None:
-				continue
-			if isinstance(compacted_item, (dict, list)) and len(compacted_item) == 0:
-				continue
-			compacted[key] = compacted_item
-		return compacted
-	if isinstance(value, list):
-		compacted_list = []
-		for item in value:
-			compacted_item = _compact_metadata(item)
-			if compacted_item is None:
-				continue
-			if isinstance(compacted_item, (dict, list)) and len(compacted_item) == 0:
-				continue
-			compacted_list.append(compacted_item)
-		return compacted_list
-	return value
-
-
-def _select_estimator_params(params: dict, keys: list[str]) -> dict:
-	return {key: params.get(key) for key in keys if key in params}
-
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Random Forest Regressor baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
@@ -118,20 +76,29 @@ SAVE_MODEL = args.save_model
 # This section contains model definition, training, evaluation,
 # and artifact generation logic.
 
-# Load data.
+# =============================================================
+# ====================== LOAD DATA ============================
+# =============================================================
+
+# Load data from CSV file into pandas DataFrame.
 project_root = _project_root()
 data_path = project_root / "data" / "template_data" / "california_housing.csv"
 df = pd.read_csv(data_path).dropna()
 
+# Define target variable and features.
 y = df["median_house_value"]
 X = df.drop(columns=["median_house_value"])
 
 # =============================================================
-# ============== ADDITIONAL FEATURE ENGINEERING ===============
+# ================== FEATURE TRANSFORMATIONS ==================
 # =============================================================
 # Add optional feature transformations or derived features below.
 
-#  -
+# -
+
+# =============================================================
+# ================= PREPROCESSING / SPLIT =====================
+# =============================================================
 
 # Split BEFORE fitting transformers to avoid data leakage.
 X_train, X_test, y_train, y_test = train_test_split(
@@ -161,6 +128,10 @@ preprocessor = ColumnTransformer(
 	remainder="drop",
 )
 
+# =============================================================
+# ================= BUILD MODEL PIPELINE ======================
+# =============================================================
+
 # Bundle preprocessing + model into one inference-ready pipeline.
 model = Pipeline(
 	steps=[
@@ -169,10 +140,18 @@ model = Pipeline(
 	]
 )
 
+# =============================================================
+# ===================== TRAIN MODEL ===========================
+# =============================================================
+
 # Fit on training data (pipeline fits preprocessors + model).
 fit_started_at = time.perf_counter()
 model.fit(X_train, y_train)
 fit_time_seconds = float(time.perf_counter() - fit_started_at)
+
+# =============================================================
+# ==================== EVALUATE MODEL =========================
+# =============================================================
 
 # Evaluate model on train/test splits.
 predict_started_at = time.perf_counter()
@@ -195,8 +174,11 @@ test_rmse = root_mean_squared_error(y_test, predictions)
 test_r2 = r2_score(y_test, predictions)
 test_max_error = max_error(y_test, predictions)
 
+# =============================================================
+# ============== MODEL METRICS / LOGGING ======================
+# =============================================================
+
 # ---- Train Metrics (model performance on training data) ----
-print("Train MSE:", train_mse)  # Mean Squared Error on training set (average squared residuals)
 print("Train MSE:", _round_metric(train_mse))  # Mean Squared Error on training set (average squared residuals)
 print("Train MAE:", _round_metric(train_mae))  # Mean Absolute Error on training set (average absolute prediction error)
 print("Train RMSE:", _round_metric(train_rmse))  # Root Mean Squared Error on training set (error in original target units)
@@ -219,9 +201,52 @@ print("Target Std:", _round_metric(y.std()))  # Overall target standard deviatio
 print("First 5 predictions:", predictions[:5])  # Quick sanity check of predicted values and scale
 
 # =============================================================
-# ==================== MODEL CODE ENDS HERE ===================
+# ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
 # =============================================================
-# End of model logic.
+
+# Helper function: calculate post-transform feature count for preprocessor.
+def _post_transform_feature_count(preprocessor, sample_frame: pd.DataFrame) -> int | None:
+	try:
+		transformed = preprocessor.transform(sample_frame)
+		return int(transformed.shape[1])
+	except Exception:
+		return None
+
+# Helper function: map artifact paths for metadata.
+def _artifact_map(base_dir: Path, artifacts: dict[str, Path]) -> dict[str, str]:
+	resolved: dict[str, str] = {}
+	for key, path in artifacts.items():
+		if path.exists():
+			resolved[key] = str(path.relative_to(base_dir))
+	return resolved
+
+# Helper function: compact metadata by removing None or empty values recursively.
+def _compact_metadata(value):
+	if isinstance(value, dict):
+		compacted = {}
+		for key, item in value.items():
+			compacted_item = _compact_metadata(item)
+			if compacted_item is None:
+				continue
+			if isinstance(compacted_item, (dict, list)) and len(compacted_item) == 0:
+				continue
+			compacted[key] = compacted_item
+		return compacted
+	if isinstance(value, list):
+		compacted_list = []
+		for item in value:
+			compacted_item = _compact_metadata(item)
+			if compacted_item is None:
+				continue
+			if isinstance(compacted_item, (dict, list)) and len(compacted_item) == 0:
+				continue
+			compacted_list.append(compacted_item)
+		return compacted_list
+	return value
+
+# Helper function: select relevant estimator parameters for metadata.
+def _select_estimator_params(params: dict, keys: list[str]) -> dict:
+	return {key: params.get(key) for key in keys if key in params}
 
 # Artifact export and registry logging.
 if SAVE_MODEL:
@@ -352,8 +377,6 @@ print(results)
 	)
 
 	run_metadata = {
-		"schema_version": RUN_SCHEMA_VERSION,
-		"metadata_profile": RUN_METADATA_PROFILE,
 		"run_id": run_id,
 		"name": model_name,
 		"timestamp": timestamp,

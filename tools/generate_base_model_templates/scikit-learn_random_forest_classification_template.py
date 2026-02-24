@@ -32,6 +32,10 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 
+# =============================================================
+# =============== CONFIGURATION / CLI FLAGS ===================
+# =============================================================
+
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
 #   --library scikit-learn
@@ -53,8 +57,6 @@ DEFAULT_MAX_ESTIMATORS = 500
 DEFAULT_ESTIMATOR_STEP = 25
 MIN_ESTIMATORS_FOR_STOP = 100
 METRIC_DECIMALS = 4
-RUN_SCHEMA_VERSION = "1.0"
-RUN_METADATA_PROFILE = "compact"
 
 # Helper function: round metrics for cleaner output.
 def _round_metric(value):
@@ -77,50 +79,6 @@ def _parse_bool(value: str) -> bool:
 		return False
 	raise argparse.ArgumentTypeError("Expected true/false")
 
-
-def _post_transform_feature_count(preprocessor, sample_frame: pd.DataFrame) -> int | None:
-	try:
-		transformed = preprocessor.transform(sample_frame)
-		return int(transformed.shape[1])
-	except Exception:
-		return None
-
-
-def _artifact_map(base_dir: Path, artifacts: dict[str, Path]) -> dict[str, str]:
-	resolved: dict[str, str] = {}
-	for key, path in artifacts.items():
-		if path.exists():
-			resolved[key] = str(path.relative_to(base_dir))
-	return resolved
-
-
-def _compact_metadata(value):
-	if isinstance(value, dict):
-		compacted = {}
-		for key, item in value.items():
-			compacted_item = _compact_metadata(item)
-			if compacted_item is None:
-				continue
-			if isinstance(compacted_item, (dict, list)) and len(compacted_item) == 0:
-				continue
-			compacted[key] = compacted_item
-		return compacted
-	if isinstance(value, list):
-		compacted_list = []
-		for item in value:
-			compacted_item = _compact_metadata(item)
-			if compacted_item is None:
-				continue
-			if isinstance(compacted_item, (dict, list)) and len(compacted_item) == 0:
-				continue
-			compacted_list.append(compacted_item)
-		return compacted_list
-	return value
-
-
-def _select_estimator_params(params: dict, keys: list[str]) -> dict:
-	return {key: params.get(key) for key in keys if key in params}
-
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Random Forest Classifier baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
@@ -136,10 +94,20 @@ parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CH
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 
+# =============================================================
+# ====================== LOAD DATA ============================
+# =============================================================
+
+# Load data from CSV file into pandas DataFrame.
 project_root = _project_root()
 data_path = project_root / "data" / "template_data" / "{{DATA_FILE}}"
 df = pd.read_csv(data_path)
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
+
+# Define target variable and features.
+y = df["{{TARGET_COLUMN}}"]
+{{TARGET_PREPROCESS}} # type: ignore
+X = df.drop(columns={{FEATURE_DROP_COLUMNS}}) # type: ignore
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -147,17 +115,16 @@ df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 # This section contains model definition, training, evaluation,
 # and artifact generation logic.
 
-# Load data.
-y = df["{{TARGET_COLUMN}}"]
-{{TARGET_PREPROCESS}} # type: ignore
-X = df.drop(columns={{FEATURE_DROP_COLUMNS}}) # type: ignore
-
 # =============================================================
-# ============== ADDITIONAL FEATURE ENGINEERING ===============
+# ================== FEATURE TRANSFORMATIONS ==================
 # =============================================================
 # Add optional feature transformations or derived features below.
 
-#  -
+# -
+
+# =============================================================
+# ================= PREPROCESSING / SPLIT =====================
+# =============================================================
 
 # Split BEFORE fitting transformers to avoid data leakage.
 # For classification tasks, stratify to preserve class distribution.
@@ -189,8 +156,23 @@ preprocessor = ColumnTransformer(
 	remainder="drop",
 )
 
+# =============================================================
+# ================= BUILD MODEL PIPELINE ======================
+# =============================================================
+
 # Bundle preprocessing + model into one inference-ready pipeline.
 fit_time_seconds = 0.0
+
+# =============================================================
+# ===================== TRAIN MODEL ===========================
+# =============================================================
+# ---------------------------------------------------------------------
+# EARLY STOPPING (optional)
+# - Enabled with --early-stopping=true.
+# - Uses --validation-fraction as holdout split from training data.
+# - Stops when validation score does not improve for --n-iter-no-change rounds.
+# - When disabled, trains once on full training split.
+# ---------------------------------------------------------------------
 if args.early_stopping:
 	X_inner_train, X_valid, y_inner_train, y_valid = train_test_split(
 		X_train,
@@ -312,6 +294,10 @@ else:
 		"patience": int(args.n_iter_no_change),
 	}
 
+# =============================================================
+# ==================== EVALUATE MODEL =========================
+# =============================================================
+
 # Evaluate model on train/test splits.
 predict_started_at = time.perf_counter()
 train_predictions = model.predict(X_train)
@@ -369,6 +355,10 @@ if hasattr(model, "predict_proba"):
 		test_pr_auc_macro_ovr = float(average_precision_score(y_test_binarized, probabilities, average="macro"))
 		brier_score = float(((probabilities - y_test_binarized) ** 2).sum(axis=1).mean())
 
+# =============================================================
+# ============== MODEL METRICS / LOGGING ======================
+# =============================================================
+
 # ---- Train Metrics (model fit on data it learned from) ----
 print("Train Accuracy:", _round_metric(train_accuracy))  # Proportion of correct predictions on training data
 print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged F1 on training set (equal weight per class)
@@ -406,9 +396,52 @@ if model_selection["enabled"]:
 print("First 5 predictions:", predictions[:5])  # Sample predictions for quick sanity check of output classes
 
 # =============================================================
-# ==================== MODEL CODE ENDS HERE ===================
+# ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
 # =============================================================
-# End of model logic.
+
+# Helper function: calculate post-transform feature count for preprocessor.
+def _post_transform_feature_count(preprocessor, sample_frame: pd.DataFrame) -> int | None:
+	try:
+		transformed = preprocessor.transform(sample_frame)
+		return int(transformed.shape[1])
+	except Exception:
+		return None
+
+# Helper function: map artifact paths for metadata.
+def _artifact_map(base_dir: Path, artifacts: dict[str, Path]) -> dict[str, str]:
+	resolved: dict[str, str] = {}
+	for key, path in artifacts.items():
+		if path.exists():
+			resolved[key] = str(path.relative_to(base_dir))
+	return resolved
+
+# Helper function: compact metadata by removing None or empty values recursively.
+def _compact_metadata(value):
+	if isinstance(value, dict):
+		compacted = {}
+		for key, item in value.items():
+			compacted_item = _compact_metadata(item)
+			if compacted_item is None:
+				continue
+			if isinstance(compacted_item, (dict, list)) and len(compacted_item) == 0:
+				continue
+			compacted[key] = compacted_item
+		return compacted
+	if isinstance(value, list):
+		compacted_list = []
+		for item in value:
+			compacted_item = _compact_metadata(item)
+			if compacted_item is None:
+				continue
+			if isinstance(compacted_item, (dict, list)) and len(compacted_item) == 0:
+				continue
+			compacted_list.append(compacted_item)
+		return compacted_list
+	return value
+
+# Helper function: select relevant estimator parameters for metadata.
+def _select_estimator_params(params: dict, keys: list[str]) -> dict:
+	return {key: params.get(key) for key in keys if key in params}
 
 # Artifact export and registry logging.
 if SAVE_MODEL:
@@ -600,8 +633,6 @@ print(results)
 	)
 
 	run_metadata = {
-		"schema_version": RUN_SCHEMA_VERSION,
-		"metadata_profile": RUN_METADATA_PROFILE,
 		"run_id": run_id,
 		"name": model_name,
 		"timestamp": timestamp,
