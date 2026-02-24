@@ -1,13 +1,59 @@
 import argparse
+import hashlib
+import json
 import pickle
+import platform
+import uuid
+from datetime import datetime
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import pandas as pd
+import sklearn
+from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score
+from sklearn.linear_model import SGDClassifier
+from sklearn.metrics import (
+	ConfusionMatrixDisplay,
+	accuracy_score,
+	confusion_matrix,
+	f1_score,
+	precision_score,
+	recall_score,
+	roc_auc_score,
+	roc_curve,
+)
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 
+# ---------------------------------------------------------------------
+# Supported CLI flags (common usage)
+#   --library scikit-learn
+#   --model logistic_regression
+#   --task binary_classification|multiclass_classification
+#   --name <model_name>
+#   --save-model true|false
+#   --random-state <int>
+#   --max-iter <int>
+#   --early-stopping true|false
+#   --validation-fraction <float>
+#   --n-iter-no-change <int>
+# ---------------------------------------------------------------------
+
+# When invoking this model you can specify --save-model true to save the model and artifacts, or set SAVE_MODEL = True by default here.
 SAVE_MODEL = False
+DEFAULT_RANDOM_STATE = 1
+EARLY_STOPPING = True
+DEFAULT_MAX_ITER = 1000
+
+
+def _project_root() -> Path:
+	current = Path(__file__).resolve().parent
+	for candidate in [current, *current.parents]:
+		if (candidate / "requirements.txt").exists():
+			return candidate
+	return Path(__file__).resolve().parents[1]
 
 
 def _parse_bool(value: str) -> bool:
@@ -23,35 +69,357 @@ parser = argparse.ArgumentParser(description="Logistic Regression baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
 parser.add_argument("--model", choices=["logistic_regression"], default="logistic_regression")
 parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
+parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
+parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
+parser.add_argument("--max-iter", type=int, default=DEFAULT_MAX_ITER)
+parser.add_argument("--early-stopping", type=_parse_bool, default=EARLY_STOPPING)
+parser.add_argument("--validation-fraction", type=float, default=0.1)
+parser.add_argument("--n-iter-no-change", type=int, default=5)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 
-data_path = Path(__file__).resolve().parents[1] / "data" / "template_data" / "{{DATA_FILE}}"
+# =============================================================
+# ============== ADDITIONAL FEATURE ENGINEERING ===============
+# =============================================================
+# Insert optional feature transformations, encoding,
+# scaling, or derived feature logic below if required.
+
+#  -
+
+# Load data
+project_root = _project_root()
+data_path = project_root / "data" / "template_data" / "{{DATA_FILE}}"
 df = pd.read_csv(data_path)
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 
 y = df["{{TARGET_COLUMN}}"]
 {{TARGET_PREPROCESS}}
 X = df.drop(columns={{FEATURE_DROP_COLUMNS}})
-X = pd.get_dummies(X, drop_first=True)
+
+# Additional Feature engineer here if needed
+# ******************************************
+# ******************************************
+# ******************************************
 
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
 	test_size=0.2,
-	random_state=42,
+	random_state=args.random_state,
 	stratify=y,
 )
 
-model = LogisticRegression(max_iter=1000)
+# Define column groups automatically from training data
+# Include "str" explicitly for pandas 3 compatibility.
+categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
+numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
+
+try:
+	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+except TypeError:
+	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
+
+# Preprocess: scale numeric, one-hot encode categorical
+preprocessor = ColumnTransformer(
+	transformers=[
+		("num", StandardScaler(), numerical_cols),
+		("cat", one_hot_encoder, categorical_cols),
+	],
+	remainder="drop",
+)
+
+# Bundle preprocess + model into one exportable object
+# Important: this Pipeline is what we save and load for inference.
+# Inference callers should pass raw feature columns (including raw categorical strings),
+# and the pipeline will apply scaling + one-hot encoding consistently.
+if args.early_stopping:
+	classifier = SGDClassifier(
+		loss="log_loss",
+		max_iter=args.max_iter, # Upper bound on iterations; early stopping can halt earlier.
+		tol=1e-3, # This is the minimum change in the monitored metric to qualify as an improvement. Adjust as needed.
+		early_stopping=True, 
+		validation_fraction=args.validation_fraction,
+		n_iter_no_change=args.n_iter_no_change,
+		random_state=args.random_state,
+	)
+	classifier_name = f"SGDClassifier(loss=log_loss, early_stopping=True, max_iter={args.max_iter})"
+else:
+	classifier = LogisticRegression(max_iter=args.max_iter)
+	classifier_name = f"LogisticRegression(max_iter={args.max_iter})"
+
+model = Pipeline(
+	steps=[
+		("preprocess", preprocessor),
+		("classifier", classifier),
+	]
+)
+
+# Fit the model on the training data (this also fits the preprocessors in the pipeline)
 model.fit(X_train, y_train)
 
+# Evaluate the model on the test set and print metrics
 predictions = model.predict(X_test)
-print("Accuracy:", accuracy_score(y_test, predictions))
+test_accuracy = accuracy_score(y_test, predictions)
+average_method = "binary" if args.task == "binary_classification" else "weighted"
+test_precision = precision_score(y_test, predictions, average=average_method, zero_division=0)
+test_recall = recall_score(y_test, predictions, average=average_method, zero_division=0)
+test_f1 = f1_score(y_test, predictions, average=average_method, zero_division=0)
+test_confusion_matrix = confusion_matrix(y_test, predictions)
 
+# Calculate ROC AUC if possible (requires predict_proba and appropriate task)
+roc_auc = None
+roc_curve_points = None
+y_test_binarized = None
+if hasattr(model, "predict_proba"):
+	probabilities = model.predict_proba(X_test)
+	classifier_classes = model.named_steps["classifier"].classes_
+	if args.task == "binary_classification":
+		positive_class = classifier_classes[-1]
+		positive_probabilities = probabilities[:, -1]
+		roc_auc = float(roc_auc_score(y_test, positive_probabilities))
+		fpr, tpr, thresholds = roc_curve(y_test, positive_probabilities, pos_label=positive_class)
+		roc_curve_points = pd.DataFrame(
+			{
+				"fpr": fpr,
+				"tpr": tpr,
+				"threshold": thresholds,
+			}
+		)
+	else:
+		y_test_binarized = label_binarize(y_test, classes=classifier_classes)
+		roc_auc = float(roc_auc_score(y_test_binarized, probabilities, multi_class="ovr", average="weighted"))
+
+# Print metrics
+print("Accuracy:", test_accuracy)
+print("Precision:", test_precision)
+print("Recall:", test_recall)
+print("F1:", test_f1)
+if roc_auc is not None:
+	print("ROC AUC:", roc_auc)
+print("Classifier:", classifier_name)
+print("First 5 predictions:", predictions[:5])
+
+# =============================================================
+# ==================== MODEL CODE ENDS HERE ===================
+# =============================================================
+# End of model logic. No further training or inference code
+# should appear below this section.
+
+# Artifact saving and registry logging logic starts here. This can be customized or removed as needed.
 if SAVE_MODEL:
-	model_path = Path(__file__).resolve().with_name(f"{Path(__file__).stem}_model.pkl")
-	with model_path.open("wb") as model_file:
+	project_root = _project_root()
+	model_name = args.name.strip() or Path(__file__).stem
+	model_root_dir = project_root / "artifacts" / "models" / model_name
+	timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+	run_id = str(uuid.uuid4())
+	data_hash = hashlib.sha256(data_path.read_bytes()).hexdigest()
+	data_rows = int(len(df))
+	data_columns = int(df.shape[1])
+	run_dir = model_root_dir / f"{timestamp}_{model_name}"
+
+	model_dir = run_dir / "model"
+	preprocess_dir = run_dir / "preprocess"
+	eval_dir = run_dir / "eval"
+	data_dir = run_dir / "data"
+	inference_dir = run_dir / "inference"
+
+	for directory in (model_dir, preprocess_dir, eval_dir, data_dir, inference_dir):
+		directory.mkdir(parents=True, exist_ok=True)
+
+	with (model_dir / "model.pkl").open("wb") as model_file:
+		# Saves full inference-ready pipeline: preprocess + classifier.
 		pickle.dump(model, model_file)
-	print(f"Saved model to: {model_path}")
+
+	with (preprocess_dir / "preprocessor.pkl").open("wb") as preprocess_file:
+		pickle.dump(model.named_steps["preprocess"], preprocess_file)
+
+	metrics = {
+		"accuracy": float(test_accuracy),
+		"precision": float(test_precision),
+		"recall": float(test_recall),
+		"f1": float(test_f1),
+		"roc_auc": float(roc_auc) if roc_auc is not None else None,
+		"n_train": int(len(X_train)),
+		"n_test": int(len(X_test)),
+	}
+	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
+		json.dump(metrics, metrics_file, indent=2)
+
+	confusion_matrix_df = pd.DataFrame(
+		test_confusion_matrix,
+		index=model.named_steps["classifier"].classes_,
+		columns=model.named_steps["classifier"].classes_,
+	)
+	confusion_matrix_df.to_csv(eval_dir / "confusion_matrix.csv", index=True)
+
+	cm_figure, cm_axis = plt.subplots(figsize=(6, 5))
+	cm_display = ConfusionMatrixDisplay(
+		confusion_matrix=test_confusion_matrix,
+		display_labels=model.named_steps["classifier"].classes_,
+	)
+	cm_display.plot(ax=cm_axis, cmap="Blues", colorbar=False)
+	cm_axis.set_title("Confusion Matrix")
+	cm_figure.tight_layout()
+	cm_figure.savefig(eval_dir / "confusion_matrix.png", dpi=150)
+	plt.close(cm_figure)
+
+	if roc_curve_points is not None:
+		roc_curve_points.to_csv(eval_dir / "roc_curve.csv", index=False)
+
+	if roc_auc is not None:
+		roc_figure, roc_axis = plt.subplots(figsize=(6, 5))
+		if args.task == "binary_classification" and roc_curve_points is not None:
+			roc_axis.plot(
+				roc_curve_points["fpr"],
+				roc_curve_points["tpr"],
+				label=f"ROC AUC = {roc_auc:.4f}",
+			)
+		else:
+			for class_index, class_label in enumerate(classifier_classes):
+				class_fpr, class_tpr, _ = roc_curve(y_test_binarized[:, class_index], probabilities[:, class_index])
+				roc_axis.plot(class_fpr, class_tpr, label=f"Class {class_label}")
+			roc_axis.text(0.6, 0.1, f"Weighted OVR AUC = {roc_auc:.4f}")
+
+		roc_axis.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
+		roc_axis.set_xlim(0.0, 1.0)
+		roc_axis.set_ylim(0.0, 1.05)
+		roc_axis.set_xlabel("False Positive Rate")
+		roc_axis.set_ylabel("True Positive Rate")
+		roc_axis.set_title("ROC Curve")
+		roc_axis.legend(loc="lower right")
+		roc_figure.tight_layout()
+		roc_figure.savefig(eval_dir / "roc_curve.png", dpi=150)
+		plt.close(roc_figure)
+
+	predictions_preview = pd.DataFrame(
+		{
+			"y_true": y_test.iloc[:50].tolist(),
+			"y_pred": pd.Series(predictions[:50]).tolist(),
+		}
+	)
+	predictions_preview.to_csv(eval_dir / "predictions_preview.csv", index=False)
+
+	# Example inference rows are kept in raw feature format on purpose.
+	# Do NOT pre-one-hot-encode these rows; model.pkl handles preprocessing.
+	inference_rows = X_test.iloc[:5].to_dict(orient="records")
+	expected_values = y_test.iloc[:5].tolist()
+	inference_script = f'''import pickle
+from pathlib import Path
+
+import pandas as pd
+
+MODEL_PATH = Path(__file__).resolve().parents[1] / "model" / "model.pkl"
+
+sample_rows = {json.dumps(inference_rows, indent=2)}
+expected_y = {json.dumps(expected_values, indent=2)}
+
+with MODEL_PATH.open("rb") as model_file:
+	model = pickle.load(model_file)
+
+features = pd.DataFrame(sample_rows)
+predictions = model.predict(features)
+
+print("Inference example (5 rows from X_test)")
+print("Predictions:", predictions.tolist())
+print("Expected y:", expected_y)
+
+results = features.copy()
+results["y_expected"] = expected_y
+results["y_pred"] = predictions
+print(results)
+'''
+	with (inference_dir / "inference_example.py").open("w", encoding="utf-8") as inference_file:
+		inference_file.write(inference_script)
+
+	feature_schema = {
+		"target": "{{TARGET_COLUMN}}",
+		"feature_columns": X.columns.tolist(),
+		"categorical_columns": categorical_cols,
+		"numerical_columns": numerical_cols,
+		"dtypes": {col: str(dtype) for col, dtype in X.dtypes.items()},
+	}
+	with (data_dir / "feature_schema.json").open("w", encoding="utf-8") as schema_file:
+		json.dump(feature_schema, schema_file, indent=2)
+
+	run_metadata = {
+		"run_id": run_id,
+		"library": args.library,
+		"model": args.model,
+		"name": model_name,
+		"task": args.task,
+		"timestamp": timestamp,
+		"dataset": {
+			"path": str(data_path.relative_to(project_root)),
+			"sha256": data_hash,
+			"rows": data_rows,
+			"columns": data_columns,
+		},
+		"artifacts": {
+			"model": str((model_dir / "model.pkl").relative_to(project_root)),
+			"preprocess": str((preprocess_dir / "preprocessor.pkl").relative_to(project_root)),
+			"eval_metrics": str((eval_dir / "metrics.json").relative_to(project_root)),
+			"eval_confusion_matrix": str((eval_dir / "confusion_matrix.csv").relative_to(project_root)),
+			"eval_confusion_matrix_plot": str((eval_dir / "confusion_matrix.png").relative_to(project_root)),
+			"eval_predictions_preview": str((eval_dir / "predictions_preview.csv").relative_to(project_root)),
+			"eval_roc_curve": str((eval_dir / "roc_curve.csv").relative_to(project_root)) if roc_curve_points is not None else None,
+			"eval_roc_curve_plot": str((eval_dir / "roc_curve.png").relative_to(project_root)) if roc_auc is not None else None,
+			"feature_schema": str((data_dir / "feature_schema.json").relative_to(project_root)),
+			"inference_example": str((inference_dir / "inference_example.py").relative_to(project_root)),
+		},
+		"params": {
+			"test_size": 0.2,
+			"random_state": args.random_state,
+			"max_iter": int(args.max_iter),
+			"early_stopping": bool(args.early_stopping),
+			"validation_fraction": float(args.validation_fraction),
+			"n_iter_no_change": int(args.n_iter_no_change),
+			"one_hot_handle_unknown": "ignore",
+			"scaler": "StandardScaler",
+			"classifier": classifier_name,
+		},
+		"versions": {
+			"python": platform.python_version(),
+			"pandas": pd.__version__,
+			"scikit-learn": sklearn.__version__,
+		},
+	}
+	with (run_dir / "run.json").open("w", encoding="utf-8") as run_file:
+		json.dump(run_metadata, run_file, indent=2)
+
+	registry_path = model_root_dir / "model_registry.csv"
+	if registry_path.exists():
+		registry_df = pd.read_csv(registry_path)
+		if "model_id" in registry_df.columns and not registry_df.empty:
+			model_id = int(registry_df["model_id"].max()) + 1
+		else:
+			model_id = 1
+	else:
+		registry_df = pd.DataFrame()
+		model_id = 1
+
+	registry_row = pd.DataFrame(
+		[
+			{
+				"model_id": model_id,
+				"run_id": run_id,
+				"name": model_name,
+				"timestamp": timestamp,
+				"dataset_sha256": data_hash,
+				"dataset_rows": data_rows,
+				"dataset_columns": data_columns,
+				"random_state": int(args.random_state),
+				"accuracy": float(test_accuracy),
+				"precision": float(test_precision),
+				"recall": float(test_recall),
+				"f1": float(test_f1),
+				"roc_auc": float(roc_auc) if roc_auc is not None else None,
+				"n_train": int(len(X_train)),
+				"n_test": int(len(X_test)),
+			}
+		]
+	)
+	registry_df = pd.concat([registry_df, registry_row], ignore_index=True)
+	registry_df.to_csv(registry_path, index=False)
+
+	print(f"Artifacts exported to: {run_dir}")

@@ -7,30 +7,32 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import sklearn
 from sklearn.compose import ColumnTransformer
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, mean_squared_error, root_mean_squared_error
+from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import SGDClassifier
+from sklearn.metrics import (
+	ConfusionMatrixDisplay,
+	accuracy_score,
+	confusion_matrix,
+	f1_score,
+	precision_score,
+	recall_score,
+	roc_auc_score,
+	roc_curve,
+)
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-
-# ---------------------------------------------------------------------
-# Supported CLI flags (common usage)
-#   --library scikit-learn
-#   --model linear_regression
-#   --task regression
-#   --name <model_name>
-#   --save-model true|false
-#   --random-state <int>
-# ---------------------------------------------------------------------
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 
 # When invoking this model you can specify --save-model true to save the model and artifacts, or set SAVE_MODEL = True by default here.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
+EARLY_STOPPING = False
 
-# Helper functions
+
 def _project_root() -> Path:
 	current = Path(__file__).resolve().parent
 	for candidate in [current, *current.parents]:
@@ -38,7 +40,7 @@ def _project_root() -> Path:
 			return candidate
 	return Path(__file__).resolve().parents[1]
 
-# Helper function to parse boolean command-line arguments
+
 def _parse_bool(value: str) -> bool:
 	normalized = value.strip().lower()
 	if normalized in {"1", "true", "yes", "y"}:
@@ -47,46 +49,43 @@ def _parse_bool(value: str) -> bool:
 		return False
 	raise argparse.ArgumentTypeError("Expected true/false")
 
-# Argument parsing
-parser = argparse.ArgumentParser(description="Linear Regression baseline")
+
+parser = argparse.ArgumentParser(description="Logistic Regression baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
-parser.add_argument("--model", choices=["linear_regression"], default="linear_regression")
-parser.add_argument("--task", choices=["regression"], default="regression")
+parser.add_argument("--model", choices=["logistic_regression"], default="logistic_regression")
+parser.add_argument("--task", choices=["binary_classification"], default="binary_classification")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
+parser.add_argument("--early-stopping", type=_parse_bool, default=EARLY_STOPPING)
+parser.add_argument("--validation-fraction", type=float, default=0.1)
+parser.add_argument("--n-iter-no-change", type=int, default=5)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 
-# =============================================================
-# ================== MODEL CODE STARTS HERE ===================
-# =============================================================
-# The following section contains model definition, training,
-# evaluation, and artifact generation logic.
+# Main code starts here
 
 # Load data
 project_root = _project_root()
-data_path = project_root / "data" / "template_data" / "california_housing.csv"
-df = pd.read_csv(data_path).dropna()
+data_path = project_root / "data" / "template_data" / "breast_cancer_wisconsin.csv"
+df = pd.read_csv(data_path)
+df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 
-# Separate target from features
-y = df["median_house_value"]
-X = df.drop(columns=["median_house_value"])
+y = df["diagnosis"]
+y = y.map({"B": 0, "M": 1}).astype("int64")
+X = df.drop(columns=["diagnosis", "id"])
 
-# =============================================================
-# ============== ADDITIONAL FEATURE ENGINEERING ===============
-# =============================================================
-# Insert optional feature transformations, encoding,
-# scaling, or derived feature logic below if required.
+# Additional Feature engineer here if needed
+# ******************************************
+# ******************************************
+# ******************************************
 
-#  -
-
-# Split BEFORE fitting transformers to avoid data leakage
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
 	test_size=0.2,
 	random_state=args.random_state,
+	stratify=y,
 )
 
 # Define column groups automatically from training data
@@ -94,7 +93,6 @@ X_train, X_test, y_train, y_test = train_test_split(
 categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
 numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
 
-# 
 try:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
 except TypeError:
@@ -113,33 +111,74 @@ preprocessor = ColumnTransformer(
 # Important: this Pipeline is what we save and load for inference.
 # Inference callers should pass raw feature columns (including raw categorical strings),
 # and the pipeline will apply scaling + one-hot encoding consistently.
+if args.early_stopping:
+	classifier = SGDClassifier(
+		loss="log_loss",
+		max_iter=1000,
+		tol=1e-3,
+		early_stopping=True,
+		validation_fraction=args.validation_fraction,
+		n_iter_no_change=args.n_iter_no_change,
+		random_state=args.random_state,
+	)
+	classifier_name = "SGDClassifier(loss=log_loss, early_stopping=True)"
+else:
+	classifier = LogisticRegression(max_iter=1000)
+	classifier_name = "LogisticRegression(max_iter=1000)"
+
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
-		("regressor", LinearRegression()),
+		("classifier", classifier),
 	]
 )
 
 # Fit the model on the training data (this also fits the preprocessors in the pipeline)
 model.fit(X_train, y_train)
 
+# Evaluate the model on the test set and print metrics
 predictions = model.predict(X_test)
-test_loss = mean_squared_error(y_test, predictions)
-test_mae = mean_absolute_error(y_test, predictions)
-test_rmse = root_mean_squared_error(y_test, predictions)
+test_accuracy = accuracy_score(y_test, predictions)
+average_method = "binary" if args.task == "binary_classification" else "weighted"
+test_precision = precision_score(y_test, predictions, average=average_method, zero_division=0)
+test_recall = recall_score(y_test, predictions, average=average_method, zero_division=0)
+test_f1 = f1_score(y_test, predictions, average=average_method, zero_division=0)
+test_confusion_matrix = confusion_matrix(y_test, predictions)
 
-print("Test Loss:", test_loss)   # Mean Squared Error (average of squared prediction errors)
-print("Test MAE:", test_mae)     # Mean Absolute Error (average absolute difference from true values)
-print("Test RMSE:", test_rmse)   # Root Mean Squared Error (error in original units, penalizes large mistakes)
+# Calculate ROC AUC if possible (requires predict_proba and appropriate task)
+roc_auc = None
+roc_curve_points = None
+y_test_binarized = None
+if hasattr(model, "predict_proba"):
+	probabilities = model.predict_proba(X_test)
+	classifier_classes = model.named_steps["classifier"].classes_
+	if args.task == "binary_classification":
+		positive_class = classifier_classes[-1]
+		positive_probabilities = probabilities[:, -1]
+		roc_auc = float(roc_auc_score(y_test, positive_probabilities))
+		fpr, tpr, thresholds = roc_curve(y_test, positive_probabilities, pos_label=positive_class)
+		roc_curve_points = pd.DataFrame(
+			{
+				"fpr": fpr,
+				"tpr": tpr,
+				"threshold": thresholds,
+			}
+		)
+	else:
+		y_test_binarized = label_binarize(y_test, classes=classifier_classes)
+		roc_auc = float(roc_auc_score(y_test_binarized, probabilities, multi_class="ovr", average="weighted"))
+
+# Print metrics
+print("Accuracy:", test_accuracy)
+print("Precision:", test_precision)
+print("Recall:", test_recall)
+print("F1:", test_f1)
+if roc_auc is not None:
+	print("ROC AUC:", roc_auc)
+print("Classifier:", classifier_name)
 print("First 5 predictions:", predictions[:5])
 
-# =============================================================
-# ==================== MODEL CODE ENDS HERE ===================
-# =============================================================
-# End of model logic. No further training or inference code
-# should appear below this section.
-
-# Artifact saving and registry logging logic starts here. This can be customized or removed as needed.
+# END of template code - below is optional artifact saving and registry logging, which can be customized or removed as needed.
 if SAVE_MODEL:
 	project_root = _project_root()
 	model_name = args.name.strip() or Path(__file__).stem
@@ -161,26 +200,74 @@ if SAVE_MODEL:
 		directory.mkdir(parents=True, exist_ok=True)
 
 	with (model_dir / "model.pkl").open("wb") as model_file:
-		# Saves full inference-ready pipeline: preprocess + regressor.
+		# Saves full inference-ready pipeline: preprocess + classifier.
 		pickle.dump(model, model_file)
 
 	with (preprocess_dir / "preprocessor.pkl").open("wb") as preprocess_file:
 		pickle.dump(model.named_steps["preprocess"], preprocess_file)
 
 	metrics = {
-		"mse": float(test_loss),
-		"mae": float(test_mae),
-		"rmse": float(test_rmse),
+		"accuracy": float(test_accuracy),
+		"precision": float(test_precision),
+		"recall": float(test_recall),
+		"f1": float(test_f1),
+		"roc_auc": float(roc_auc) if roc_auc is not None else None,
 		"n_train": int(len(X_train)),
 		"n_test": int(len(X_test)),
 	}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
 		json.dump(metrics, metrics_file, indent=2)
 
+	confusion_matrix_df = pd.DataFrame(
+		test_confusion_matrix,
+		index=model.named_steps["classifier"].classes_,
+		columns=model.named_steps["classifier"].classes_,
+	)
+	confusion_matrix_df.to_csv(eval_dir / "confusion_matrix.csv", index=True)
+
+	cm_figure, cm_axis = plt.subplots(figsize=(6, 5))
+	cm_display = ConfusionMatrixDisplay(
+		confusion_matrix=test_confusion_matrix,
+		display_labels=model.named_steps["classifier"].classes_,
+	)
+	cm_display.plot(ax=cm_axis, cmap="Blues", colorbar=False)
+	cm_axis.set_title("Confusion Matrix")
+	cm_figure.tight_layout()
+	cm_figure.savefig(eval_dir / "confusion_matrix.png", dpi=150)
+	plt.close(cm_figure)
+
+	if roc_curve_points is not None:
+		roc_curve_points.to_csv(eval_dir / "roc_curve.csv", index=False)
+
+	if roc_auc is not None:
+		roc_figure, roc_axis = plt.subplots(figsize=(6, 5))
+		if args.task == "binary_classification" and roc_curve_points is not None:
+			roc_axis.plot(
+				roc_curve_points["fpr"],
+				roc_curve_points["tpr"],
+				label=f"ROC AUC = {roc_auc:.4f}",
+			)
+		else:
+			for class_index, class_label in enumerate(classifier_classes):
+				class_fpr, class_tpr, _ = roc_curve(y_test_binarized[:, class_index], probabilities[:, class_index])
+				roc_axis.plot(class_fpr, class_tpr, label=f"Class {class_label}")
+			roc_axis.text(0.6, 0.1, f"Weighted OVR AUC = {roc_auc:.4f}")
+
+		roc_axis.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
+		roc_axis.set_xlim(0.0, 1.0)
+		roc_axis.set_ylim(0.0, 1.05)
+		roc_axis.set_xlabel("False Positive Rate")
+		roc_axis.set_ylabel("True Positive Rate")
+		roc_axis.set_title("ROC Curve")
+		roc_axis.legend(loc="lower right")
+		roc_figure.tight_layout()
+		roc_figure.savefig(eval_dir / "roc_curve.png", dpi=150)
+		plt.close(roc_figure)
+
 	predictions_preview = pd.DataFrame(
 		{
 			"y_true": y_test.iloc[:50].tolist(),
-			"y_pred": predictions[:50].tolist(),
+			"y_pred": pd.Series(predictions[:50]).tolist(),
 		}
 	)
 	predictions_preview.to_csv(eval_dir / "predictions_preview.csv", index=False)
@@ -218,7 +305,7 @@ print(results)
 		inference_file.write(inference_script)
 
 	feature_schema = {
-		"target": "median_house_value",
+		"target": "diagnosis",
 		"feature_columns": X.columns.tolist(),
 		"categorical_columns": categorical_cols,
 		"numerical_columns": numerical_cols,
@@ -244,16 +331,23 @@ print(results)
 			"model": str((model_dir / "model.pkl").relative_to(project_root)),
 			"preprocess": str((preprocess_dir / "preprocessor.pkl").relative_to(project_root)),
 			"eval_metrics": str((eval_dir / "metrics.json").relative_to(project_root)),
+			"eval_confusion_matrix": str((eval_dir / "confusion_matrix.csv").relative_to(project_root)),
+			"eval_confusion_matrix_plot": str((eval_dir / "confusion_matrix.png").relative_to(project_root)),
 			"eval_predictions_preview": str((eval_dir / "predictions_preview.csv").relative_to(project_root)),
+			"eval_roc_curve": str((eval_dir / "roc_curve.csv").relative_to(project_root)) if roc_curve_points is not None else None,
+			"eval_roc_curve_plot": str((eval_dir / "roc_curve.png").relative_to(project_root)) if roc_auc is not None else None,
 			"feature_schema": str((data_dir / "feature_schema.json").relative_to(project_root)),
 			"inference_example": str((inference_dir / "inference_example.py").relative_to(project_root)),
 		},
 		"params": {
 			"test_size": 0.2,
 			"random_state": args.random_state,
+			"early_stopping": bool(args.early_stopping),
+			"validation_fraction": float(args.validation_fraction),
+			"n_iter_no_change": int(args.n_iter_no_change),
 			"one_hot_handle_unknown": "ignore",
 			"scaler": "StandardScaler",
-			"regressor": "LinearRegression",
+			"classifier": classifier_name,
 		},
 		"versions": {
 			"python": platform.python_version(),
@@ -286,9 +380,11 @@ print(results)
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
-				"mse": float(test_loss),
-				"mae": float(test_mae),
-				"rmse": float(test_rmse),
+				"accuracy": float(test_accuracy),
+				"precision": float(test_precision),
+				"recall": float(test_recall),
+				"f1": float(test_f1),
+				"roc_auc": float(roc_auc) if roc_auc is not None else None,
 				"n_train": int(len(X_train)),
 				"n_test": int(len(X_test)),
 			}
