@@ -27,11 +27,11 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 #   --test-size <float>
 # ---------------------------------------------------------------------
 
-# When invoking this model you can specify --save-model true to save the model and artifacts, or set SAVE_MODEL = True by default here.
+# Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 
-# Helper functions
+# Helper function: find project root using a marker file.
 def _project_root() -> Path:
 	current = Path(__file__).resolve().parent
 	for candidate in [current, *current.parents]:
@@ -39,7 +39,7 @@ def _project_root() -> Path:
 			return candidate
 	return Path(__file__).resolve().parents[1]
 
-# Helper function to parse boolean command-line arguments
+# Helper function: parse boolean CLI input.
 def _parse_bool(value: str) -> bool:
 	normalized = value.strip().lower()
 	if normalized in {"1", "true", "yes", "y"}:
@@ -48,7 +48,7 @@ def _parse_bool(value: str) -> bool:
 		return False
 	raise argparse.ArgumentTypeError("Expected true/false")
 
-# Argument parsing
+# Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Linear Regression baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
 parser.add_argument("--model", choices=["linear_regression"], default="linear_regression")
@@ -63,10 +63,10 @@ SAVE_MODEL = args.save_model
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
 # =============================================================
-# The following section contains model definition, training,
-# evaluation, and artifact generation logic.
+# This section contains model definition, training, evaluation,
+# and artifact generation logic.
 
-# Load data
+# Load data.
 project_root = _project_root()
 data_path = project_root / "data" / "template_data" / "california_housing.csv"
 df = pd.read_csv(data_path).dropna()
@@ -78,12 +78,11 @@ X = df.drop(columns=["median_house_value"])
 # =============================================================
 # ============== ADDITIONAL FEATURE ENGINEERING ===============
 # =============================================================
-# Insert optional feature transformations, encoding,
-# scaling, or derived feature logic below if required.
+# Add optional feature transformations or derived features below.
 
 #  -
 
-# Split BEFORE fitting transformers to avoid data leakage
+# Split BEFORE fitting transformers to avoid data leakage.
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
@@ -91,18 +90,18 @@ X_train, X_test, y_train, y_test = train_test_split(
 	random_state=args.random_state,
 )
 
-# Define column groups automatically from training data
+# Define column groups from training data only.
 # Include "str" explicitly for pandas 3 compatibility.
 categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
 numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
 
-# 
+# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
 try:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
 except TypeError:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
 
-# Preprocess: scale numeric, one-hot encode categorical
+# Preprocess: scale numeric features and one-hot encode categorical features.
 preprocessor = ColumnTransformer(
 	transformers=[
 		("num", StandardScaler(), numerical_cols),
@@ -111,10 +110,7 @@ preprocessor = ColumnTransformer(
 	remainder="drop",
 )
 
-# Bundle preprocess + model into one exportable object
-# Important: this Pipeline is what we save and load for inference.
-# Inference callers should pass raw feature columns (including raw categorical strings),
-# and the pipeline will apply scaling + one-hot encoding consistently.
+# Bundle preprocessing + model into one inference-ready pipeline.
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
@@ -122,10 +118,10 @@ model = Pipeline(
 	]
 )
 
-# Fit the model on the training data (this also fits the preprocessors in the pipeline)
+# Fit on training data (pipeline fits preprocessors + model).
 model.fit(X_train, y_train)
 
-# Evaluate on test set using multiple metrics
+# Evaluate model on train/test splits.
 train_predictions = model.predict(X_train)
 predictions = model.predict(X_test)
 train_mse = mean_squared_error(y_train, train_predictions)
@@ -169,10 +165,9 @@ print("First 5 predictions:", predictions[:5])  # Sample of predicted values (qu
 # =============================================================
 # ==================== MODEL CODE ENDS HERE ===================
 # =============================================================
-# End of model logic. No further training or inference code
-# should appear below this section.
+# End of model logic.
 
-# Artifact saving and registry logging logic starts here. This can be customized or removed as needed.
+# Artifact export and registry logging.
 if SAVE_MODEL:
 	project_root = _project_root()
 	model_name = args.name.strip() or Path(__file__).stem

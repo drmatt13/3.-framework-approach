@@ -27,10 +27,11 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 #   --test-size <float>
 # ---------------------------------------------------------------------
 
+# Default values for optional parameters. These can be overridden via CLI when invoking the model.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 
-
+# Helper function to find project root by looking for a marker file (e.g., requirements.txt)
 def _project_root() -> Path:
 	current = Path(__file__).resolve().parent
 	for candidate in [current, *current.parents]:
@@ -38,7 +39,7 @@ def _project_root() -> Path:
 			return candidate
 	return Path(__file__).resolve().parents[1]
 
-
+# Helper function to parse boolean command-line arguments
 def _parse_bool(value: str) -> bool:
 	normalized = value.strip().lower()
 	if normalized in {"1", "true", "yes", "y"}:
@@ -47,7 +48,7 @@ def _parse_bool(value: str) -> bool:
 		return False
 	raise argparse.ArgumentTypeError("Expected true/false")
 
-
+# Command-line argument parsing
 parser = argparse.ArgumentParser(description="Random Forest Regressor baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
 parser.add_argument("--model", choices=["random_forest"], default="random_forest")
@@ -58,6 +59,12 @@ parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
+
+# =============================================================
+# ================== MODEL CODE STARTS HERE ===================
+# =============================================================
+# The following section contains model definition, training,
+# evaluation, and artifact generation logic.
 
 # Load data
 project_root = _project_root()
@@ -75,6 +82,7 @@ X = df.drop(columns=["median_house_value"])
 
 #  -
 
+# 
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,

@@ -42,10 +42,11 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 #   --test-size <float>
 # ---------------------------------------------------------------------
 
+# Default values for optional parameters. These can be overridden via CLI when invoking the model.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 
-
+# Helper function to find project root by looking for a marker file (e.g., requirements.txt)
 def _project_root() -> Path:
 	current = Path(__file__).resolve().parent
 	for candidate in [current, *current.parents]:
@@ -53,7 +54,7 @@ def _project_root() -> Path:
 			return candidate
 	return Path(__file__).resolve().parents[1]
 
-
+# Helper function to parse boolean command-line arguments
 def _parse_bool(value: str) -> bool:
 	normalized = value.strip().lower()
 	if normalized in {"1", "true", "yes", "y"}:
@@ -79,6 +80,12 @@ data_path = project_root / "data" / "template_data" / "{{DATA_FILE}}"
 df = pd.read_csv(data_path)
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 
+# =============================================================
+# ================== MODEL CODE STARTS HERE ===================
+# =============================================================
+# The following section contains model definition, training,
+# evaluation, and artifact generation logic.
+
 y = df["{{TARGET_COLUMN}}"]
 {{TARGET_PREPROCESS}}
 X = df.drop(columns={{FEATURE_DROP_COLUMNS}})
@@ -91,6 +98,7 @@ X = df.drop(columns={{FEATURE_DROP_COLUMNS}})
 
 #  -
 
+# Split BEFORE fitting transformers to avoid data leakage. For classification tasks, stratify by the target variable to maintain class distribution in train/test sets.
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
@@ -99,9 +107,11 @@ X_train, X_test, y_train, y_test = train_test_split(
 	stratify=y,
 )
 
+# For classification tasks, it's important to stratify the split by the target variable to maintain the class distribution in both training and test sets. This helps ensure that the model is trained and evaluated on representative samples of each class, which is especially crucial for imbalanced datasets.
 categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
 numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
 
+# OneHotEncoder's sparse_output parameter was introduced in scikit-learn 1.2. If using an older version, fall back to sparse=False.
 try:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
 except TypeError:
@@ -115,6 +125,7 @@ preprocessor = ColumnTransformer(
 	remainder="drop",
 )
 
+# The pipeline will apply preprocessing before fitting the classifier. This ensures that all transformations are properly applied during both training and inference, and helps prevent data leakage by fitting transformers only on the training data.
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
@@ -122,6 +133,7 @@ model = Pipeline(
 	]
 )
 
+# Fit the model on the training data. The pipeline will apply preprocessing before fitting the classifier.
 model.fit(X_train, y_train)
 
 train_predictions = model.predict(X_train)
@@ -143,6 +155,7 @@ _, _, _, support_values = precision_recall_fscore_support(
 )
 support_by_class = {str(label): int(count) for label, count in zip(classifier_classes, support_values)}
 support_total = int(len(y_test))
+
 
 train_logloss_value = None
 test_roc_auc_macro_ovr = None
