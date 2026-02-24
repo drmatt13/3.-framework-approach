@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 import sklearn
 from sklearn.compose import ColumnTransformer
-from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
@@ -19,18 +19,17 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
 #   --library scikit-learn
-#   --model linear_regression
+#   --model random_forest
 #   --task regression
 #   --name <model_name>
 #   --save-model true|false
 #   --random-state <int>
 # ---------------------------------------------------------------------
 
-# When invoking this model you can specify --save-model true to save the model and artifacts, or set SAVE_MODEL = True by default here.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 
-# Helper functions
+
 def _project_root() -> Path:
 	current = Path(__file__).resolve().parent
 	for candidate in [current, *current.parents]:
@@ -38,7 +37,7 @@ def _project_root() -> Path:
 			return candidate
 	return Path(__file__).resolve().parents[1]
 
-# Helper function to parse boolean command-line arguments
+
 def _parse_bool(value: str) -> bool:
 	normalized = value.strip().lower()
 	if normalized in {"1", "true", "yes", "y"}:
@@ -47,10 +46,10 @@ def _parse_bool(value: str) -> bool:
 		return False
 	raise argparse.ArgumentTypeError("Expected true/false")
 
-# Argument parsing
-parser = argparse.ArgumentParser(description="Linear Regression baseline")
+
+parser = argparse.ArgumentParser(description="Random Forest Regressor baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
-parser.add_argument("--model", choices=["linear_regression"], default="linear_regression")
+parser.add_argument("--model", choices=["random_forest"], default="random_forest")
 parser.add_argument("--task", choices=["regression"], default="regression")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
@@ -58,30 +57,19 @@ parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 
-# =============================================================
-# ================== MODEL CODE STARTS HERE ===================
-# =============================================================
-# The following section contains model definition, training,
-# evaluation, and artifact generation logic.
-
 # Load data
 project_root = _project_root()
 data_path = project_root / "data" / "template_data" / "california_housing.csv"
 df = pd.read_csv(data_path).dropna()
 
-# Separate target from features
 y = df["median_house_value"]
 X = df.drop(columns=["median_house_value"])
 
-# =============================================================
-# ============== ADDITIONAL FEATURE ENGINEERING ===============
-# =============================================================
-# Insert optional feature transformations, encoding,
-# scaling, or derived feature logic below if required.
+# Additional Feature engineer here if needed
+# ******************************************
+# ******************************************
+# ******************************************
 
-#  -
-
-# Split BEFORE fitting transformers to avoid data leakage
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
@@ -89,18 +77,14 @@ X_train, X_test, y_train, y_test = train_test_split(
 	random_state=args.random_state,
 )
 
-# Define column groups automatically from training data
-# Include "str" explicitly for pandas 3 compatibility.
 categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
 numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
 
-# 
 try:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
 except TypeError:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
 
-# Preprocess: scale numeric, one-hot encode categorical
 preprocessor = ColumnTransformer(
 	transformers=[
 		("num", StandardScaler(), numerical_cols),
@@ -109,41 +93,28 @@ preprocessor = ColumnTransformer(
 	remainder="drop",
 )
 
-# Bundle preprocess + model into one exportable object
-# Important: this Pipeline is what we save and load for inference.
-# Inference callers should pass raw feature columns (including raw categorical strings),
-# and the pipeline will apply scaling + one-hot encoding consistently.
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
-		("regressor", LinearRegression()),
+		("regressor", RandomForestRegressor(random_state=args.random_state)),
 	]
 )
 
-# Fit the model on the training data (this also fits the preprocessors in the pipeline)
 model.fit(X_train, y_train)
 
 predictions = model.predict(X_test)
-test_loss = mean_squared_error(y_test, predictions)
+test_mse = mean_squared_error(y_test, predictions)
 test_mae = mean_absolute_error(y_test, predictions)
 test_rmse = root_mean_squared_error(y_test, predictions)
 test_r2 = r2_score(y_test, predictions)
 
-print("Test Loss:", test_loss)   # Mean Squared Error (average of squared prediction errors)
-print("Test MAE:", test_mae)     # Mean Absolute Error (average absolute difference from true values)
-print("Test RMSE:", test_rmse)   # Root Mean Squared Error (error in original units, penalizes large mistakes)
-print("Test R2:", test_r2)       # R² score (proportion of variance explained)
+print("MSE:", test_mse)
+print("MAE:", test_mae)
+print("RMSE:", test_rmse)
+print("R2:", test_r2)
 print("First 5 predictions:", predictions[:5])
 
-# =============================================================
-# ==================== MODEL CODE ENDS HERE ===================
-# =============================================================
-# End of model logic. No further training or inference code
-# should appear below this section.
-
-# Artifact saving and registry logging logic starts here. This can be customized or removed as needed.
 if SAVE_MODEL:
-	project_root = _project_root()
 	model_name = args.name.strip() or Path(__file__).stem
 	model_root_dir = project_root / "artifacts" / "models" / model_name
 	timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -163,14 +134,13 @@ if SAVE_MODEL:
 		directory.mkdir(parents=True, exist_ok=True)
 
 	with (model_dir / "model.pkl").open("wb") as model_file:
-		# Saves full inference-ready pipeline: preprocess + regressor.
 		pickle.dump(model, model_file)
 
 	with (preprocess_dir / "preprocessor.pkl").open("wb") as preprocess_file:
 		pickle.dump(model.named_steps["preprocess"], preprocess_file)
 
 	metrics = {
-		"mse": float(test_loss),
+		"mse": float(test_mse),
 		"mae": float(test_mae),
 		"rmse": float(test_rmse),
 		"r2": float(test_r2),
@@ -188,8 +158,6 @@ if SAVE_MODEL:
 	)
 	predictions_preview.to_csv(eval_dir / "predictions_preview.csv", index=False)
 
-	# Example inference rows are kept in raw feature format on purpose.
-	# Do NOT pre-one-hot-encode these rows; model.pkl handles preprocessing.
 	inference_rows = X_test.iloc[:5].to_dict(orient="records")
 	expected_values = y_test.iloc[:5].tolist()
 	inference_script = f'''import pickle
@@ -256,7 +224,7 @@ print(results)
 			"random_state": args.random_state,
 			"one_hot_handle_unknown": "ignore",
 			"scaler": "StandardScaler",
-			"regressor": "LinearRegression",
+			"regressor": "RandomForestRegressor",
 		},
 		"versions": {
 			"python": platform.python_version(),
@@ -289,7 +257,7 @@ print(results)
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
-				"mse": float(test_loss),
+				"mse": float(test_mse),
 				"mae": float(test_mae),
 				"rmse": float(test_rmse),
 				"r2": float(test_r2),

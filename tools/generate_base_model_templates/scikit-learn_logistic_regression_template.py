@@ -16,9 +16,14 @@ from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import (
 	ConfusionMatrixDisplay,
 	accuracy_score,
+	average_precision_score,
+	balanced_accuracy_score,
+	brier_score_loss,
 	confusion_matrix,
 	f1_score,
+	log_loss,
 	precision_score,
+	precision_recall_fscore_support,
 	recall_score,
 	roc_auc_score,
 	roc_curve,
@@ -159,25 +164,46 @@ model = Pipeline(
 model.fit(X_train, y_train)
 
 # Evaluate the model on the test set and print metrics
+train_predictions = model.predict(X_train)
 predictions = model.predict(X_test)
+classifier_classes = model.named_steps["classifier"].classes_
+train_accuracy = accuracy_score(y_train, train_predictions)
+train_f1_macro = f1_score(y_train, train_predictions, average="macro", zero_division=0)
 test_accuracy = accuracy_score(y_test, predictions)
-average_method = "binary" if args.task == "binary_classification" else "weighted"
-test_precision = precision_score(y_test, predictions, average=average_method, zero_division=0)
-test_recall = recall_score(y_test, predictions, average=average_method, zero_division=0)
-test_f1 = f1_score(y_test, predictions, average=average_method, zero_division=0)
+test_balanced_accuracy = balanced_accuracy_score(y_test, predictions)
+test_precision_macro = precision_score(y_test, predictions, average="macro", zero_division=0)
+test_recall_macro = recall_score(y_test, predictions, average="macro", zero_division=0)
+test_f1_macro = f1_score(y_test, predictions, average="macro", zero_division=0)
 test_confusion_matrix = confusion_matrix(y_test, predictions)
+_, _, _, support_values = precision_recall_fscore_support(
+	y_test,
+	predictions,
+	labels=classifier_classes,
+	zero_division=0,
+)
+support_by_class = {str(label): int(count) for label, count in zip(classifier_classes, support_values)}
+support_total = int(len(y_test))
 
 # Calculate ROC AUC if possible (requires predict_proba and appropriate task)
-roc_auc = None
+train_logloss_value = None
+test_roc_auc_macro_ovr = None
+test_pr_auc_macro_ovr = None
+test_logloss_value = None
+brier_score = None
 roc_curve_points = None
 y_test_binarized = None
 if hasattr(model, "predict_proba"):
+	train_probabilities = model.predict_proba(X_train)
 	probabilities = model.predict_proba(X_test)
-	classifier_classes = model.named_steps["classifier"].classes_
+	train_logloss_value = float(log_loss(y_train, train_probabilities, labels=classifier_classes))
+	test_logloss_value = float(log_loss(y_test, probabilities, labels=classifier_classes))
 	if args.task == "binary_classification":
 		positive_class = classifier_classes[-1]
 		positive_probabilities = probabilities[:, -1]
-		roc_auc = float(roc_auc_score(y_test, positive_probabilities))
+		y_true_binary = (y_test == positive_class).astype(int)
+		test_roc_auc_macro_ovr = float(roc_auc_score(y_test, positive_probabilities))
+		test_pr_auc_macro_ovr = float(average_precision_score(y_true_binary, positive_probabilities))
+		brier_score = float(brier_score_loss(y_true_binary, positive_probabilities))
 		fpr, tpr, thresholds = roc_curve(y_test, positive_probabilities, pos_label=positive_class)
 		roc_curve_points = pd.DataFrame(
 			{
@@ -188,15 +214,25 @@ if hasattr(model, "predict_proba"):
 		)
 	else:
 		y_test_binarized = label_binarize(y_test, classes=classifier_classes)
-		roc_auc = float(roc_auc_score(y_test_binarized, probabilities, multi_class="ovr", average="weighted"))
+		test_roc_auc_macro_ovr = float(roc_auc_score(y_test_binarized, probabilities, multi_class="ovr", average="macro"))
+		test_pr_auc_macro_ovr = float(average_precision_score(y_test_binarized, probabilities, average="macro"))
+		brier_score = float(((probabilities - y_test_binarized) ** 2).sum(axis=1).mean())
 
 # Print metrics
 print("Accuracy:", test_accuracy)
-print("Precision:", test_precision)
-print("Recall:", test_recall)
-print("F1:", test_f1)
-if roc_auc is not None:
-	print("ROC AUC:", roc_auc)
+print("Balanced Accuracy:", test_balanced_accuracy)
+print("Precision Macro:", test_precision_macro)
+print("Recall Macro:", test_recall_macro)
+print("F1 Macro:", test_f1_macro)
+print("Support:", support_total)
+if test_roc_auc_macro_ovr is not None:
+	print("ROC AUC Macro OVR:", test_roc_auc_macro_ovr)
+if test_pr_auc_macro_ovr is not None:
+	print("PR AUC Macro OVR:", test_pr_auc_macro_ovr)
+if test_logloss_value is not None:
+	print("Log Loss:", test_logloss_value)
+if brier_score is not None:
+	print("Brier Score:", brier_score)
 print("Classifier:", classifier_name)
 print("First 5 predictions:", predictions[:5])
 
@@ -235,13 +271,24 @@ if SAVE_MODEL:
 		pickle.dump(model.named_steps["preprocess"], preprocess_file)
 
 	metrics = {
-		"accuracy": float(test_accuracy),
-		"precision": float(test_precision),
-		"recall": float(test_recall),
-		"f1": float(test_f1),
-		"roc_auc": float(roc_auc) if roc_auc is not None else None,
-		"n_train": int(len(X_train)),
-		"n_test": int(len(X_test)),
+		"train": {
+			"accuracy": float(train_accuracy),
+			"f1_macro": float(train_f1_macro),
+			"log_loss": float(train_logloss_value) if train_logloss_value is not None else None,
+		},
+		"test": {
+			"accuracy": float(test_accuracy),
+			"balanced_accuracy": float(test_balanced_accuracy),
+			"precision_macro": float(test_precision_macro),
+			"recall_macro": float(test_recall_macro),
+			"f1_macro": float(test_f1_macro),
+			"roc_auc_macro_ovr": float(test_roc_auc_macro_ovr) if test_roc_auc_macro_ovr is not None else None,
+			"pr_auc_macro_ovr": float(test_pr_auc_macro_ovr) if test_pr_auc_macro_ovr is not None else None,
+			"log_loss": float(test_logloss_value) if test_logloss_value is not None else None,
+			"brier_score": float(brier_score) if brier_score is not None else None,
+			"support_total": support_total,
+			"support_by_class": support_by_class,
+		},
 	}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
 		json.dump(metrics, metrics_file, indent=2)
@@ -267,19 +314,19 @@ if SAVE_MODEL:
 	if roc_curve_points is not None:
 		roc_curve_points.to_csv(eval_dir / "roc_curve.csv", index=False)
 
-	if roc_auc is not None:
+	if test_roc_auc_macro_ovr is not None:
 		roc_figure, roc_axis = plt.subplots(figsize=(6, 5))
 		if args.task == "binary_classification" and roc_curve_points is not None:
 			roc_axis.plot(
 				roc_curve_points["fpr"],
 				roc_curve_points["tpr"],
-				label=f"ROC AUC = {roc_auc:.4f}",
+				label=f"ROC AUC = {test_roc_auc_macro_ovr:.4f}",
 			)
 		else:
 			for class_index, class_label in enumerate(classifier_classes):
 				class_fpr, class_tpr, _ = roc_curve(y_test_binarized[:, class_index], probabilities[:, class_index])
 				roc_axis.plot(class_fpr, class_tpr, label=f"Class {class_label}")
-			roc_axis.text(0.6, 0.1, f"Weighted OVR AUC = {roc_auc:.4f}")
+			roc_axis.text(0.6, 0.1, f"Macro OVR AUC = {test_roc_auc_macro_ovr:.4f}")
 
 		roc_axis.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
 		roc_axis.set_xlim(0.0, 1.0)
@@ -363,7 +410,7 @@ print(results)
 			"eval_confusion_matrix_plot": str((eval_dir / "confusion_matrix.png").relative_to(project_root)),
 			"eval_predictions_preview": str((eval_dir / "predictions_preview.csv").relative_to(project_root)),
 			"eval_roc_curve": str((eval_dir / "roc_curve.csv").relative_to(project_root)) if roc_curve_points is not None else None,
-			"eval_roc_curve_plot": str((eval_dir / "roc_curve.png").relative_to(project_root)) if roc_auc is not None else None,
+			"eval_roc_curve_plot": str((eval_dir / "roc_curve.png").relative_to(project_root)) if test_roc_auc_macro_ovr is not None else None,
 			"feature_schema": str((data_dir / "feature_schema.json").relative_to(project_root)),
 			"inference_example": str((inference_dir / "inference_example.py").relative_to(project_root)),
 		},
@@ -410,10 +457,18 @@ print(results)
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
 				"accuracy": float(test_accuracy),
-				"precision": float(test_precision),
-				"recall": float(test_recall),
-				"f1": float(test_f1),
-				"roc_auc": float(roc_auc) if roc_auc is not None else None,
+				"balanced_accuracy": float(test_balanced_accuracy),
+				"precision_macro": float(test_precision_macro),
+				"recall_macro": float(test_recall_macro),
+				"f1_macro": float(test_f1_macro),
+				"support": support_total,
+				"roc_auc_macro_ovr": float(test_roc_auc_macro_ovr) if test_roc_auc_macro_ovr is not None else None,
+				"pr_auc_macro_ovr": float(test_pr_auc_macro_ovr) if test_pr_auc_macro_ovr is not None else None,
+				"log_loss": float(test_logloss_value) if test_logloss_value is not None else None,
+				"brier_score": float(brier_score) if brier_score is not None else None,
+				"train_accuracy": float(train_accuracy),
+				"train_f1_macro": float(train_f1_macro),
+				"train_log_loss": float(train_logloss_value) if train_logloss_value is not None else None,
 				"n_train": int(len(X_train)),
 				"n_test": int(len(X_test)),
 			}

@@ -124,7 +124,11 @@ def template_filename(args: argparse.Namespace) -> str:
         if args.model == "logistic_regression":
             return "scikit-learn_logistic_regression_template.py"
         if args.model == "random_forest":
-            return "scikit-learn_random_forest_template.py"
+            return (
+                "scikit-learn_random_forest_regression_template.py"
+                if family == "regression"
+                else "scikit-learn_random_forest_classification_template.py"
+            )
 
     if args.library == "xgboost":
         return "xgboost_template.py"
@@ -173,47 +177,27 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             )
 
     if args.library == "scikit-learn" and args.model == "random_forest":
-        if family == "regression":
-            replacements.update(
-                {
-                    "RF_ESTIMATOR": "RandomForestRegressor",
-                    "TASK_VALUE": args.task,
-                    "SKLEARN_METRIC_IMPORT": "from sklearn.metrics import mean_squared_error",
-                    "DATA_FILE": "california_housing.csv",
-                    "TARGET_COLUMN": "median_house_value",
-                    "FEATURE_DROP_COLUMNS": '["median_house_value"]',
-                    "TARGET_PREPROCESS": "",
-                    "STRATIFY_ARG": "",
-                    "METRIC_LABEL": "MSE",
-                    "METRIC_CALL": "mean_squared_error(y_test, predictions)",
-                }
-            )
-        else:
+        if family == "classification":
             if args.task == "binary_classification":
-                data_file = "breast_cancer_wisconsin.csv"
-                target_column = "diagnosis"
-                feature_drop_columns = '["diagnosis", "id"]'
-                target_preprocess = 'y = y.map({"B": 0, "M": 1}).astype("int64")'
+                replacements.update(
+                    {
+                        "TASK_VALUE": args.task,
+                        "DATA_FILE": "breast_cancer_wisconsin.csv",
+                        "TARGET_COLUMN": "diagnosis",
+                        "FEATURE_DROP_COLUMNS": '["diagnosis", "id"]',
+                        "TARGET_PREPROCESS": 'y = y.map({"B": 0, "M": 1}).astype("int64")',
+                    }
+                )
             else:
-                data_file = "iris.csv"
-                target_column = "species"
-                feature_drop_columns = '["species"]'
-                target_preprocess = 'y = y.astype("category").cat.codes.astype("int64")'
-
-            replacements.update(
-                {
-                    "RF_ESTIMATOR": "RandomForestClassifier",
-                    "TASK_VALUE": args.task,
-                    "SKLEARN_METRIC_IMPORT": "from sklearn.metrics import accuracy_score",
-                    "DATA_FILE": data_file,
-                    "TARGET_COLUMN": target_column,
-                    "FEATURE_DROP_COLUMNS": feature_drop_columns,
-                    "TARGET_PREPROCESS": target_preprocess,
-                    "STRATIFY_ARG": "stratify=y",
-                    "METRIC_LABEL": "Accuracy",
-                    "METRIC_CALL": "accuracy_score(y_test, predictions)",
-                }
-            )
+                replacements.update(
+                    {
+                        "TASK_VALUE": args.task,
+                        "DATA_FILE": "iris.csv",
+                        "TARGET_COLUMN": "species",
+                        "FEATURE_DROP_COLUMNS": '["species"]',
+                        "TARGET_PREPROCESS": 'y = y.astype("category").cat.codes.astype("int64")',
+                    }
+                )
 
     if args.library == "xgboost":
         booster = args.booster or "gbtree"

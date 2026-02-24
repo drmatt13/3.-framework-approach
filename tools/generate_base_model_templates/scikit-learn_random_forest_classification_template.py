@@ -11,14 +11,18 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import sklearn
 from sklearn.compose import ColumnTransformer
-from sklearn.linear_model import LogisticRegression
-from sklearn.linear_model import SGDClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
 	ConfusionMatrixDisplay,
 	accuracy_score,
+	average_precision_score,
+	balanced_accuracy_score,
+	brier_score_loss,
 	confusion_matrix,
 	f1_score,
+	log_loss,
 	precision_score,
+	precision_recall_fscore_support,
 	recall_score,
 	roc_auc_score,
 	roc_curve,
@@ -27,10 +31,18 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 
-# When invoking this model you can specify --save-model true to save the model and artifacts, or set SAVE_MODEL = True by default here.
+# ---------------------------------------------------------------------
+# Supported CLI flags (common usage)
+#   --library scikit-learn
+#   --model random_forest
+#   --task binary_classification|multiclass_classification
+#   --name <model_name>
+#   --save-model true|false
+#   --random-state <int>
+# ---------------------------------------------------------------------
+
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
-EARLY_STOPPING = False
 
 
 def _project_root() -> Path:
@@ -50,30 +62,24 @@ def _parse_bool(value: str) -> bool:
 	raise argparse.ArgumentTypeError("Expected true/false")
 
 
-parser = argparse.ArgumentParser(description="Logistic Regression baseline")
+parser = argparse.ArgumentParser(description="Random Forest Classifier baseline")
 parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
-parser.add_argument("--model", choices=["logistic_regression"], default="logistic_regression")
-parser.add_argument("--task", choices=["binary_classification"], default="binary_classification")
+parser.add_argument("--model", choices=["random_forest"], default="random_forest")
+parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
-parser.add_argument("--early-stopping", type=_parse_bool, default=EARLY_STOPPING)
-parser.add_argument("--validation-fraction", type=float, default=0.1)
-parser.add_argument("--n-iter-no-change", type=int, default=5)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 
-# Main code starts here
-
-# Load data
 project_root = _project_root()
-data_path = project_root / "data" / "template_data" / "breast_cancer_wisconsin.csv"
+data_path = project_root / "data" / "template_data" / "{{DATA_FILE}}"
 df = pd.read_csv(data_path)
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 
-y = df["diagnosis"]
-y = y.map({"B": 0, "M": 1}).astype("int64")
-X = df.drop(columns=["diagnosis", "id"])
+y = df["{{TARGET_COLUMN}}"]
+{{TARGET_PREPROCESS}}
+X = df.drop(columns={{FEATURE_DROP_COLUMNS}})
 
 # Additional Feature engineer here if needed
 # ******************************************
@@ -88,8 +94,6 @@ X_train, X_test, y_train, y_test = train_test_split(
 	stratify=y,
 )
 
-# Define column groups automatically from training data
-# Include "str" explicitly for pandas 3 compatibility.
 categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
 numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
 
@@ -98,7 +102,6 @@ try:
 except TypeError:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
 
-# Preprocess: scale numeric, one-hot encode categorical
 preprocessor = ColumnTransformer(
 	transformers=[
 		("num", StandardScaler(), numerical_cols),
@@ -107,55 +110,54 @@ preprocessor = ColumnTransformer(
 	remainder="drop",
 )
 
-# Bundle preprocess + model into one exportable object
-# Important: this Pipeline is what we save and load for inference.
-# Inference callers should pass raw feature columns (including raw categorical strings),
-# and the pipeline will apply scaling + one-hot encoding consistently.
-if args.early_stopping:
-	classifier = SGDClassifier(
-		loss="log_loss",
-		max_iter=1000,
-		tol=1e-3,
-		early_stopping=True,
-		validation_fraction=args.validation_fraction,
-		n_iter_no_change=args.n_iter_no_change,
-		random_state=args.random_state,
-	)
-	classifier_name = "SGDClassifier(loss=log_loss, early_stopping=True)"
-else:
-	classifier = LogisticRegression(max_iter=1000)
-	classifier_name = "LogisticRegression(max_iter=1000)"
-
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
-		("classifier", classifier),
+		("classifier", RandomForestClassifier(random_state=args.random_state)),
 	]
 )
 
-# Fit the model on the training data (this also fits the preprocessors in the pipeline)
 model.fit(X_train, y_train)
 
-# Evaluate the model on the test set and print metrics
+train_predictions = model.predict(X_train)
 predictions = model.predict(X_test)
+classifier_classes = model.named_steps["classifier"].classes_
+train_accuracy = accuracy_score(y_train, train_predictions)
+train_f1_macro = f1_score(y_train, train_predictions, average="macro", zero_division=0)
 test_accuracy = accuracy_score(y_test, predictions)
-average_method = "binary" if args.task == "binary_classification" else "weighted"
-test_precision = precision_score(y_test, predictions, average=average_method, zero_division=0)
-test_recall = recall_score(y_test, predictions, average=average_method, zero_division=0)
-test_f1 = f1_score(y_test, predictions, average=average_method, zero_division=0)
+test_balanced_accuracy = balanced_accuracy_score(y_test, predictions)
+test_precision_macro = precision_score(y_test, predictions, average="macro", zero_division=0)
+test_recall_macro = recall_score(y_test, predictions, average="macro", zero_division=0)
+test_f1_macro = f1_score(y_test, predictions, average="macro", zero_division=0)
 test_confusion_matrix = confusion_matrix(y_test, predictions)
+_, _, _, support_values = precision_recall_fscore_support(
+	y_test,
+	predictions,
+	labels=classifier_classes,
+	zero_division=0,
+)
+support_by_class = {str(label): int(count) for label, count in zip(classifier_classes, support_values)}
+support_total = int(len(y_test))
 
-# Calculate ROC AUC if possible (requires predict_proba and appropriate task)
-roc_auc = None
+train_logloss_value = None
+test_roc_auc_macro_ovr = None
+test_pr_auc_macro_ovr = None
+test_logloss_value = None
+brier_score = None
 roc_curve_points = None
 y_test_binarized = None
 if hasattr(model, "predict_proba"):
+	train_probabilities = model.predict_proba(X_train)
 	probabilities = model.predict_proba(X_test)
-	classifier_classes = model.named_steps["classifier"].classes_
+	train_logloss_value = float(log_loss(y_train, train_probabilities, labels=classifier_classes))
+	test_logloss_value = float(log_loss(y_test, probabilities, labels=classifier_classes))
 	if args.task == "binary_classification":
 		positive_class = classifier_classes[-1]
 		positive_probabilities = probabilities[:, -1]
-		roc_auc = float(roc_auc_score(y_test, positive_probabilities))
+		y_true_binary = (y_test == positive_class).astype(int)
+		test_roc_auc_macro_ovr = float(roc_auc_score(y_test, positive_probabilities))
+		test_pr_auc_macro_ovr = float(average_precision_score(y_true_binary, positive_probabilities))
+		brier_score = float(brier_score_loss(y_true_binary, positive_probabilities))
 		fpr, tpr, thresholds = roc_curve(y_test, positive_probabilities, pos_label=positive_class)
 		roc_curve_points = pd.DataFrame(
 			{
@@ -166,21 +168,27 @@ if hasattr(model, "predict_proba"):
 		)
 	else:
 		y_test_binarized = label_binarize(y_test, classes=classifier_classes)
-		roc_auc = float(roc_auc_score(y_test_binarized, probabilities, multi_class="ovr", average="weighted"))
+		test_roc_auc_macro_ovr = float(roc_auc_score(y_test_binarized, probabilities, multi_class="ovr", average="macro"))
+		test_pr_auc_macro_ovr = float(average_precision_score(y_test_binarized, probabilities, average="macro"))
+		brier_score = float(((probabilities - y_test_binarized) ** 2).sum(axis=1).mean())
 
-# Print metrics
 print("Accuracy:", test_accuracy)
-print("Precision:", test_precision)
-print("Recall:", test_recall)
-print("F1:", test_f1)
-if roc_auc is not None:
-	print("ROC AUC:", roc_auc)
-print("Classifier:", classifier_name)
+print("Balanced Accuracy:", test_balanced_accuracy)
+print("Precision Macro:", test_precision_macro)
+print("Recall Macro:", test_recall_macro)
+print("F1 Macro:", test_f1_macro)
+print("Support:", support_total)
+if test_roc_auc_macro_ovr is not None:
+	print("ROC AUC Macro OVR:", test_roc_auc_macro_ovr)
+if test_pr_auc_macro_ovr is not None:
+	print("PR AUC Macro OVR:", test_pr_auc_macro_ovr)
+if test_logloss_value is not None:
+	print("Log Loss:", test_logloss_value)
+if brier_score is not None:
+	print("Brier Score:", brier_score)
 print("First 5 predictions:", predictions[:5])
 
-# END of template code - below is optional artifact saving and registry logging, which can be customized or removed as needed.
 if SAVE_MODEL:
-	project_root = _project_root()
 	model_name = args.name.strip() or Path(__file__).stem
 	model_root_dir = project_root / "artifacts" / "models" / model_name
 	timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -200,20 +208,30 @@ if SAVE_MODEL:
 		directory.mkdir(parents=True, exist_ok=True)
 
 	with (model_dir / "model.pkl").open("wb") as model_file:
-		# Saves full inference-ready pipeline: preprocess + classifier.
 		pickle.dump(model, model_file)
 
 	with (preprocess_dir / "preprocessor.pkl").open("wb") as preprocess_file:
 		pickle.dump(model.named_steps["preprocess"], preprocess_file)
 
 	metrics = {
-		"accuracy": float(test_accuracy),
-		"precision": float(test_precision),
-		"recall": float(test_recall),
-		"f1": float(test_f1),
-		"roc_auc": float(roc_auc) if roc_auc is not None else None,
-		"n_train": int(len(X_train)),
-		"n_test": int(len(X_test)),
+		"train": {
+			"accuracy": float(train_accuracy),
+			"f1_macro": float(train_f1_macro),
+			"log_loss": float(train_logloss_value) if train_logloss_value is not None else None,
+		},
+		"test": {
+			"accuracy": float(test_accuracy),
+			"balanced_accuracy": float(test_balanced_accuracy),
+			"precision_macro": float(test_precision_macro),
+			"recall_macro": float(test_recall_macro),
+			"f1_macro": float(test_f1_macro),
+			"roc_auc_macro_ovr": float(test_roc_auc_macro_ovr) if test_roc_auc_macro_ovr is not None else None,
+			"pr_auc_macro_ovr": float(test_pr_auc_macro_ovr) if test_pr_auc_macro_ovr is not None else None,
+			"log_loss": float(test_logloss_value) if test_logloss_value is not None else None,
+			"brier_score": float(brier_score) if brier_score is not None else None,
+			"support_total": support_total,
+			"support_by_class": support_by_class,
+		},
 	}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
 		json.dump(metrics, metrics_file, indent=2)
@@ -239,19 +257,19 @@ if SAVE_MODEL:
 	if roc_curve_points is not None:
 		roc_curve_points.to_csv(eval_dir / "roc_curve.csv", index=False)
 
-	if roc_auc is not None:
+	if test_roc_auc_macro_ovr is not None:
 		roc_figure, roc_axis = plt.subplots(figsize=(6, 5))
 		if args.task == "binary_classification" and roc_curve_points is not None:
 			roc_axis.plot(
 				roc_curve_points["fpr"],
 				roc_curve_points["tpr"],
-				label=f"ROC AUC = {roc_auc:.4f}",
+				label=f"ROC AUC = {test_roc_auc_macro_ovr:.4f}",
 			)
 		else:
 			for class_index, class_label in enumerate(classifier_classes):
 				class_fpr, class_tpr, _ = roc_curve(y_test_binarized[:, class_index], probabilities[:, class_index])
 				roc_axis.plot(class_fpr, class_tpr, label=f"Class {class_label}")
-			roc_axis.text(0.6, 0.1, f"Weighted OVR AUC = {roc_auc:.4f}")
+			roc_axis.text(0.6, 0.1, f"Macro OVR AUC = {test_roc_auc_macro_ovr:.4f}")
 
 		roc_axis.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
 		roc_axis.set_xlim(0.0, 1.0)
@@ -272,8 +290,6 @@ if SAVE_MODEL:
 	)
 	predictions_preview.to_csv(eval_dir / "predictions_preview.csv", index=False)
 
-	# Example inference rows are kept in raw feature format on purpose.
-	# Do NOT pre-one-hot-encode these rows; model.pkl handles preprocessing.
 	inference_rows = X_test.iloc[:5].to_dict(orient="records")
 	expected_values = y_test.iloc[:5].tolist()
 	inference_script = f'''import pickle
@@ -305,7 +321,7 @@ print(results)
 		inference_file.write(inference_script)
 
 	feature_schema = {
-		"target": "diagnosis",
+		"target": "{{TARGET_COLUMN}}",
 		"feature_columns": X.columns.tolist(),
 		"categorical_columns": categorical_cols,
 		"numerical_columns": numerical_cols,
@@ -335,19 +351,16 @@ print(results)
 			"eval_confusion_matrix_plot": str((eval_dir / "confusion_matrix.png").relative_to(project_root)),
 			"eval_predictions_preview": str((eval_dir / "predictions_preview.csv").relative_to(project_root)),
 			"eval_roc_curve": str((eval_dir / "roc_curve.csv").relative_to(project_root)) if roc_curve_points is not None else None,
-			"eval_roc_curve_plot": str((eval_dir / "roc_curve.png").relative_to(project_root)) if roc_auc is not None else None,
+			"eval_roc_curve_plot": str((eval_dir / "roc_curve.png").relative_to(project_root)) if test_roc_auc_macro_ovr is not None else None,
 			"feature_schema": str((data_dir / "feature_schema.json").relative_to(project_root)),
 			"inference_example": str((inference_dir / "inference_example.py").relative_to(project_root)),
 		},
 		"params": {
 			"test_size": 0.2,
 			"random_state": args.random_state,
-			"early_stopping": bool(args.early_stopping),
-			"validation_fraction": float(args.validation_fraction),
-			"n_iter_no_change": int(args.n_iter_no_change),
 			"one_hot_handle_unknown": "ignore",
 			"scaler": "StandardScaler",
-			"classifier": classifier_name,
+			"classifier": "RandomForestClassifier",
 		},
 		"versions": {
 			"python": platform.python_version(),
@@ -381,10 +394,18 @@ print(results)
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
 				"accuracy": float(test_accuracy),
-				"precision": float(test_precision),
-				"recall": float(test_recall),
-				"f1": float(test_f1),
-				"roc_auc": float(roc_auc) if roc_auc is not None else None,
+				"balanced_accuracy": float(test_balanced_accuracy),
+				"precision_macro": float(test_precision_macro),
+				"recall_macro": float(test_recall_macro),
+				"f1_macro": float(test_f1_macro),
+				"support": support_total,
+				"roc_auc_macro_ovr": float(test_roc_auc_macro_ovr) if test_roc_auc_macro_ovr is not None else None,
+				"pr_auc_macro_ovr": float(test_pr_auc_macro_ovr) if test_pr_auc_macro_ovr is not None else None,
+				"log_loss": float(test_logloss_value) if test_logloss_value is not None else None,
+				"brier_score": float(brier_score) if brier_score is not None else None,
+				"train_accuracy": float(train_accuracy),
+				"train_f1_macro": float(train_f1_macro),
+				"train_log_loss": float(train_logloss_value) if train_logloss_value is not None else None,
 				"n_train": int(len(X_train)),
 				"n_test": int(len(X_test)),
 			}
