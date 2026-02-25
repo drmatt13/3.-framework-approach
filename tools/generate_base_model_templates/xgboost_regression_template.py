@@ -84,7 +84,7 @@ SAVE_MODEL = args.save_model
 
 # Load data from CSV file into pandas DataFrame.
 project_root = _project_root()
-data_path = project_root / "data" / "template_data" / "{{DATA_FILE}}"
+data_path = project_root / "data" / "template_data" / "{{DATA_TASK_DIR}}" / "{{DATA_FILE}}"
 df = pd.read_csv(data_path)
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 df = df.dropna()

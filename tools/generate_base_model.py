@@ -119,6 +119,70 @@ DEFAULT_MAX_ITER_BY_TEMPLATE = {
     ("scikit-learn", "logistic_regression", "classification"): 1000,
 }
 
+STARTER_DATASETS_BY_FAMILY = {
+    "regression": ["ames_housing.csv", "california_housing.csv", "insurance.csv"],
+    "binary_classification": ["adult_income.csv", "breast_cancer_wisconsin.csv", "titanic.csv"],
+    "multiclass_classification": ["car_evaluation.csv", "iris.csv", "mushrooms.csv"],
+}
+
+STARTER_DATASET_CONFIG = {
+    "ames_housing.csv": {
+        "data_file": "ames_housing.csv",
+        "target_column": "SalePrice",
+        "feature_drop_columns": '["SalePrice", "Order", "PID"]',
+        "target_preprocess": 'y = y.astype("float64")',
+    },
+    "california_housing.csv": {
+        "data_file": "california_housing.csv",
+        "target_column": "median_house_value",
+        "feature_drop_columns": '["median_house_value"]',
+        "target_preprocess": 'y = y.astype("float64")',
+    },
+    "insurance.csv": {
+        "data_file": "insurance.csv",
+        "target_column": "charges",
+        "feature_drop_columns": '["charges"]',
+        "target_preprocess": 'y = y.astype("float64")',
+    },
+    "adult_income.csv": {
+        "data_file": "adult_income.csv",
+        "target_column": "income",
+        "feature_drop_columns": '["income"]',
+        "target_preprocess": 'y = y.astype("str").str.strip().str.replace(".", "", regex=False).map({"<=50K": 0, ">50K": 1}).astype("int64")',
+    },
+    "breast_cancer_wisconsin.csv": {
+        "data_file": "breast_cancer_wisconsin.csv",
+        "target_column": "diagnosis",
+        "feature_drop_columns": '["diagnosis", "id"]',
+        "target_preprocess": 'y = y.map({"B": 0, "M": 1}).astype("int64")',
+    },
+    "titanic.csv": {
+        "data_file": "titanic.csv",
+        "target_column": "Survived",
+        "feature_drop_columns": '["Survived", "PassengerId"]',
+        "target_preprocess": 'y = y.astype("int64")',
+    },
+    "car_evaluation.csv": {
+        "data_file": "car_evaluation.csv",
+        "target_column": "class",
+        "feature_drop_columns": '["class"]',
+        "target_preprocess": 'y = y.astype("category").cat.codes.astype("int64")',
+        "header_names": ["buying", "maint", "doors", "persons", "lug_boot", "safety", "class"],
+    },
+    "iris.csv": {
+        "data_file": "iris.csv",
+        "target_column": "species",
+        "feature_drop_columns": '["species"]',
+        "target_preprocess": 'y = y.astype("category").cat.codes.astype("int64")',
+    },
+    "mushrooms.csv": {
+        "data_file": "mushrooms.csv",
+        "target_column": "class",
+        "feature_drop_columns": '["class"]',
+        "target_preprocess": 'y = y.astype("category").cat.codes.astype("int64")',
+    },
+}
+
 
 # ---------------------------------------------------------
 # Templates
@@ -129,6 +193,55 @@ TEMPLATES_DIR = Path(__file__).resolve().parent / "generate_base_model_templates
 
 def task_family(task: str) -> str:
     return "classification" if task in {"binary_classification", "multiclass_classification"} else "regression"
+
+
+def _starter_dataset_for_args(args: argparse.Namespace) -> dict | None:
+    if not args.starter_dataset:
+        return None
+    return STARTER_DATASET_CONFIG[args.starter_dataset]
+
+
+def _task_dataset_dir(task: str) -> str:
+    return task
+
+
+def _replace_once(content: str, old: str, new: str) -> str:
+    if old not in content:
+        return content
+    return content.replace(old, new, 1)
+
+
+def apply_starter_dataset_overrides(content: str, args: argparse.Namespace) -> str:
+    dataset = _starter_dataset_for_args(args)
+    if dataset is None:
+        return content
+
+    family = task_family(args.task)
+
+    if "header_names" in dataset:
+        header_names_repr = repr(dataset["header_names"])
+        read_csv_override = (
+            "df = pd.read_csv(data_path, header=None)\n"
+            f"df.columns = {header_names_repr}"
+        )
+        content = _replace_once(content, "df = pd.read_csv(data_path)", read_csv_override)
+
+    if args.library == "scikit-learn" and family == "regression" and args.model in {"linear_regression", "random_forest"}:
+        task_dir = _task_dataset_dir(args.task)
+        content = _replace_once(
+            content,
+            'data_path = project_root / "data" / "template_data" / "regression" / "california_housing.csv"',
+            f'data_path = project_root / "data" / "template_data" / "{task_dir}" / "{dataset["data_file"]}"',
+        )
+        content = _replace_once(
+            content,
+            'data_path = project_root / "data" / "template_data" / "california_housing.csv"',
+            f'data_path = project_root / "data" / "template_data" / "{task_dir}" / "{dataset["data_file"]}"',
+        )
+        content = _replace_once(content, 'y = df["median_house_value"]', f'y = df["{dataset["target_column"]}"]')
+        content = _replace_once(content, 'X = df.drop(columns=["median_house_value"])', f'X = df.drop(columns={dataset["feature_drop_columns"]})')
+
+    return content
 
 
 def read_template(filename: str) -> str:
@@ -210,6 +323,7 @@ def template_filename(args: argparse.Namespace) -> str:
 def template_replacements(args: argparse.Namespace) -> dict[str, str]:
     family = task_family(args.task)
     replacements: dict[str, str] = {}
+    starter_dataset = _starter_dataset_for_args(args)
 
     if _supports_early_stopping_defaults(args):
         key = (args.library, args.model if args.library == "scikit-learn" else None, family)
@@ -241,7 +355,17 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         replacements.update({"MAX_ITER_DEFAULT": str(int(max_iter_default))})
 
     if args.library == "scikit-learn" and args.model == "logistic_regression":
-        if args.task == "binary_classification":
+        if starter_dataset is not None:
+            replacements.update(
+                {
+                    "TASK_VALUE": args.task,
+                    "DATA_FILE": starter_dataset["data_file"],
+                    "TARGET_COLUMN": starter_dataset["target_column"],
+                    "FEATURE_DROP_COLUMNS": starter_dataset["feature_drop_columns"],
+                    "TARGET_PREPROCESS": starter_dataset["target_preprocess"],
+                }
+            )
+        elif args.task == "binary_classification":
             replacements.update(
                 {
                     "TASK_VALUE": args.task,
@@ -264,7 +388,17 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
 
     if args.library == "scikit-learn" and args.model == "random_forest":
         if family == "classification":
-            if args.task == "binary_classification":
+            if starter_dataset is not None:
+                replacements.update(
+                    {
+                        "TASK_VALUE": args.task,
+                        "DATA_FILE": starter_dataset["data_file"],
+                        "TARGET_COLUMN": starter_dataset["target_column"],
+                        "FEATURE_DROP_COLUMNS": starter_dataset["feature_drop_columns"],
+                        "TARGET_PREPROCESS": starter_dataset["target_preprocess"],
+                    }
+                )
+            elif args.task == "binary_classification":
                 replacements.update(
                     {
                         "TASK_VALUE": args.task,
@@ -287,7 +421,18 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
 
     if args.library == "xgboost":
         booster = args.booster or "gbtree"
-        if args.task == "regression":
+        if starter_dataset is not None:
+            replacements.update(
+                {
+                    "TASK_VALUE": args.task,
+                    "DATA_FILE": starter_dataset["data_file"],
+                    "TARGET_COLUMN": starter_dataset["target_column"],
+                    "FEATURE_DROP_COLUMNS": starter_dataset["feature_drop_columns"],
+                    "TARGET_PREPROCESS": starter_dataset["target_preprocess"],
+                    "BOOSTER": booster,
+                }
+            )
+        elif args.task == "regression":
             replacements.update(
                 {
                     "TASK_VALUE": args.task,
@@ -333,7 +478,23 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         )
 
         if family == "classification":
-            if args.task == "binary_classification":
+            if starter_dataset is not None:
+                output_units = "1" if args.task == "binary_classification" else "3"
+                output_activation = "sigmoid" if args.task == "binary_classification" else "softmax"
+                loss_fn = "binary_crossentropy" if args.task == "binary_classification" else "sparse_categorical_crossentropy"
+                replacements.update(
+                    {
+                        "TASK_VALUE": args.task,
+                        "DATA_FILE": starter_dataset["data_file"],
+                        "TARGET_COLUMN": starter_dataset["target_column"],
+                        "FEATURE_DROP_COLUMNS": starter_dataset["feature_drop_columns"],
+                        "TARGET_PREPROCESS": starter_dataset["target_preprocess"],
+                        "OUTPUT_UNITS": output_units,
+                        "OUTPUT_ACTIVATION": output_activation,
+                        "LOSS_FN": loss_fn,
+                    }
+                )
+            elif args.task == "binary_classification":
                 replacements.update(
                     {
                         "TASK_VALUE": args.task,
@@ -360,6 +521,9 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                     }
                 )
 
+    if "DATA_FILE" in replacements:
+        replacements["DATA_TASK_DIR"] = _task_dataset_dir(args.task)
+
     return replacements
 
 
@@ -382,6 +546,14 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Invalid --default-n-iter-no-change. Must be a positive integer")
     if args.default_max_iter is not None and args.default_max_iter <= 0:
         raise ValueError("Invalid --default-max-iter. Must be a positive integer")
+
+    if args.starter_dataset is not None:
+        allowed = STARTER_DATASETS_BY_FAMILY[args.task]
+        if args.starter_dataset not in allowed:
+            allowed_str = ", ".join(allowed)
+            raise ValueError(
+                f"Invalid --starter-dataset '{args.starter_dataset}' for task '{args.task}'. Allowed: {allowed_str}"
+            )
 
     early_stopping_defaults_provided = any(
         value is not None
@@ -554,6 +726,14 @@ def main():
         help="Name of generated model file (without .py)",
     )
     parser.add_argument(
+        "--starter-dataset",
+        required=False,
+        help=(
+            "Optional starter dataset file name for the chosen task family. "
+            "Examples: ames_housing.csv, breast_cancer_wisconsin.csv, iris.csv"
+        ),
+    )
+    parser.add_argument(
         "--output",
         required=False,
         help="Optional explicit output path. If omitted, writes to <repo>/models/<name>.py",
@@ -567,6 +747,7 @@ def main():
         template_name = template_filename(args)
         template = read_template(template_name)
         content = render_template(template, template_replacements(args))
+        content = apply_starter_dataset_overrides(content, args)
 
         # Determine output path
         if args.output:

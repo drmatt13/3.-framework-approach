@@ -82,12 +82,13 @@ SAVE_MODEL = args.save_model
 
 # Load data from CSV file into pandas DataFrame.
 project_root = _project_root()
-data_path = project_root / "data" / "template_data" / "regression" / "california_housing.csv"
+data_path = project_root / "data" / "template_data" / "regression" / "ames_housing.csv"
+# drop
 df = pd.read_csv(data_path).dropna()
 
 # Define target variable and features.
-y = df["median_house_value"]
-X = df.drop(columns=["median_house_value"])
+y = df["SalePrice"]
+X = df.drop(columns=["SalePrice", "Order", "PID"])
 
 # =============================================================
 # ================== FEATURE TRANSFORMATIONS ==================

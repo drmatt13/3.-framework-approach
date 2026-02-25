@@ -28,6 +28,12 @@ XGBOOST_BOOSTERS = ["gbtree", "gblinear", "dart"]
 # Only meaningful for TensorFlow models (gradient-based training)
 TENSORFLOW_OPTIMIZERS = ["adam", "sgd", "rmsprop", "adagrad", "adamw"]
 
+STARTER_DATASETS_BY_TASK = {
+    "regression": ["ames_housing.csv", "california_housing.csv", "insurance.csv"],
+    "binary_classification": ["adult_income.csv", "breast_cancer_wisconsin.csv", "titanic.csv"],
+    "multiclass_classification": ["car_evaluation.csv", "iris.csv", "mushrooms.csv"],
+}
+
 CUSTOM_STYLE = Style.from_dict(
     {
         "qmark": "fg:#f8b808 bold",  # Question mark
@@ -169,6 +175,21 @@ def main() -> int:
         ).ask()
 
         if booster is None:
+            print("Cancelled.")
+            return 0
+
+    # Optional starter dataset selection (task-aware)
+    starter_dataset = None
+    starter_choices = STARTER_DATASETS_BY_TASK.get(task, [])
+    if starter_choices:
+        starter_dataset = questionary.select(
+            "Select starter template dataset:",
+            choices=starter_choices,
+            use_shortcuts=True,
+            style=CUSTOM_STYLE,
+        ).ask()
+
+        if starter_dataset is None:
             print("Cancelled.")
             return 0
 
@@ -324,6 +345,9 @@ def main() -> int:
 
     if library == "xgboost":
         cmd.extend(["--booster", booster])
+
+    if starter_dataset is not None:
+        cmd.extend(["--starter-dataset", starter_dataset])
 
     if _supports_early_stopping_defaults(library, model, task):
         cmd.extend(["--default-early-stopping", "true" if default_early_stopping else "false"])

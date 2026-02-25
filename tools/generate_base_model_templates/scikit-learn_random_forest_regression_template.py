@@ -82,7 +82,7 @@ SAVE_MODEL = args.save_model
 
 # Load data from CSV file into pandas DataFrame.
 project_root = _project_root()
-data_path = project_root / "data" / "template_data" / "california_housing.csv"
+data_path = project_root / "data" / "template_data" / "regression" / "california_housing.csv"
 df = pd.read_csv(data_path).dropna()
 
 # Define target variable and features.
