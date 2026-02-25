@@ -2,6 +2,15 @@ import argparse
 from pathlib import Path
 import sys
 
+_current_file = Path(__file__).resolve()
+for _candidate in [_current_file.parent, *_current_file.parents]:
+    if (_candidate / "libraries" / "__init__.py").exists():
+        if str(_candidate) not in sys.path:
+            sys.path.insert(0, str(_candidate))
+        break
+
+from libraries.cli_helpers import parse_bool_flag as _parse_bool
+
 # ---------------------------------------------------------
 # Flag combinations:
 # ---------------------------------------------------------
@@ -121,8 +130,14 @@ DEFAULT_MAX_ITER_BY_TEMPLATE = {
 
 STARTER_DATASETS_BY_FAMILY = {
     "regression": ["ames_housing.csv", "california_housing.csv", "insurance.csv"],
-    "binary_classification": ["adult_income.csv", "breast_cancer_wisconsin.csv", "titanic.csv"],
-    "multiclass_classification": ["car_evaluation.csv", "iris.csv", "mushrooms.csv"],
+    "binary_classification": ["adult_income.csv", "breast_cancer_wisconsin.csv", "mushrooms.csv", "titanic.csv"],
+    "multiclass_classification": [
+        "car_evaluation.csv",
+        "dry_bean.csv",
+        "forest_cover_type.csv",
+        "iris.csv",
+        "wine_quality.csv",
+    ],
 }
 
 STARTER_DATASET_CONFIG = {
@@ -130,18 +145,21 @@ STARTER_DATASET_CONFIG = {
         "data_file": "ames_housing.csv",
         "target_column": "SalePrice",
         "feature_drop_columns": '["SalePrice", "Order", "PID"]',
+        "columns_to_drop": '["Order", "PID"]',
         "target_preprocess": 'y = y.astype("float64")',
     },
     "california_housing.csv": {
         "data_file": "california_housing.csv",
         "target_column": "median_house_value",
         "feature_drop_columns": '["median_house_value"]',
+        "columns_to_drop": '[]',
         "target_preprocess": 'y = y.astype("float64")',
     },
     "insurance.csv": {
         "data_file": "insurance.csv",
         "target_column": "charges",
         "feature_drop_columns": '["charges"]',
+        "columns_to_drop": '[]',
         "target_preprocess": 'y = y.astype("float64")',
     },
     "adult_income.csv": {
@@ -167,7 +185,20 @@ STARTER_DATASET_CONFIG = {
         "target_column": "class",
         "feature_drop_columns": '["class"]',
         "target_preprocess": 'y = y.astype("category").cat.codes.astype("int64")',
+        "read_csv_extra_args": ", header=None",
         "header_names": ["buying", "maint", "doors", "persons", "lug_boot", "safety", "class"],
+    },
+    "dry_bean.csv": {
+        "data_file": "dry_bean.csv",
+        "target_column": "Class",
+        "feature_drop_columns": '["Class"]',
+        "target_preprocess": 'y = y.astype("category").cat.codes.astype("int64")',
+    },
+    "forest_cover_type.csv": {
+        "data_file": "forest_cover_type.csv",
+        "target_column": "Cover_Type",
+        "feature_drop_columns": '["Cover_Type"]',
+        "target_preprocess": 'y = y.astype("category").cat.codes.astype("int64")',
     },
     "iris.csv": {
         "data_file": "iris.csv",
@@ -179,6 +210,12 @@ STARTER_DATASET_CONFIG = {
         "data_file": "mushrooms.csv",
         "target_column": "class",
         "feature_drop_columns": '["class"]',
+        "target_preprocess": 'y = y.astype("category").cat.codes.astype("int64")',
+    },
+    "wine_quality.csv": {
+        "data_file": "wine_quality.csv",
+        "target_column": "quality",
+        "feature_drop_columns": '["quality"]',
         "target_preprocess": 'y = y.astype("category").cat.codes.astype("int64")',
     },
 }
@@ -205,45 +242,6 @@ def _task_dataset_dir(task: str) -> str:
     return task
 
 
-def _replace_once(content: str, old: str, new: str) -> str:
-    if old not in content:
-        return content
-    return content.replace(old, new, 1)
-
-
-def apply_starter_dataset_overrides(content: str, args: argparse.Namespace) -> str:
-    dataset = _starter_dataset_for_args(args)
-    if dataset is None:
-        return content
-
-    family = task_family(args.task)
-
-    if "header_names" in dataset:
-        header_names_repr = repr(dataset["header_names"])
-        read_csv_override = (
-            "df = pd.read_csv(data_path, header=None)\n"
-            f"df.columns = {header_names_repr}"
-        )
-        content = _replace_once(content, "df = pd.read_csv(data_path)", read_csv_override)
-
-    if args.library == "scikit-learn" and family == "regression" and args.model in {"linear_regression", "random_forest"}:
-        task_dir = _task_dataset_dir(args.task)
-        content = _replace_once(
-            content,
-            'data_path = project_root / "data" / "template_data" / "regression" / "california_housing.csv"',
-            f'data_path = project_root / "data" / "template_data" / "{task_dir}" / "{dataset["data_file"]}"',
-        )
-        content = _replace_once(
-            content,
-            'data_path = project_root / "data" / "template_data" / "california_housing.csv"',
-            f'data_path = project_root / "data" / "template_data" / "{task_dir}" / "{dataset["data_file"]}"',
-        )
-        content = _replace_once(content, 'y = df["median_house_value"]', f'y = df["{dataset["target_column"]}"]')
-        content = _replace_once(content, 'X = df.drop(columns=["median_house_value"])', f'X = df.drop(columns={dataset["feature_drop_columns"]})')
-
-    return content
-
-
 def read_template(filename: str) -> str:
     template_path = TEMPLATES_DIR / filename
     if not template_path.exists():
@@ -256,15 +254,6 @@ def render_template(template: str, replacements: dict[str, str]) -> str:
     for key, value in replacements.items():
         rendered = rendered.replace(f"{{{{{key}}}}}", str(value))
     return rendered
-
-
-def _parse_bool(value: str) -> bool:
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "y"}:
-        return True
-    if normalized in {"0", "false", "no", "n"}:
-        return False
-    raise argparse.ArgumentTypeError("Expected true/false")
 
 
 def _supports_early_stopping_defaults(args: argparse.Namespace) -> bool:
@@ -324,6 +313,17 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
     family = task_family(args.task)
     replacements: dict[str, str] = {}
     starter_dataset = _starter_dataset_for_args(args)
+
+    if args.library == "scikit-learn" and args.model == "linear_regression":
+        linear_dataset = starter_dataset if starter_dataset is not None else STARTER_DATASET_CONFIG["california_housing.csv"]
+        replacements.update(
+            {
+                "DATA_TASK_DIR": _task_dataset_dir(args.task),
+                "DATA_FILE": linear_dataset["data_file"],
+                "TARGET_COLUMN": linear_dataset["target_column"],
+                "COLUMNS_TO_DROP": linear_dataset["columns_to_drop"],
+            }
+        )
 
     if _supports_early_stopping_defaults(args):
         key = (args.library, args.model if args.library == "scikit-learn" else None, family)
@@ -418,6 +418,17 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                         "TARGET_PREPROCESS": 'y = y.astype("category").cat.codes.astype("int64")',
                     }
                 )
+        else:
+            regression_dataset = starter_dataset if starter_dataset is not None else STARTER_DATASET_CONFIG["california_housing.csv"]
+            replacements.update(
+                {
+                    "TASK_VALUE": args.task,
+                    "DATA_FILE": regression_dataset["data_file"],
+                    "TARGET_COLUMN": regression_dataset["target_column"],
+                    "FEATURE_DROP_COLUMNS": regression_dataset["feature_drop_columns"],
+                    "TARGET_PREPROCESS": regression_dataset["target_preprocess"],
+                }
+            )
 
     if args.library == "xgboost":
         booster = args.booster or "gbtree"
@@ -523,6 +534,19 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
 
     if "DATA_FILE" in replacements:
         replacements["DATA_TASK_DIR"] = _task_dataset_dir(args.task)
+
+    if "DATA_FILE" in replacements:
+        read_csv_statement = "df = pd.read_csv(data_path)"
+        post_read_setup = ""
+        if starter_dataset is not None:
+            read_csv_extra_args = starter_dataset.get("read_csv_extra_args", "")
+            if read_csv_extra_args:
+                read_csv_statement = f"df = pd.read_csv(data_path{read_csv_extra_args})"
+            header_names = starter_dataset.get("header_names")
+            if header_names is not None:
+                post_read_setup = f"df.columns = {repr(header_names)}"
+        replacements["READ_CSV_STATEMENT"] = read_csv_statement
+        replacements["POST_READ_DATASET_SETUP"] = post_read_setup
 
     return replacements
 
@@ -747,7 +771,6 @@ def main():
         template_name = template_filename(args)
         template = read_template(template_name)
         content = render_template(template, template_replacements(args))
-        content = apply_starter_dataset_overrides(content, args)
 
         # Determine output path
         if args.output:

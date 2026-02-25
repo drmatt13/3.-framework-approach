@@ -30,8 +30,14 @@ TENSORFLOW_OPTIMIZERS = ["adam", "sgd", "rmsprop", "adagrad", "adamw"]
 
 STARTER_DATASETS_BY_TASK = {
     "regression": ["ames_housing.csv", "california_housing.csv", "insurance.csv"],
-    "binary_classification": ["adult_income.csv", "breast_cancer_wisconsin.csv", "titanic.csv"],
-    "multiclass_classification": ["car_evaluation.csv", "iris.csv", "mushrooms.csv"],
+    "binary_classification": ["adult_income.csv", "breast_cancer_wisconsin.csv", "mushrooms.csv", "titanic.csv"],
+    "multiclass_classification": [
+        "car_evaluation.csv",
+        "dry_bean.csv",
+        "forest_cover_type.csv",
+        "iris.csv",
+        "wine_quality.csv",
+    ],
 }
 
 CUSTOM_STYLE = Style.from_dict(

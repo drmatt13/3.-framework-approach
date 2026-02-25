@@ -1,8 +1,10 @@
 import argparse
 import hashlib
 import json
+import numpy as np
 import pickle
 import platform
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -12,10 +14,30 @@ import pandas as pd
 import sklearn
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.impute import SimpleImputer
 from sklearn.metrics import max_error, mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+# Ensure project root is importable so generated templates can load shared helpers.
+_current_file = Path(__file__).resolve()
+for _candidate in [_current_file.parent, *_current_file.parents]:
+	if (_candidate / "libraries" / "__init__.py").exists():
+		if str(_candidate) not in sys.path:
+			sys.path.insert(0, str(_candidate))
+		break
+
+from libraries.model_template_helpers import (
+	artifact_map as _artifact_map,
+	compact_metadata as _compact_metadata,
+	find_project_root as _project_root,
+	parse_bool_flag as _parse_bool,
+	post_transform_feature_count as _post_transform_feature_count,
+	round_metric as _shared_round_metric,
+	select_estimator_params as _select_estimator_params,
+	validate_etl_outputs as _validate_etl_outputs,
+)
 
 # =============================================================
 # =============== CONFIGURATION / CLI FLAGS ===================
@@ -39,24 +61,7 @@ METRIC_DECIMALS = 4
 
 # Helper function: round metrics for cleaner output.
 def _round_metric(value):
-	return None if value is None else round(float(value), METRIC_DECIMALS)
-
-# Helper function: find project root using a marker file.
-def _project_root() -> Path:
-	current = Path(__file__).resolve().parent
-	for candidate in [current, *current.parents]:
-		if (candidate / "requirements.txt").exists():
-			return candidate
-	return Path(__file__).resolve().parents[1]
-
-# Helper function: parse boolean CLI input.
-def _parse_bool(value: str) -> bool:
-	normalized = value.strip().lower()
-	if normalized in {"1", "true", "yes", "y"}:
-		return True
-	if normalized in {"0", "false", "no", "n"}:
-		return False
-	raise argparse.ArgumentTypeError("Expected true/false")
+	return _shared_round_metric(value, METRIC_DECIMALS)
 
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Random Forest Regressor baseline")
@@ -64,6 +69,7 @@ parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn
 parser.add_argument("--model", choices=["random_forest"], default="random_forest")
 parser.add_argument("--task", choices=["regression"], default="regression")
 parser.add_argument("--name", default=Path(__file__).stem)
+parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
@@ -77,24 +83,79 @@ SAVE_MODEL = args.save_model
 # and artifact generation logic.
 
 # =============================================================
-# ====================== LOAD DATA ============================
+# ======================= DATA ETL ============================
 # =============================================================
 
-# Load data from CSV file into pandas DataFrame.
+# ---------------------------------------------------------------------
+# DATA ETL OUTPUT CONTRACT (required by all downstream sections)
+# At end of ETL, you MUST define:
+#   project_root: Path
+#   data_path: Path
+#   df: pd.DataFrame
+#   X: pd.DataFrame
+#   y: pd.Series
+#   target_column_name: str
+# Keep custom changes inside DATA ETL; everything below assumes this contract.
+# ---------------------------------------------------------------------
+
+# ---------------------------------------------------------
+# Load dataset
+# ---------------------------------------------------------
+# Edit points for custom datasets:
+# - DATA_TASK_DIR / DATA_FILE
+# - READ_CSV_STATEMENT / POST_READ_DATASET_SETUP
 project_root = _project_root()
-data_path = project_root / "data" / "template_data" / "regression" / "california_housing.csv"
-df = pd.read_csv(data_path).dropna()
+data_path = project_root / "data" / "template_data" / "{{DATA_TASK_DIR}}" / "{{DATA_FILE}}"
+{{READ_CSV_STATEMENT}}
+{{POST_READ_DATASET_SETUP}}
+df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 
-# Define target variable and features.
-y = df["median_house_value"]
-X = df.drop(columns=["median_house_value"])
+# ---------------------------------------------------------
+# Normalize raw dataframe (dataset-level cleanup)
+# ---------------------------------------------------------
+for column in df.select_dtypes(include=["object", "string"]).columns:
+	series = df[column].astype("string").str.strip()
+	series = series.replace("", np.nan)
+	df[column] = series.astype("object")
 
-# =============================================================
-# ================== FEATURE TRANSFORMATIONS ==================
-# =============================================================
-# Add optional feature transformations or derived features below.
+df = df.replace({pd.NA: np.nan})
 
-# -
+# ---------------------------------------------------------
+# Define target + features (semantic boundary)
+# ---------------------------------------------------------
+# Edit points for target/feature mapping:
+# - TARGET_COLUMN / FEATURE_DROP_COLUMNS
+# - TARGET_PREPROCESS
+TARGET_COLUMN = "{{TARGET_COLUMN}}"
+FEATURE_DROP_COLUMNS = {{FEATURE_DROP_COLUMNS}}
+
+if TARGET_COLUMN not in df.columns:
+	raise ValueError(f"Target column '{TARGET_COLUMN}' not found in dataset.")
+
+y = df[TARGET_COLUMN]
+{{TARGET_PREPROCESS}} # type: ignore
+X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
+
+# ---------------------------------------------------------
+# Remove rows with missing target
+# ---------------------------------------------------------
+valid_target_mask = y.notna()
+X = X.loc[valid_target_mask].copy()
+y = y.loc[valid_target_mask].copy()
+
+target_column_name = str(TARGET_COLUMN)
+
+if len(y) == 0:
+	raise ValueError("No rows remain after target filtering. Check selected dataset and target column.")
+
+_validate_etl_outputs(
+	project_root=project_root,
+	data_path=data_path,
+	df=df,
+	X=X,
+	y=y,
+	target_column_name=target_column_name,
+)
 
 # =============================================================
 # ================= PREPROCESSING / SPLIT =====================
@@ -119,11 +180,24 @@ try:
 except TypeError:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
 
-# Preprocess: scale numeric features and one-hot encode categorical features.
+# Preprocess: impute missing values, then scale numeric and one-hot encode categorical features.
+numeric_transformer = Pipeline(
+	steps=[
+		("imputer", SimpleImputer(strategy="median")),
+		("scaler", StandardScaler()),
+	]
+)
+categorical_transformer = Pipeline(
+	steps=[
+		("imputer", SimpleImputer(strategy="most_frequent")),
+		("onehot", one_hot_encoder),
+	]
+)
+
 preprocessor = ColumnTransformer(
 	transformers=[
-		("num", StandardScaler(), numerical_cols),
-		("cat", one_hot_encoder, categorical_cols),
+		("num", numeric_transformer, numerical_cols),
+		("cat", categorical_transformer, categorical_cols),
 	],
 	remainder="drop",
 )
@@ -203,51 +277,6 @@ print("First 5 predictions:", predictions[:5])  # Quick sanity check of predicte
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
 # =============================================================
-
-# Helper function: calculate post-transform feature count for preprocessor.
-def _post_transform_feature_count(preprocessor, sample_frame: pd.DataFrame) -> int | None:
-	try:
-		transformed = preprocessor.transform(sample_frame)
-		return int(transformed.shape[1])
-	except Exception:
-		return None
-
-# Helper function: map artifact paths for metadata.
-def _artifact_map(base_dir: Path, artifacts: dict[str, Path]) -> dict[str, str]:
-	resolved: dict[str, str] = {}
-	for key, path in artifacts.items():
-		if path.exists():
-			resolved[key] = str(path.relative_to(base_dir))
-	return resolved
-
-# Helper function: compact metadata by removing None or empty values recursively.
-def _compact_metadata(value):
-	if isinstance(value, dict):
-		compacted = {}
-		for key, item in value.items():
-			compacted_item = _compact_metadata(item)
-			if compacted_item is None:
-				continue
-			if isinstance(compacted_item, (dict, list)) and len(compacted_item) == 0:
-				continue
-			compacted[key] = compacted_item
-		return compacted
-	if isinstance(value, list):
-		compacted_list = []
-		for item in value:
-			compacted_item = _compact_metadata(item)
-			if compacted_item is None:
-				continue
-			if isinstance(compacted_item, (dict, list)) and len(compacted_item) == 0:
-				continue
-			compacted_list.append(compacted_item)
-		return compacted_list
-	return value
-
-# Helper function: select relevant estimator parameters for metadata.
-def _select_estimator_params(params: dict, keys: list[str]) -> dict:
-	return {key: params.get(key) for key in keys if key in params}
-
 # Artifact export and registry logging.
 if SAVE_MODEL:
 	model_name = args.name.strip() or Path(__file__).stem
@@ -257,7 +286,11 @@ if SAVE_MODEL:
 	data_hash = hashlib.sha256(data_path.read_bytes()).hexdigest()
 	data_rows = int(len(df))
 	data_columns = int(df.shape[1])
-	run_dir = model_root_dir / f"{timestamp}_{model_name}"
+	if args.artifact_name_mode == "short":
+		run_label = f"{timestamp}_{model_name[:24]}_{run_id.split('-')[0]}"
+	else:
+		run_label = f"{timestamp}_{model_name}"
+	run_dir = model_root_dir / run_label
 
 	model_dir = run_dir / "model"
 	preprocess_dir = run_dir / "preprocess"
@@ -307,6 +340,9 @@ if SAVE_MODEL:
 			"value": _round_metric(test_rmse),
 		},
 	}
+	metrics["selection"] = None
+	metrics["calibration"] = {"source": None, "calibrated": None, "calibration_method": None}
+	metrics["timing"] = {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
 		json.dump(metrics, metrics_file, indent=2)
 
@@ -320,14 +356,19 @@ if SAVE_MODEL:
 
 	inference_rows = X_test.iloc[:5].to_dict(orient="records")
 	expected_values = y_test.iloc[:5].tolist()
+	sample_rows_literal = json.dumps(inference_rows, indent=2)
+	sample_rows_literal = sample_rows_literal.replace(": NaN", ": np.nan")
+	sample_rows_literal = sample_rows_literal.replace(": Infinity", ": np.inf")
+	sample_rows_literal = sample_rows_literal.replace(": -Infinity", ": -np.inf")
 	inference_script = f'''import pickle
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 MODEL_PATH = Path(__file__).resolve().parents[1] / "model" / "model.pkl"
 
-sample_rows = {json.dumps(inference_rows, indent=2)}
+sample_rows = {sample_rows_literal}
 expected_y = {json.dumps(expected_values, indent=2)}
 
 with MODEL_PATH.open("rb") as model_file:
@@ -336,9 +377,10 @@ with MODEL_PATH.open("rb") as model_file:
 features = pd.DataFrame(sample_rows)
 predictions = model.predict(features)
 
-print("Inference example (5 rows from X_test)")
+print("Inference Example")
+print("Input Rows:", len(features))
 print("Predictions:", predictions.tolist())
-print("Expected y:", expected_y)
+print("Expected:", expected_y)
 
 results = features.copy()
 results["y_expected"] = expected_y
@@ -349,11 +391,8 @@ print(results)
 		inference_file.write(inference_script)
 
 	feature_schema = {
-		"target": "median_house_value",
-		"feature_columns": X.columns.tolist(),
-		"categorical_columns": categorical_cols,
-		"numerical_columns": numerical_cols,
-		"dtypes": {col: str(dtype) for col, dtype in X.dtypes.items()},
+		"feature_columns": {col: str(dtype) for col, dtype in X.dtypes.items()},
+		"target": {target_column_name: str(y.dtype)},
 	}
 	with (data_dir / "feature_schema.json").open("w", encoding="utf-8") as schema_file:
 		json.dump(feature_schema, schema_file, indent=2)
@@ -414,7 +453,10 @@ print(results)
 			"scaler": "StandardScaler",
 			"encoder": "OneHotEncoder",
 			"one_hot_handle_unknown": "ignore",
-			"imputer": None,
+			"imputer": {
+				"numeric": "median",
+				"categorical": "most_frequent",
+			},
 			"feature_count": {
 				"raw": int(X.shape[1]),
 				"post_transform": post_transform_feature_count,
@@ -425,6 +467,7 @@ print(results)
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
 		},
+		"selection": None,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),
