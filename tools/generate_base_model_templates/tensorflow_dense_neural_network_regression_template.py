@@ -57,6 +57,9 @@ from libraries.model_template_helpers import (
 #   --learning-rate <float>
 #   --epochs <int>
 #   --batch-size <int>
+#   --early-stopping true|false
+#   --validation-fraction <float>
+#   --n-iter-no-change <int>
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
 # ---------------------------------------------------------------------
@@ -68,6 +71,9 @@ DEFAULT_OPTIMIZER_NAME = "{{OPTIMIZER_NAME}}"
 DEFAULT_LEARNING_RATE = float("{{LEARNING_RATE}}")
 DEFAULT_EPOCHS = int("{{EPOCHS}}")
 DEFAULT_BATCH_SIZE = int("{{BATCH_SIZE}}")
+DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
+DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
+DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
 
@@ -84,6 +90,9 @@ parser.add_argument("--optimizer", choices=["adam", "sgd", "rmsprop", "adagrad",
 parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
 parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
 parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+parser.add_argument("--early-stopping", type=_parse_bool, default=DEFAULT_EARLY_STOPPING)
+parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
+parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 args = parser.parse_args()
@@ -206,6 +215,7 @@ _validate_etl_outputs(
 # ================= PREPROCESSING / SPLIT =====================
 # =============================================================
 
+# Split BEFORE fitting transformers to avoid data leakage.
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
@@ -213,14 +223,18 @@ X_train, X_test, y_train, y_test = train_test_split(
 	random_state=args.random_state,
 )
 
+# Define column groups from training data only.
+# Include "str" explicitly for pandas 3 compatibility.
 categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
 numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
 
+# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
 try:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
 except TypeError:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
 
+# Preprocess: impute missing values, then scale numeric and one-hot encode categorical features.
 preprocessor = ColumnTransformer(
 	transformers=[
 		("num", Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]), numerical_cols),
@@ -229,10 +243,35 @@ preprocessor = ColumnTransformer(
 	remainder="drop",
 )
 
-X_train_processed = _to_dense_float32(preprocessor.fit_transform(X_train))
-X_test_processed = _to_dense_float32(preprocessor.transform(X_test))
+# Transform features to dense float32 arrays for TensorFlow compatibility.
 y_train_array = np.asarray(y_train, dtype=np.float32)
 y_test_array = np.asarray(y_test, dtype=np.float32)
+
+X_inner_train_processed = None
+X_valid_processed = None
+y_inner_train_array = y_train_array
+y_valid_array = None
+n_train_effective = int(len(X_train))
+n_val = 0
+
+if args.early_stopping:
+	X_inner_train, X_valid, y_inner_train, y_valid = train_test_split(
+		X_train,
+		y_train,
+		test_size=args.validation_fraction,
+		random_state=args.random_state,
+	)
+	X_inner_train_processed = _to_dense_float32(preprocessor.fit_transform(X_inner_train))
+	X_valid_processed = _to_dense_float32(preprocessor.transform(X_valid))
+	X_train_processed = _to_dense_float32(preprocessor.transform(X_train))
+	y_inner_train_array = np.asarray(y_inner_train, dtype=np.float32)
+	y_valid_array = np.asarray(y_valid, dtype=np.float32)
+	n_train_effective = int(len(X_inner_train))
+	n_val = int(len(X_valid))
+else:
+	X_train_processed = _to_dense_float32(preprocessor.fit_transform(X_train))
+
+X_test_processed = _to_dense_float32(preprocessor.transform(X_test))
 
 # =============================================================
 # ================= BUILD MODEL PIPELINE ======================
@@ -285,20 +324,67 @@ keras_model.compile(
 # ===================== TRAIN MODEL ===========================
 # =============================================================
 
+# Fit on training data and capture training history/timing.
+callbacks = []
+fit_features = X_train_processed
+fit_targets = y_train_array
+validation_data = None
+if args.early_stopping:
+	early_stopping_callback = tf.keras.callbacks.EarlyStopping(
+		monitor="val_loss",
+		patience=int(args.n_iter_no_change),
+		mode="min",
+		restore_best_weights=True,
+	)
+	callbacks.append(early_stopping_callback)
+	fit_features = X_inner_train_processed
+	fit_targets = y_inner_train_array
+	validation_data = (X_valid_processed, y_valid_array)
+
 fit_started_at = time.perf_counter()
 history = keras_model.fit(
-	X_train_processed,
-	y_train_array,
+	fit_features,
+	fit_targets,
 	epochs=int(args.epochs),
 	batch_size=int(args.batch_size),
+	callbacks=callbacks,
+	validation_data=validation_data,
 	verbose=training_verbose,
 )
 fit_time_seconds = float(time.perf_counter() - fit_started_at)
+
+history_epochs = int(len(history.history.get("loss", [])))
+if history_epochs <= 0:
+	history_epochs = int(args.epochs)
+
+best_step = None
+best_score_raw = None
+if args.early_stopping:
+	validation_loss_history = history.history.get("val_loss", [])
+	if len(validation_loss_history) > 0:
+		best_index = int(np.argmin(validation_loss_history))
+		best_step = best_index + 1
+		best_score_raw = float(validation_loss_history[best_index])
+
+training_control = {
+	"enabled": bool(args.early_stopping),
+	"type": "epochs",
+	"max_steps_configured": int(args.epochs),
+	"steps_completed": history_epochs,
+	"patience": int(args.n_iter_no_change),
+	"monitor_metric": "val_loss" if args.early_stopping else None,
+	"monitor_split": "val" if args.early_stopping else None,
+	"monitor_direction": "min" if args.early_stopping else None,
+	"best_step": int(best_step) if best_step is not None else None,
+	"best_score": _round_metric(best_score_raw),
+	"stopped_early": bool(args.early_stopping and history_epochs < int(args.epochs)),
+}
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
 # =============================================================
 
+# Evaluate model on train/test splits.
 predict_started_at = time.perf_counter()
 train_predictions = keras_model.predict(X_train_processed, verbose=training_verbose).reshape(-1)
 predictions = keras_model.predict(X_test_processed, verbose=training_verbose).reshape(-1)
@@ -323,24 +409,32 @@ test_max_err = max_error(y_test, predictions)
 # ============== MODEL METRICS / LOGGING ======================
 # =============================================================
 
-print("Train MSE:", _round_metric(train_mse))
-print("Train MAE:", _round_metric(train_mae))
-print("Train RMSE:", _round_metric(train_rmse))
-print("Train R2:", _round_metric(train_r2))
-print("Train Max Error:", _round_metric(train_max_err))
-print("Train Residual Mean:", _round_metric(train_residual_mean))
-print("Train Residual Std:", _round_metric(train_residual_std))
-print("Test MSE:", _round_metric(test_mse))
-print("Test MAE:", _round_metric(test_mae))
-print("Test RMSE:", _round_metric(test_rmse))
-print("Test R2:", _round_metric(test_r2))
-print("Test Max Error:", _round_metric(test_max_err))
-print("First 5 predictions:", predictions[:5].tolist())
+# ---- Train Metrics (model fit on data it learned from) ----
+print("Train MSE:", _round_metric(train_mse))  # Mean Squared Error on training set (average squared residuals; penalizes large errors heavily)
+print("Train MAE:", _round_metric(train_mae))  # Mean Absolute Error on training set (average absolute prediction error)
+print("Train RMSE:", _round_metric(train_rmse))  # Root Mean Squared Error on training set (error in original target units)
+print("Train R2:", _round_metric(train_r2))  # R² on training set (proportion of variance explained by model)
+print("Train Max Error:", _round_metric(train_max_err))  # Largest single absolute prediction error on training set
+print("Train Residual Mean:", _round_metric(train_residual_mean))  # Mean of residuals (should be ~0 for unbiased regression)
+print("Train Residual Std:", _round_metric(train_residual_std))  # Standard deviation of residuals (spread of prediction errors)
+
+# ---- Test Metrics (model performance on unseen data) ----
+print("Test MSE:", _round_metric(test_mse))  # Mean Squared Error on test set (average squared prediction errors)
+print("Test MAE:", _round_metric(test_mae))  # Mean Absolute Error on test set (average absolute difference from true values)
+print("Test RMSE:", _round_metric(test_rmse))  # Root Mean Squared Error on test set (interpretable error in target units)
+print("Test R2:", _round_metric(test_r2))  # R² score on test set (generalization performance)
+print("Test Max Error:", _round_metric(test_max_err))  # Largest single absolute prediction error on test set (worst-case mistake)
+if training_control["enabled"]:
+	print("Training Control Best Step:", training_control["best_step"])
+	print("Training Control Steps Completed:", training_control["steps_completed"])
+	print("Training Control Best Score:", training_control["best_score"])
+print("First 5 predictions:", predictions[:5].tolist())  # Sample of predicted values for quick sanity check
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
 # =============================================================
 
+# Artifact export and registry logging.
 if SAVE_MODEL:
 	model_name = args.name.strip() or Path(__file__).stem
 	model_root_dir = project_root / "artifacts" / "models" / model_name
@@ -361,6 +455,7 @@ if SAVE_MODEL:
 	for directory in (model_dir, preprocess_dir, eval_dir, data_dir, inference_dir):
 		directory.mkdir(parents=True, exist_ok=True)
 
+	# Save TensorFlow model and fitted preprocessor.
 	keras_model.save(model_dir / "model.keras")
 	with (preprocess_dir / "preprocessor.pkl").open("wb") as f:
 		pickle.dump(preprocessor, f)
@@ -378,8 +473,21 @@ if SAVE_MODEL:
 			"rmse": _round_metric(test_rmse),
 			"r2": _round_metric(test_r2),
 		},
+		"data_sizes": {
+			"n_train": int(n_train_effective),
+			"n_val": int(n_val),
+			"n_test": int(len(X_test)),
+		},
+		"primary_metric": {
+			"name": "rmse",
+			"split": "test",
+			"direction": "min",
+			"value": _round_metric(test_rmse),
+		},
+		"training_control": training_control,
 		"timing": {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)},
 	}
+	metrics["selection"] = training_control
 	rounded_history = {
 		k: [_round_metric(v) if isinstance(v, (int, float, np.floating, np.integer)) else v for v in values]
 		for k, values in history.history.items()
@@ -435,15 +543,43 @@ print("Expected:", expected_y)
 		"algorithm": "dense_neural_network",
 		"estimator_class": "tf.keras.Sequential",
 		"dataset": {"path": str(data_path.relative_to(project_root)), "sha256": data_hash, "rows": int(len(df)), "columns": int(df.shape[1])},
+		"data_split": {
+			"strategy": "train_test_split",
+			"test_size": float(args.test_size),
+			"random_state": int(args.random_state),
+			"stratify": False,
+			"validation": {
+				"enabled": bool(training_control["enabled"]),
+				"strategy": "explicit_split" if training_control["enabled"] else None,
+				"validation_fraction": float(args.validation_fraction) if training_control["enabled"] else None,
+				"random_state": int(args.random_state) if training_control["enabled"] else None,
+			},
+			"sizes": {
+				"n_rows": int(len(df)),
+				"n_train": int(n_train_effective),
+				"n_val": int(n_val),
+				"n_test": int(len(X_test)),
+			},
+		},
 		"params": {
 			"optimizer": args.optimizer,
 			"learning_rate": float(args.learning_rate),
 			"epochs": int(args.epochs),
 			"batch_size": int(args.batch_size),
+			"early_stopping": bool(args.early_stopping),
+			"validation_fraction": float(args.validation_fraction),
+			"n_iter_no_change": int(args.n_iter_no_change),
 			"random_state": int(args.random_state),
 			"hidden_layers": [128, 64, 32],
 		},
 		"preprocessing": {"feature_count": {"raw": int(X.shape[1]), "post_transform": _post_transform_feature_count(preprocessor, X_train.iloc[:1])}},
+		"selection": training_control,
+		"training_control": training_control,
+		"fit_summary": {
+			"fit_time_seconds": _round_metric(fit_time_seconds),
+			"predict_time_seconds": _round_metric(predict_time_seconds),
+			"random_state_effective": int(args.random_state),
+		},
 		"artifacts": _artifact_map(
 			run_dir,
 			{
@@ -474,6 +610,11 @@ print("Expected:", expected_y)
 			"epochs": int(args.epochs),
 			"batch_size": int(args.batch_size),
 			"random_state": int(args.random_state),
+			"training_control_enabled": bool(training_control["enabled"]),
+			"training_control_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
+			"training_control_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
+			"training_control_steps_completed": int(training_control["steps_completed"]) if training_control["steps_completed"] is not None else None,
+			"training_control_stopped_early": bool(training_control["stopped_early"]),
 			"mse": _round_metric(test_mse),
 			"mae": _round_metric(test_mae),
 			"rmse": _round_metric(test_rmse),

@@ -442,7 +442,7 @@ print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged F1 on 
 if train_logloss_value is not None:
 	print("Train Log Loss:", _round_metric(train_logloss_value))  # Cross-entropy loss on training set (probability quality)
 
-# ---- Test Metrics (generalization to unseen data) ----
+# ---- Test Metrics (model performance on unseen data) ----
 print("Test Accuracy:", _round_metric(test_accuracy))  # Overall correctness on test set
 print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Mean recall across classes (robust to imbalance)
 print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision (mean of per-class precision)
@@ -473,6 +473,7 @@ print("First 5 predictions:", predictions[:5])  # Quick sanity check of output c
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
 # =============================================================
+
 # Artifact export and registry logging.
 if SAVE_MODEL:
 	project_root = _project_root()

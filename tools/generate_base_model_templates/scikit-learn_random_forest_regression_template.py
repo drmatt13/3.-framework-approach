@@ -271,7 +271,7 @@ train_residuals = y_train - train_predictions
 train_residual_mean = float(train_residuals.mean())
 train_residual_std = float(train_residuals.std())
 
-# ---- Test Metrics (generalization to unseen data) ----
+# Test metrics
 test_mse = mean_squared_error(y_test, predictions)
 test_mae = mean_absolute_error(y_test, predictions)
 test_rmse = root_mean_squared_error(y_test, predictions)
@@ -282,7 +282,7 @@ test_max_error = max_error(y_test, predictions)
 # ============== MODEL METRICS / LOGGING ======================
 # =============================================================
 
-# ---- Train Metrics (model performance on training data) ----
+# ---- Train Metrics (model fit on data it learned from) ----
 print("Train MSE:", _round_metric(train_mse))  # Mean Squared Error on training set (average squared residuals)
 print("Train MAE:", _round_metric(train_mae))  # Mean Absolute Error on training set (average absolute prediction error)
 print("Train RMSE:", _round_metric(train_rmse))  # Root Mean Squared Error on training set (error in original target units)
@@ -291,7 +291,7 @@ print("Train Max Error:", _round_metric(train_max_error))  # Largest absolute pr
 print("Train Residual Mean:", _round_metric(train_residual_mean))  # Mean of residuals (should be near 0 if unbiased)
 print("Train Residual Std:", _round_metric(train_residual_std))  # Standard deviation of residuals (spread of errors)
 
-# ---- Test Metrics (model generalization to unseen data) ----
+# ---- Test Metrics (model performance on unseen data) ----
 print("Test MSE:", _round_metric(test_mse))  # Mean Squared Error on test set (average squared prediction errors)
 print("Test MAE:", _round_metric(test_mae))  # Mean Absolute Error on test set (average absolute difference from true values)
 print("Test RMSE:", _round_metric(test_rmse))  # Root Mean Squared Error on test set (interpretable error magnitude)
@@ -307,6 +307,7 @@ print("First 5 predictions:", predictions[:5])  # Quick sanity check of predicte
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
 # =============================================================
+
 # Artifact export and registry logging.
 if SAVE_MODEL:
 	model_name = args.name.strip() or Path(__file__).stem

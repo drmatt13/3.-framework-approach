@@ -68,6 +68,9 @@ from libraries.model_template_helpers import (
 #   --save-model true|false
 #   --random-state <int>
 #   --test-size <float>
+#   --early-stopping true|false
+#   --validation-fraction <float>
+#   --n-iter-no-change <int>
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
 # ---------------------------------------------------------------------
@@ -489,7 +492,7 @@ print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged F1 on 
 if train_logloss_value is not None:
 	print("Train Log Loss:", _round_metric(train_logloss_value))  # Cross-entropy loss on training set (probability confidence quality)
 
-# ---- Test Metrics (model generalization to unseen data) ----
+# ---- Test Metrics (model performance on unseen data) ----
 print("Test Accuracy:", _round_metric(test_accuracy))  # Overall proportion of correct predictions on unseen test data
 print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Average recall across classes (handles class imbalance)
 print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision (mean per-class precision)
@@ -521,6 +524,7 @@ print("First 5 predictions:", predictions[:5])  # Sample predictions for quick s
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
 # =============================================================
+
 # Artifact export and registry logging.
 if SAVE_MODEL:
 	model_name = args.name.strip() or Path(__file__).stem

@@ -296,29 +296,30 @@ test_max_error = max_error(y_test, predictions)
 # =============================================================
 
 # ---- Train Metrics (model fit on data it learned from) ----
-print("Train MSE:", _round_metric(train_mse))  # Mean Squared Error on training set
-print("Train MAE:", _round_metric(train_mae))  # Mean Absolute Error on training set
-print("Train RMSE:", _round_metric(train_rmse))  # Root Mean Squared Error on training set
-print("Train R2:", _round_metric(train_r2))  # R² on training set
-print("Train Max Error:", _round_metric(train_max_error))  # Largest single absolute training error
-print("Train Residual Mean:", _round_metric(train_residual_mean))  # Mean residual on training set
-print("Train Residual Std:", _round_metric(train_residual_std))  # Residual spread on training set
+print("Train MSE:", _round_metric(train_mse))  # Mean Squared Error on training set (average squared residuals; penalizes large errors heavily)
+print("Train MAE:", _round_metric(train_mae))  # Mean Absolute Error on training set (average absolute prediction error)
+print("Train RMSE:", _round_metric(train_rmse))  # Root Mean Squared Error on training set (error in original target units)
+print("Train R2:", _round_metric(train_r2))  # R² on training set (proportion of variance explained by model)
+print("Train Max Error:", _round_metric(train_max_error))  # Largest single absolute prediction error on training set
+print("Train Residual Mean:", _round_metric(train_residual_mean))  # Mean of residuals (should be ~0 for unbiased regression)
+print("Train Residual Std:", _round_metric(train_residual_std))  # Standard deviation of residuals (spread of prediction errors)
 
 # ---- Test Metrics (model performance on unseen data) ----
-print("Test MSE:", _round_metric(test_mse))  # Mean Squared Error on test set
-print("Test MAE:", _round_metric(test_mae))  # Mean Absolute Error on test set
-print("Test RMSE:", _round_metric(test_rmse))  # Root Mean Squared Error on test set
-print("Test R2:", _round_metric(test_r2))  # R² score on test set
-print("Test Max Error:", _round_metric(test_max_error))  # Worst-case single test error
+print("Test MSE:", _round_metric(test_mse))  # Mean Squared Error on test set (average squared prediction errors)
+print("Test MAE:", _round_metric(test_mae))  # Mean Absolute Error on test set (average absolute difference from true values)
+print("Test RMSE:", _round_metric(test_rmse))  # Root Mean Squared Error on test set (interpretable error in target units)
+print("Test R2:", _round_metric(test_r2))  # R² score on test set (generalization performance)
+print("Test Max Error:", _round_metric(test_max_error))  # Largest single absolute prediction error on test set (worst-case mistake)
 
-print("Target Mean:", _round_metric(y.mean()))  # Overall target mean
-print("Target Std:", _round_metric(y.std()))  # Overall target standard deviation
+print("Target Mean:", _round_metric(y.mean()))  # Overall target mean (use y_train.mean() in production to avoid leakage)
+print("Target Std:", _round_metric(y.std()))  # Overall target standard deviation (prefer y_train.std() for clean separation)
 
-print("First 5 predictions:", predictions[:5])  # Quick output sanity check
+print("First 5 predictions:", predictions[:5])  # Sample of predicted values (quick sanity check for scale and realism)
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
 # =============================================================
+
 # Artifact export and registry logging.
 if SAVE_MODEL:
 	model_name = args.name.strip() or Path(__file__).stem

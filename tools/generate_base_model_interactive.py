@@ -85,6 +85,8 @@ def _is_int(s: str) -> bool:
 
 
 def _supports_early_stopping_defaults(library: str, model: str | None, task: str) -> bool:
+    if library == "tensorflow" and model == "dense_nn":
+        return True
     if task == "regression":
         return False
     if library == "xgboost":
@@ -102,6 +104,8 @@ def _supports_default_max_iter(library: str, model: str | None, task: str) -> bo
 def _recommended_es_defaults(library: str, model: str | None) -> tuple[bool, float, int]:
     if library == "xgboost":
         return True, 0.1, 20
+    if library == "tensorflow" and model == "dense_nn":
+        return True, 0.1, 5
     if library == "scikit-learn" and model in {"logistic_regression", "random_forest"}:
         return True, 0.1, 5
     return True, 0.1, 5

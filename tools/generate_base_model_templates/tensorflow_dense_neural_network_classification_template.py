@@ -72,6 +72,9 @@ from libraries.model_template_helpers import (
 #   --learning-rate <float>
 #   --epochs <int>
 #   --batch-size <int>
+#   --early-stopping true|false
+#   --validation-fraction <float>
+#   --n-iter-no-change <int>
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
 # ---------------------------------------------------------------------
@@ -83,6 +86,9 @@ DEFAULT_OPTIMIZER_NAME = "{{OPTIMIZER_NAME}}"
 DEFAULT_LEARNING_RATE = float("{{LEARNING_RATE}}")
 DEFAULT_EPOCHS = int("{{EPOCHS}}")
 DEFAULT_BATCH_SIZE = int("{{BATCH_SIZE}}")
+DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
+DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
+DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
 
@@ -99,6 +105,9 @@ parser.add_argument("--optimizer", choices=["adam", "sgd", "rmsprop", "adagrad",
 parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
 parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
 parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+parser.add_argument("--early-stopping", type=_parse_bool, default=DEFAULT_EARLY_STOPPING)
+parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
+parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 args = parser.parse_args()
@@ -225,6 +234,8 @@ _validate_etl_outputs(
 # ================= PREPROCESSING / SPLIT =====================
 # =============================================================
 
+# Split BEFORE fitting transformers to avoid data leakage.
+# For classification tasks, stratify to preserve class distribution.
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
@@ -233,14 +244,18 @@ X_train, X_test, y_train, y_test = train_test_split(
 	stratify=y,
 )
 
+# Define column groups from training data only.
+# Include "str" explicitly for pandas 3 compatibility.
 categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
 numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
 
+# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
 try:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
 except TypeError:
 	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
 
+# Preprocess: impute missing values, then scale numeric and one-hot encode categorical features.
 preprocessor = ColumnTransformer(
 	transformers=[
 		("num", Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]), numerical_cols),
@@ -249,10 +264,38 @@ preprocessor = ColumnTransformer(
 	remainder="drop",
 )
 
-X_train_processed = _to_dense_float32(preprocessor.fit_transform(X_train))
-X_test_processed = _to_dense_float32(preprocessor.transform(X_test))
+# Transform features to dense float32 arrays for TensorFlow compatibility.
 y_train_array = np.asarray(y_train, dtype=np.int64)
 y_test_array = np.asarray(y_test, dtype=np.int64)
+
+X_inner_train_processed = None
+X_valid_processed = None
+y_inner_train_array = y_train_array
+y_valid_array = None
+n_train_effective = int(len(X_train))
+n_val = 0
+
+if args.early_stopping:
+	X_inner_train, X_valid, y_inner_train, y_valid = train_test_split(
+		X_train,
+		y_train,
+		test_size=args.validation_fraction,
+		random_state=args.random_state,
+		stratify=y_train,
+	)
+	X_inner_train_processed = _to_dense_float32(preprocessor.fit_transform(X_inner_train))
+	X_valid_processed = _to_dense_float32(preprocessor.transform(X_valid))
+	X_train_processed = _to_dense_float32(preprocessor.transform(X_train))
+	y_inner_train_array = np.asarray(y_inner_train, dtype=np.int64)
+	y_valid_array = np.asarray(y_valid, dtype=np.int64)
+	n_train_effective = int(len(X_inner_train))
+	n_val = int(len(X_valid))
+else:
+	X_train_processed = _to_dense_float32(preprocessor.fit_transform(X_train))
+
+X_test_processed = _to_dense_float32(preprocessor.transform(X_test))
+
+# Derive class metadata from training labels.
 classes = np.sort(np.unique(y_train_array))
 num_classes = int(len(classes))
 if num_classes < 2:
@@ -316,25 +359,74 @@ keras_model.compile(
 # ===================== TRAIN MODEL ===========================
 # =============================================================
 
+# Fit on training data and capture training history/timing.
+callbacks = []
+fit_features = X_train_processed
+fit_targets = y_train_array
+validation_data = None
+if args.early_stopping:
+	early_stopping_callback = tf.keras.callbacks.EarlyStopping(
+		monitor="val_loss",
+		patience=int(args.n_iter_no_change),
+		mode="min",
+		restore_best_weights=True,
+	)
+	callbacks.append(early_stopping_callback)
+	fit_features = X_inner_train_processed
+	fit_targets = y_inner_train_array
+	validation_data = (X_valid_processed, y_valid_array)
+
 fit_started_at = time.perf_counter()
 history = keras_model.fit(
-	X_train_processed,
-	y_train_array,
+	fit_features,
+	fit_targets,
 	epochs=int(args.epochs),
 	batch_size=int(args.batch_size),
+	callbacks=callbacks,
+	validation_data=validation_data,
 	verbose=training_verbose,
 )
 fit_time_seconds = float(time.perf_counter() - fit_started_at)
+
+history_epochs = int(len(history.history.get("loss", [])))
+if history_epochs <= 0:
+	history_epochs = int(args.epochs)
+
+best_step = None
+best_score_raw = None
+if args.early_stopping:
+	validation_loss_history = history.history.get("val_loss", [])
+	if len(validation_loss_history) > 0:
+		best_index = int(np.argmin(validation_loss_history))
+		best_step = best_index + 1
+		best_score_raw = float(validation_loss_history[best_index])
+
+training_control = {
+	"enabled": bool(args.early_stopping),
+	"type": "epochs",
+	"max_steps_configured": int(args.epochs),
+	"steps_completed": history_epochs,
+	"patience": int(args.n_iter_no_change),
+	"monitor_metric": "val_loss" if args.early_stopping else None,
+	"monitor_split": "val" if args.early_stopping else None,
+	"monitor_direction": "min" if args.early_stopping else None,
+	"best_step": int(best_step) if best_step is not None else None,
+	"best_score": _round_metric(best_score_raw),
+	"stopped_early": bool(args.early_stopping and history_epochs < int(args.epochs)),
+}
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
 # =============================================================
 
+# Evaluate model on train/test splits.
+# Predict on train/test splits and measure inference time.
 predict_started_at = time.perf_counter()
 train_raw = np.asarray(keras_model.predict(X_train_processed, verbose=training_verbose))
 test_raw = np.asarray(keras_model.predict(X_test_processed, verbose=training_verbose))
 predict_time_seconds = float(time.perf_counter() - predict_started_at)
 
+# Convert model outputs to probabilities and class predictions.
 if is_binary:
 	train_pos = train_raw.reshape(-1)
 	test_pos = test_raw.reshape(-1)
@@ -348,6 +440,7 @@ else:
 	train_predictions = np.argmax(train_probabilities, axis=1).astype(int)
 	predictions = np.argmax(probabilities, axis=1).astype(int)
 
+# Compute core classification metrics.
 train_accuracy = accuracy_score(y_train_array, train_predictions)
 train_f1_macro = f1_score(y_train_array, train_predictions, average="macro", zero_division=0)
 test_accuracy = accuracy_score(y_test_array, predictions)
@@ -362,6 +455,7 @@ _, _, _, support_values = precision_recall_fscore_support(y_test_array, predicti
 support_by_class = {str(k): int(v) for k, v in zip(classes.tolist(), support_values.tolist())}
 support_total = int(len(y_test_array))
 
+# Compute probability-based diagnostics (binary vs multiclass handling).
 roc_auc_macro_ovr = None
 pr_auc_macro_ovr = None
 brier_score_value = None
@@ -384,24 +478,32 @@ else:
 # ============== MODEL METRICS / LOGGING ======================
 # =============================================================
 
-print("Train Accuracy:", _round_metric(train_accuracy))
-print("Train F1 Macro:", _round_metric(train_f1_macro))
-print("Train Log Loss:", _round_metric(train_log_loss))
-print("Test Accuracy:", _round_metric(test_accuracy))
-print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))
-print("Test Precision Macro:", _round_metric(test_precision_macro))
-print("Test Recall Macro:", _round_metric(test_recall_macro))
-print("Test F1 Macro:", _round_metric(test_f1_macro))
-print("Test ROC AUC Macro OVR:", _round_metric(roc_auc_macro_ovr))
-print("Test PR AUC Macro OVR:", _round_metric(pr_auc_macro_ovr))
-print("Test Log Loss:", _round_metric(test_log_loss))
-print("Test Brier Score:", _round_metric(brier_score_value))
-print("First 5 predictions:", predictions[:5].tolist())
+# ---- Train Metrics (model fit on data it learned from) ----
+print("Train Accuracy:", _round_metric(train_accuracy))  # Proportion of correctly classified training samples
+print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged harmonic mean of precision/recall on training set
+print("Train Log Loss:", _round_metric(train_log_loss))  # Cross-entropy loss on training probabilities
+
+# ---- Test Metrics (model performance on unseen data) ----
+print("Test Accuracy:", _round_metric(test_accuracy))  # Overall classification accuracy on test data
+print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Mean recall across classes (robust to imbalance)
+print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision on test data
+print("Test Recall Macro:", _round_metric(test_recall_macro))  # Macro-averaged recall on test data
+print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 score on test data
+print("Test ROC AUC Macro OVR:", _round_metric(roc_auc_macro_ovr))  # One-vs-rest ROC-AUC macro average
+print("Test PR AUC Macro OVR:", _round_metric(pr_auc_macro_ovr))  # One-vs-rest precision-recall AUC macro average
+print("Test Log Loss:", _round_metric(test_log_loss))  # Cross-entropy loss on test probabilities
+print("Test Brier Score:", _round_metric(brier_score_value))  # Probability calibration error (lower is better)
+if training_control["enabled"]:
+	print("Training Control Best Step:", training_control["best_step"])
+	print("Training Control Steps Completed:", training_control["steps_completed"])
+	print("Training Control Best Score:", training_control["best_score"])
+print("First 5 predictions:", predictions[:5].tolist())  # Sample of predicted classes for quick sanity check
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
 # =============================================================
 
+# Artifact export and registry logging.
 if SAVE_MODEL:
 	model_name = args.name.strip() or Path(__file__).stem
 	model_root_dir = project_root / "artifacts" / "models" / model_name
@@ -422,6 +524,7 @@ if SAVE_MODEL:
 	for directory in (model_dir, preprocess_dir, eval_dir, data_dir, inference_dir):
 		directory.mkdir(parents=True, exist_ok=True)
 
+	# Save TensorFlow model and fitted preprocessor.
 	keras_model.save(model_dir / "model.keras")
 	with (preprocess_dir / "preprocessor.pkl").open("wb") as f:
 		pickle.dump(preprocessor, f)
@@ -441,8 +544,27 @@ if SAVE_MODEL:
 			"support_total": support_total,
 			"support_by_class": support_by_class,
 		},
+		"data_sizes": {
+			"n_train": int(n_train_effective),
+			"n_val": int(n_val),
+			"n_test": int(len(X_test)),
+		},
+		"primary_metric": {
+			"name": "roc_auc" if is_binary else "f1_macro",
+			"split": "test",
+			"direction": "max",
+			"value": _round_metric(roc_auc_macro_ovr) if is_binary else _round_metric(test_f1_macro),
+		},
+		"probabilities": {
+			"source": "predict",
+			"calibrated": False,
+			"calibration_method": None,
+		},
+		"training_control": training_control,
 		"timing": {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)},
 	}
+	metrics["selection"] = training_control
+	metrics["calibration"] = metrics.get("probabilities")
 	rounded_history = {
 		k: [_round_metric(v) if isinstance(v, (int, float, np.floating, np.integer)) else v for v in values]
 		for k, values in history.history.items()
@@ -532,11 +654,32 @@ print("Probabilities:", probabilities.tolist())
 		"algorithm": "dense_neural_network",
 		"estimator_class": "tf.keras.Sequential",
 		"dataset": {"path": str(data_path.relative_to(project_root)), "sha256": data_hash, "rows": int(len(df)), "columns": int(df.shape[1])},
+		"data_split": {
+			"strategy": "train_test_split",
+			"test_size": float(args.test_size),
+			"random_state": int(args.random_state),
+			"stratify": True,
+			"validation": {
+				"enabled": bool(training_control["enabled"]),
+				"strategy": "explicit_split" if training_control["enabled"] else None,
+				"validation_fraction": float(args.validation_fraction) if training_control["enabled"] else None,
+				"random_state": int(args.random_state) if training_control["enabled"] else None,
+			},
+			"sizes": {
+				"n_rows": int(len(df)),
+				"n_train": int(n_train_effective),
+				"n_val": int(n_val),
+				"n_test": int(len(X_test)),
+			},
+		},
 		"params": {
 			"optimizer": args.optimizer,
 			"learning_rate": float(args.learning_rate),
 			"epochs": int(args.epochs),
 			"batch_size": int(args.batch_size),
+			"early_stopping": bool(args.early_stopping),
+			"validation_fraction": float(args.validation_fraction),
+			"n_iter_no_change": int(args.n_iter_no_change),
 			"random_state": int(args.random_state),
 			"hidden_layers": [128, 64, 32],
 			"output_units": output_units,
@@ -545,6 +688,13 @@ print("Probabilities:", probabilities.tolist())
 			"generator_defaults": generated_defaults,
 		},
 		"preprocessing": {"feature_count": {"raw": int(X.shape[1]), "post_transform": _post_transform_feature_count(preprocessor, X_train.iloc[:1])}},
+		"selection": training_control,
+		"training_control": training_control,
+		"fit_summary": {
+			"fit_time_seconds": _round_metric(fit_time_seconds),
+			"predict_time_seconds": _round_metric(predict_time_seconds),
+			"random_state_effective": int(args.random_state),
+		},
 		"artifacts": _artifact_map(
 			run_dir,
 			{
@@ -579,6 +729,11 @@ print("Probabilities:", probabilities.tolist())
 			"epochs": int(args.epochs),
 			"batch_size": int(args.batch_size),
 			"random_state": int(args.random_state),
+			"training_control_enabled": bool(training_control["enabled"]),
+			"training_control_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
+			"training_control_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
+			"training_control_steps_completed": int(training_control["steps_completed"]) if training_control["steps_completed"] is not None else None,
+			"training_control_stopped_early": bool(training_control["stopped_early"]),
 			"num_class": int(num_classes),
 			"accuracy": _round_metric(test_accuracy),
 			"balanced_accuracy": _round_metric(test_balanced_accuracy),
