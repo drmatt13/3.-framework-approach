@@ -67,6 +67,7 @@ from libraries.model_template_helpers import (
 #   --task binary_classification|multiclass_classification
 #   --name <model_name>
 #   --booster gbtree|gblinear|dart
+#   --device auto|cpu|gpu
 #   --save-model true|false
 #   --random-state <int>
 #   --test-size <float>
@@ -81,6 +82,7 @@ from libraries.model_template_helpers import (
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 DEFAULT_BOOSTER = "{{BOOSTER}}"
+DEFAULT_DEVICE = "{{DEVICE}}"
 DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
 DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
 DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
@@ -94,6 +96,7 @@ parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
 parser.add_argument("--booster", choices=["gbtree", "gblinear", "dart"], default=DEFAULT_BOOSTER)
+parser.add_argument("--device", choices=["auto", "cpu", "gpu"], default=DEFAULT_DEVICE)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
@@ -109,6 +112,67 @@ xgb_model_verbosity = min(3, max(0, int(training_verbose)))
 xgb_fit_verbose = bool(training_verbose > 0)
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
+
+
+def _xgboost_cuda_available() -> bool:
+	try:
+		build_info = xgb.build_info()
+	except Exception:
+		return False
+
+	if not isinstance(build_info, dict):
+		return False
+
+	for key in ("USE_CUDA", "USE_NCCL", "CUDA_VERSION", "USE_RMM"):
+		value = build_info.get(key)
+		if isinstance(value, bool) and value:
+			return True
+		if isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "on"}:
+			return True
+
+	return False
+
+
+def _resolve_xgboost_device(device_flag: str) -> str:
+	if device_flag == "cpu":
+		return "cpu"
+	if device_flag == "gpu":
+		return "cuda"
+	return "cuda" if _xgboost_cuda_available() else "cpu"
+
+
+def _build_preprocessor(frame: pd.DataFrame) -> ColumnTransformer:
+	# Define column groups from the provided frame.
+	# Include "str" explicitly for pandas 3 compatibility.
+	categorical_cols = frame.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
+	numerical_cols = frame.select_dtypes(include=["number"]).columns.tolist()
+
+	# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
+	try:
+		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+	except TypeError:
+		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
+
+	numeric_transformer = Pipeline(
+		steps=[
+			("imputer", SimpleImputer(strategy="median")),
+			("scaler", StandardScaler()),
+		]
+	)
+	categorical_transformer = Pipeline(
+		steps=[
+			("imputer", SimpleImputer(strategy="most_frequent")),
+			("onehot", one_hot_encoder),
+		]
+	)
+
+	return ColumnTransformer(
+		transformers=[
+			("num", numeric_transformer, numerical_cols),
+			("cat", categorical_transformer, categorical_cols),
+		],
+		remainder="drop",
+	)
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -226,38 +290,8 @@ X_train, X_test, y_train, y_test = train_test_split(
 	stratify=y,
 )
 
-# Define column groups from training data only.
-# Include "str" explicitly for pandas 3 compatibility.
-categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
-
-# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
-try:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-except TypeError:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
 # Preprocess: impute missing values, then scale numeric and one-hot encode categorical features.
-numeric_transformer = Pipeline(
-	steps=[
-		("imputer", SimpleImputer(strategy="median")),
-		("scaler", StandardScaler()),
-	]
-)
-categorical_transformer = Pipeline(
-	steps=[
-		("imputer", SimpleImputer(strategy="most_frequent")),
-		("onehot", one_hot_encoder),
-	]
-)
-
-preprocessor = ColumnTransformer(
-	transformers=[
-		("num", numeric_transformer, numerical_cols),
-		("cat", categorical_transformer, categorical_cols),
-	],
-	remainder="drop",
-)
+preprocessor = _build_preprocessor(X_train)
 
 # =============================================================
 # ================= BUILD MODEL PIPELINE ======================
@@ -275,8 +309,12 @@ else:
 
 # Bundle preprocessing + model into one inference-ready pipeline.
 fit_time_seconds = 0.0
+xgb_device = _resolve_xgboost_device(args.device)
+if training_verbose > 0:
+	print(f"Resolved XGBoost device: requested={args.device}, effective={xgb_device}")
 model_kwargs = {
 	"booster": args.booster,
+	"device": xgb_device,
 	"random_state": args.random_state,
 	"objective": xgb_objective,
 	"eval_metric": xgb_eval_metric,
@@ -284,6 +322,16 @@ model_kwargs = {
 }
 if xgb_num_class is not None:
 	model_kwargs["num_class"] = xgb_num_class
+
+model = Pipeline(
+	steps=[
+		("preprocess", preprocessor),
+		(
+			"classifier",
+			xgb.XGBClassifier(**model_kwargs),
+		),
+	]
+)
 
 # =============================================================
 # ===================== TRAIN MODEL ===========================
@@ -304,34 +352,7 @@ if args.early_stopping:
 		stratify=y_train,
 	)
 
-	inner_categorical_cols = X_inner_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-	inner_numerical_cols = X_inner_train.select_dtypes(include=["number"]).columns.tolist()
-
-	try:
-		inner_one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-	except TypeError:
-		inner_one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-	inner_numeric_transformer = Pipeline(
-		steps=[
-			("imputer", SimpleImputer(strategy="median")),
-			("scaler", StandardScaler()),
-		]
-	)
-	inner_categorical_transformer = Pipeline(
-		steps=[
-			("imputer", SimpleImputer(strategy="most_frequent")),
-			("onehot", inner_one_hot_encoder),
-		]
-	)
-
-	inner_preprocessor = ColumnTransformer(
-		transformers=[
-			("num", inner_numeric_transformer, inner_numerical_cols),
-			("cat", inner_categorical_transformer, inner_categorical_cols),
-		],
-		remainder="drop",
-	)
+	inner_preprocessor = _build_preprocessor(X_inner_train)
 
 	X_inner_train_processed = inner_preprocessor.fit_transform(X_inner_train)
 	X_valid_processed = inner_preprocessor.transform(X_valid)
@@ -361,18 +382,9 @@ if args.early_stopping:
 	else:
 		selected_n_estimators = search_n_estimators
 
-	final_model_kwargs = dict(model_kwargs)
-	final_model_kwargs["n_estimators"] = selected_n_estimators
+	best_step = int(best_iteration) + 1 if best_iteration is not None else None
 
-	model = Pipeline(
-		steps=[
-			("preprocess", preprocessor),
-			(
-				"classifier",
-				xgb.XGBClassifier(**final_model_kwargs),
-			),
-		]
-	)
+	model.named_steps["classifier"].set_params(n_estimators=selected_n_estimators)
 
 	# Refit final model on full training split with selected boosting rounds.
 	fit_started_at = time.perf_counter()
@@ -392,21 +404,11 @@ if args.early_stopping:
 		"monitor_metric": xgb_eval_metric,
 		"monitor_split": "val",
 		"monitor_direction": "min",
-		"best_step": int(best_iteration) if best_iteration is not None else None,
+		"best_step": best_step,
 		"best_score": _round_metric(best_validation_score),
 		"stopped_early": bool(best_iteration is not None and (int(best_iteration) + 1) < int(search_n_estimators)),
 	}
 else:
-	model = Pipeline(
-		steps=[
-			("preprocess", preprocessor),
-			(
-				"classifier",
-				xgb.XGBClassifier(**model_kwargs),
-			),
-		]
-	)
-
 	# Fit on training data (pipeline fits preprocessors + model).
 	fit_started_at = time.perf_counter()
 	if training_verbose > 0:
@@ -416,11 +418,14 @@ else:
 	if training_verbose > 0:
 		print(f"Training completed in {fit_time_seconds:.3f}s: XGBClassifier")
 
+	configured_n_estimators_raw = model.named_steps["classifier"].get_params().get("n_estimators")
+	configured_n_estimators = int(configured_n_estimators_raw) if configured_n_estimators_raw is not None else 100
+
 	training_control = {
 		"enabled": False,
 		"type": "boosting",
-		"max_steps_configured": int(model.named_steps["classifier"].get_params().get("n_estimators", 100)),
-		"steps_completed": int(model.named_steps["classifier"].get_params().get("n_estimators", 100)),
+		"max_steps_configured": configured_n_estimators,
+		"steps_completed": configured_n_estimators,
 		"patience": int(args.n_iter_no_change),
 		"monitor_metric": None,
 		"monitor_split": None,
@@ -535,39 +540,45 @@ is_binary_problem = len(classifier_classes) == 2
 
 # ---- Train Metrics (model fit on data it learned from) ----
 print("Train Accuracy:", _round_metric(train_accuracy))  # Proportion of correct predictions on training data
-print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged F1 on training set
+print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged F1 score on training set
+
+# ---- Optional Probability-Based Train Metrics ----
 
 if train_logloss_value is not None:
 	print("Train Log Loss:", _round_metric(train_logloss_value))  # Cross-entropy loss on training set
 
 # ---- Test Metrics (model performance on unseen data) ----
 print("Test Accuracy:", _round_metric(test_accuracy))  # Overall proportion of correct predictions on test data
-print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Average recall across classes
-print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision
-print("Test Recall Macro:", _round_metric(test_recall_macro))  # Macro-averaged recall
-print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 score
+print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Average recall across classes (robust to imbalance)
+print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision across classes
+print("Test Recall Macro:", _round_metric(test_recall_macro))  # Macro-averaged recall across classes
+print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 score (balanced precision/recall)
+print("Test Support Total:", support_total)  # Total number of true samples in test set
+print("Test Support By Class:", support_by_class)  # True sample count per class (class distribution insight)
 
-print("Test Support Total:", support_total)  # Total number of true test samples
-print("Test Support By Class:", support_by_class)  # True sample count per class
-
+# ---- Optional Ranking Metrics (require probability outputs) ----
 if test_roc_auc_macro_ovr is not None:
-	print("Test ROC AUC Macro OVR:", _round_metric(test_roc_auc_macro_ovr))  # One-vs-Rest macro ROC-AUC
+	print("Test ROC AUC Macro OVR:", _round_metric(test_roc_auc_macro_ovr))  # One-vs-rest macro ROC-AUC score
 
 if test_pr_auc_macro_ovr is not None:
-	print("Test PR AUC Macro OVR:", _round_metric(test_pr_auc_macro_ovr))  # One-vs-Rest macro PR-AUC
+	print("Test PR AUC Macro OVR:", _round_metric(test_pr_auc_macro_ovr))  # One-vs-rest macro Precision-Recall AUC
 
+# ---- Optional Probability / Calibration Metrics ----
 if test_logloss_value is not None:
-	print("Test Log Loss:", _round_metric(test_logloss_value))  # Cross-entropy loss on test set
+	print("Test Log Loss:", _round_metric(test_logloss_value))  # Cross-entropy loss on test probabilities
 
 if brier_score is not None:
-	print("Test Brier Score:", _round_metric(brier_score))  # Probability calibration metric
+	print("Test Brier Score:", _round_metric(brier_score))  # Probability calibration metric (lower is better)
 
+# ---- Training Control (early stopping / step tracking) ----
 if training_control["enabled"]:
-	print("Training Control Best Step:", training_control["best_step"])
-	print("Training Control Steps Completed:", training_control["steps_completed"])
-	print("Training Control Best Score:", training_control["best_score"])
+	print("Training Control Best Step:", training_control["best_step"])  # Iteration/epoch with best validation score
+	print("Training Control Steps Completed:", training_control["steps_completed"])  # Total training iterations completed
+	print("Training Control Best Score:", training_control["best_score"])  # Best validation score achieved
 
+# ---- Sanity Checks ----
 print("First 5 predictions:", predictions[:5])  # Sample predictions for quick sanity check
+print("First 5 true labels:", y_test.iloc[:5].values)  # Corresponding true labels for sanity check
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================

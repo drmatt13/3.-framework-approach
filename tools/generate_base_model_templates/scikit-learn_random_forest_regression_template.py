@@ -81,6 +81,40 @@ training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
+
+def _build_preprocessor(frame: pd.DataFrame) -> ColumnTransformer:
+	# Define column groups from the provided frame.
+	# Include "str" explicitly for pandas 3 compatibility.
+	categorical_cols = frame.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
+	numerical_cols = frame.select_dtypes(include=["number"]).columns.tolist()
+
+	# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
+	try:
+		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+	except TypeError:
+		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
+
+	numeric_transformer = Pipeline(
+		steps=[
+			("imputer", SimpleImputer(strategy="median")),
+			("scaler", StandardScaler()),
+		]
+	)
+	categorical_transformer = Pipeline(
+		steps=[
+			("imputer", SimpleImputer(strategy="most_frequent")),
+			("onehot", one_hot_encoder),
+		]
+	)
+
+	return ColumnTransformer(
+		transformers=[
+			("num", numeric_transformer, numerical_cols),
+			("cat", categorical_transformer, categorical_cols),
+		],
+		remainder="drop",
+	)
+
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
 # =============================================================
@@ -195,38 +229,8 @@ X_train, X_test, y_train, y_test = train_test_split(
 	random_state=args.random_state,
 )
 
-# Define column groups from training data only.
-# Include "str" explicitly for pandas 3 compatibility.
-categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
-
-# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
-try:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-except TypeError:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
 # Preprocess: impute missing values, then scale numeric and one-hot encode categorical features.
-numeric_transformer = Pipeline(
-	steps=[
-		("imputer", SimpleImputer(strategy="median")),
-		("scaler", StandardScaler()),
-	]
-)
-categorical_transformer = Pipeline(
-	steps=[
-		("imputer", SimpleImputer(strategy="most_frequent")),
-		("onehot", one_hot_encoder),
-	]
-)
-
-preprocessor = ColumnTransformer(
-	transformers=[
-		("num", numeric_transformer, numerical_cols),
-		("cat", categorical_transformer, categorical_cols),
-	],
-	remainder="drop",
-)
+preprocessor = _build_preprocessor(X_train)
 
 # =============================================================
 # ================= BUILD MODEL PIPELINE ======================
@@ -296,13 +300,15 @@ print("Test MSE:", _round_metric(test_mse))  # Mean Squared Error on test set (a
 print("Test MAE:", _round_metric(test_mae))  # Mean Absolute Error on test set (average absolute difference from true values)
 print("Test RMSE:", _round_metric(test_rmse))  # Root Mean Squared Error on test set (interpretable error magnitude)
 print("Test R2:", _round_metric(test_r2))  # R² on test set (generalization performance)
-
 print("Test Max Error:", _round_metric(test_max_error))  # Worst-case absolute prediction error on test set
 
-print("Target Mean:", _round_metric(y.mean()))  # Overall target mean (prefer y_train.mean() to avoid leakage)
+# ---- Dataset Context (distribution reference) ----
+print("Target Mean:", _round_metric(y.mean()))  # Overall target mean (prefer y_train.mean() in production to avoid leakage)
 print("Target Std:", _round_metric(y.std()))  # Overall target standard deviation (prefer y_train.std() for clean separation)
 
-print("First 5 predictions:", predictions[:5])  # Quick sanity check of predicted values and scale
+# ---- Sanity Checks ----
+print("First 5 predictions:", predictions[:5])  # Quick sanity check of predicted values
+print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true values for sanity check
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================

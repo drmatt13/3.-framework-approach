@@ -424,11 +424,16 @@ print("Test MAE:", _round_metric(test_mae))  # Mean Absolute Error on test set (
 print("Test RMSE:", _round_metric(test_rmse))  # Root Mean Squared Error on test set (interpretable error in target units)
 print("Test R2:", _round_metric(test_r2))  # R² score on test set (generalization performance)
 print("Test Max Error:", _round_metric(test_max_err))  # Largest single absolute prediction error on test set (worst-case mistake)
+
+# ---- Training Control (early stopping / step tracking) ----
 if training_control["enabled"]:
-	print("Training Control Best Step:", training_control["best_step"])
-	print("Training Control Steps Completed:", training_control["steps_completed"])
-	print("Training Control Best Score:", training_control["best_score"])
+	print("Training Control Best Step:", training_control["best_step"])  # Iteration/epoch with best validation score
+	print("Training Control Steps Completed:", training_control["steps_completed"])  # Total training iterations completed
+	print("Training Control Best Score:", training_control["best_score"])  # Best validation score achieved during training
+
+# ---- Sanity Checks ----
 print("First 5 predictions:", predictions[:5].tolist())  # Sample of predicted values for quick sanity check
+print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true values for sanity check
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================

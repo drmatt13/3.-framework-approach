@@ -480,24 +480,29 @@ else:
 
 # ---- Train Metrics (model fit on data it learned from) ----
 print("Train Accuracy:", _round_metric(train_accuracy))  # Proportion of correctly classified training samples
-print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged harmonic mean of precision/recall on training set
+print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged harmonic mean of precision and recall on training set
 print("Train Log Loss:", _round_metric(train_log_loss))  # Cross-entropy loss on training probabilities
 
 # ---- Test Metrics (model performance on unseen data) ----
 print("Test Accuracy:", _round_metric(test_accuracy))  # Overall classification accuracy on test data
-print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Mean recall across classes (robust to imbalance)
-print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision on test data
-print("Test Recall Macro:", _round_metric(test_recall_macro))  # Macro-averaged recall on test data
-print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 score on test data
-print("Test ROC AUC Macro OVR:", _round_metric(roc_auc_macro_ovr))  # One-vs-rest ROC-AUC macro average
-print("Test PR AUC Macro OVR:", _round_metric(pr_auc_macro_ovr))  # One-vs-rest precision-recall AUC macro average
-print("Test Log Loss:", _round_metric(test_log_loss))  # Cross-entropy loss on test probabilities
+print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Mean recall across classes (robust to class imbalance)
+print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision across all classes
+print("Test Recall Macro:", _round_metric(test_recall_macro))  # Macro-averaged recall across all classes
+print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 score (balanced precision/recall measure)
+print("Test ROC AUC Macro OVR:", _round_metric(roc_auc_macro_ovr))  # One-vs-rest ROC-AUC macro average (ranking quality across classes)
+print("Test PR AUC Macro OVR:", _round_metric(pr_auc_macro_ovr))  # One-vs-rest precision-recall AUC macro average (better for imbalance)
+print("Test Log Loss:", _round_metric(test_log_loss))  # Cross-entropy loss on test probabilities (penalizes overconfident errors)
 print("Test Brier Score:", _round_metric(brier_score_value))  # Probability calibration error (lower is better)
+
+# ---- Training Control (early stopping / step tracking) ----
 if training_control["enabled"]:
-	print("Training Control Best Step:", training_control["best_step"])
-	print("Training Control Steps Completed:", training_control["steps_completed"])
-	print("Training Control Best Score:", training_control["best_score"])
-print("First 5 predictions:", predictions[:5].tolist())  # Sample of predicted classes for quick sanity check
+	print("Training Control Best Step:", training_control["best_step"])  # Iteration/epoch with best validation score
+	print("Training Control Steps Completed:", training_control["steps_completed"])  # Total training iterations completed
+	print("Training Control Best Score:", training_control["best_score"])  # Best validation score achieved during training
+
+# ---- Sanity Checks ----
+print("First 5 predictions:", predictions[:5].tolist())  # Sample predicted classes
+print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding ground-truth classes
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
@@ -561,6 +566,7 @@ if SAVE_MODEL:
 			"calibration_method": None,
 		},
 		"training_control": training_control,
+		"model_selection": training_control,
 		"timing": {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)},
 	}
 	metrics["selection"] = training_control
@@ -690,6 +696,7 @@ print("Probabilities:", probabilities.tolist())
 		"preprocessing": {"feature_count": {"raw": int(X.shape[1]), "post_transform": _post_transform_feature_count(preprocessor, X_train.iloc[:1])}},
 		"selection": training_control,
 		"training_control": training_control,
+		"model_selection": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),
@@ -734,6 +741,11 @@ print("Probabilities:", probabilities.tolist())
 			"training_control_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
 			"training_control_steps_completed": int(training_control["steps_completed"]) if training_control["steps_completed"] is not None else None,
 			"training_control_stopped_early": bool(training_control["stopped_early"]),
+			"model_selection_enabled": bool(training_control["enabled"]),
+			"model_selection_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
+			"model_selection_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
+			"model_selection_steps_completed": int(training_control["steps_completed"]) if training_control["steps_completed"] is not None else None,
+			"model_selection_stopped_early": bool(training_control["stopped_early"]),
 			"num_class": int(num_classes),
 			"accuracy": _round_metric(test_accuracy),
 			"balanced_accuracy": _round_metric(test_balanced_accuracy),

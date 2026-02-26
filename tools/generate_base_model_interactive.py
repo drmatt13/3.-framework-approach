@@ -24,6 +24,7 @@ TASKS_BY_LIBRARY_MODEL = {
 }
 
 XGBOOST_BOOSTERS = ["gbtree", "gblinear", "dart"]
+XGBOOST_DEVICE_DEFAULTS = ["cpu", "gpu"]
 
 # Only meaningful for TensorFlow models (gradient-based training)
 TENSORFLOW_OPTIMIZERS = ["adam", "sgd", "rmsprop", "adagrad", "adamw"]
@@ -176,6 +177,7 @@ def main() -> int:
 
     # Optional xgboost booster selection
     booster = None
+    device = None
     if library == "xgboost":
         booster = questionary.select(
             "Default xgboost booster:",
@@ -185,6 +187,17 @@ def main() -> int:
         ).ask()
 
         if booster is None:
+            print("Cancelled.")
+            return 0
+
+        device = questionary.select(
+            "Default xgboost device for generated template:",
+            choices=XGBOOST_DEVICE_DEFAULTS,
+            use_shortcuts=True,
+            style=CUSTOM_STYLE,
+        ).ask()
+
+        if device is None:
             print("Cancelled.")
             return 0
 
@@ -355,6 +368,7 @@ def main() -> int:
 
     if library == "xgboost":
         cmd.extend(["--booster", booster])
+        cmd.extend(["--device", device])
 
     if starter_dataset is not None:
         cmd.extend(["--starter-dataset", starter_dataset])

@@ -52,6 +52,7 @@ from libraries.model_template_helpers import (
 #   --task regression
 #   --name <model_name>
 #   --booster gbtree|gblinear|dart
+#   --device auto|cpu|gpu
 #   --save-model true|false
 #   --random-state <int>
 #   --test-size <float>
@@ -63,6 +64,7 @@ from libraries.model_template_helpers import (
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 DEFAULT_BOOSTER = "{{BOOSTER}}"
+DEFAULT_DEVICE = "{{DEVICE}}"
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
 
@@ -73,6 +75,7 @@ parser.add_argument("--task", choices=["regression"], default="regression")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
 parser.add_argument("--booster", choices=["gbtree", "gblinear", "dart"], default=DEFAULT_BOOSTER)
+parser.add_argument("--device", choices=["auto", "cpu", "gpu"], default=DEFAULT_DEVICE)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
@@ -84,6 +87,33 @@ training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
 xgb_model_verbosity = min(3, max(0, int(training_verbose)))
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
+
+
+def _xgboost_cuda_available() -> bool:
+	try:
+		build_info = xgb.build_info()
+	except Exception:
+		return False
+
+	if not isinstance(build_info, dict):
+		return False
+
+	for key in ("USE_CUDA", "USE_NCCL", "CUDA_VERSION", "USE_RMM"):
+		value = build_info.get(key)
+		if isinstance(value, bool) and value:
+			return True
+		if isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "on"}:
+			return True
+
+	return False
+
+
+def _resolve_xgboost_device(device_flag: str) -> str:
+	if device_flag == "cpu":
+		return "cpu"
+	if device_flag == "gpu":
+		return "cuda"
+	return "cuda" if _xgboost_cuda_available() else "cpu"
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -237,6 +267,9 @@ preprocessor = ColumnTransformer(
 # =============================================================
 
 # Bundle preprocessing + model into one inference-ready pipeline.
+xgb_device = _resolve_xgboost_device(args.device)
+if training_verbose > 0:
+	print(f"Resolved XGBoost device: requested={args.device}, effective={xgb_device}")
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
@@ -244,6 +277,7 @@ model = Pipeline(
 			"regressor",
 			xgb.XGBRegressor(
 				booster=args.booster,
+				device=xgb_device,
 				random_state=args.random_state,
 				objective="reg:squarederror",
 				eval_metric="rmse",
@@ -265,6 +299,19 @@ model.fit(X_train, y_train)
 fit_time_seconds = float(time.perf_counter() - fit_started_at)
 if training_verbose > 0:
 	print(f"Training completed in {fit_time_seconds:.3f}s: XGBRegressor")
+
+training_control = {
+	"enabled": False,
+	"strategy": None,
+	"monitor_name": None,
+	"monitor_mode": None,
+	"max_steps_configured": None,
+	"steps_completed": None,
+	"best_step": None,
+	"best_score": None,
+	"n_iter_no_change": None,
+	"validation_fraction": None,
+}
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
@@ -290,6 +337,8 @@ test_mae = mean_absolute_error(y_test, predictions)
 test_rmse = root_mean_squared_error(y_test, predictions)
 test_r2 = r2_score(y_test, predictions)
 test_max_error = max_error(y_test, predictions)
+target_mean_train = float(y_train.mean())
+target_std_train = float(y_train.std())
 
 # =============================================================
 # ============== MODEL METRICS / LOGGING ======================
@@ -311,10 +360,14 @@ print("Test RMSE:", _round_metric(test_rmse))  # Root Mean Squared Error on test
 print("Test R2:", _round_metric(test_r2))  # R² score on test set (generalization performance)
 print("Test Max Error:", _round_metric(test_max_error))  # Largest single absolute prediction error on test set (worst-case mistake)
 
-print("Target Mean:", _round_metric(y.mean()))  # Overall target mean (use y_train.mean() in production to avoid leakage)
-print("Target Std:", _round_metric(y.std()))  # Overall target standard deviation (prefer y_train.std() for clean separation)
+# ---- Dataset Context ----
+print("Target Mean (Train):", _round_metric(target_mean_train))  # Train-split target mean for leakage-safe summary
+print("Target Std (Train):", _round_metric(target_std_train))  # Train-split target standard deviation for leakage-safe summary
+print("Training Control Enabled:", training_control["enabled"])  # Whether iterative training control / early stopping was used
 
-print("First 5 predictions:", predictions[:5])  # Sample of predicted values (quick sanity check for scale and realism)
+# ---- Sanity Checks ----
+print("First 5 predictions:", predictions[:5])  # Sample predictions for quick sanity check
+print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true values for sanity check
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
@@ -368,8 +421,9 @@ if SAVE_MODEL:
 			"max_error": _round_metric(test_max_error),
 		},
 		"target_summary": {
-			"mean": _round_metric(y.mean()),
-			"std": _round_metric(y.std()),
+			"split": "train",
+			"mean": _round_metric(target_mean_train),
+			"std": _round_metric(target_std_train),
 		},
 		"data_sizes": {
 			"n_train": int(len(X_train)),
@@ -383,7 +437,8 @@ if SAVE_MODEL:
 			"value": _round_metric(test_rmse),
 		},
 	}
-	metrics["selection"] = None
+	metrics["training_control"] = training_control
+	metrics["selection"] = training_control
 	metrics["calibration"] = {"source": None, "calibrated": None, "calibration_method": None}
 	metrics["timing"] = {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
@@ -520,7 +575,8 @@ print(results)
 			"objective": "reg:squarederror",
 			"eval_metric": "rmse",
 		},
-		"selection": None,
+		"training_control": training_control,
+		"selection": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),

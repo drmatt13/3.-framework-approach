@@ -57,6 +57,7 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #
 #   (optional)
 #   --booster=gbtree|gblinear|dart
+#   --device=auto|cpu|gpu
 #
 #   Generated template runtime options (configurable defaults):
 #   --verbose=0|1|2|auto
@@ -101,6 +102,7 @@ SKLEARN_MODELS = {"linear_regression", "logistic_regression", "random_forest"}
 TENSORFLOW_MODELS = {"dense_nn", "cnn"}
 TASKS = {"regression", "binary_classification", "multiclass_classification"}
 XGBOOST_BOOSTERS = {"gbtree", "gblinear", "dart"}
+XGBOOST_DEVICES = {"auto", "cpu", "gpu"}
 TENSORFLOW_OPTIMIZERS = {"adam", "sgd", "rmsprop", "adagrad", "adamw"}
 
 SKLEARN_MODEL_TASKS = {
@@ -350,7 +352,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         )
 
     if _supports_early_stopping_defaults(args):
-        key = (args.library, args.model if args.library == "scikit-learn" else None, family)
+        key = (args.library, args.model if args.library in {"scikit-learn", "tensorflow"} else None, family)
         early_stopping_default = args.default_early_stopping
         if early_stopping_default is None:
             early_stopping_default = DEFAULT_EARLY_STOPPING_BY_TEMPLATE[key]
@@ -456,6 +458,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
 
     if args.library == "xgboost":
         booster = args.booster or "gbtree"
+        device = args.device or "auto"
         if starter_dataset is not None:
             replacements.update(
                 {
@@ -465,6 +468,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                     "FEATURE_DROP_COLUMNS": starter_dataset["feature_drop_columns"],
                     "TARGET_PREPROCESS": starter_dataset["target_preprocess"],
                     "BOOSTER": booster,
+                    "DEVICE": device,
                 }
             )
         elif args.task == "regression":
@@ -476,6 +480,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                     "FEATURE_DROP_COLUMNS": '["median_house_value"]',
                     "TARGET_PREPROCESS": 'y = y.astype("float64")',
                     "BOOSTER": booster,
+                    "DEVICE": device,
                 }
             )
         elif args.task == "binary_classification":
@@ -487,6 +492,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                     "FEATURE_DROP_COLUMNS": '["diagnosis", "id"]',
                     "TARGET_PREPROCESS": 'y = y.map({"B": 0, "M": 1}).astype("int64")',
                     "BOOSTER": booster,
+                    "DEVICE": device,
                 }
             )
         else:
@@ -498,6 +504,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                     "FEATURE_DROP_COLUMNS": '["species"]',
                     "TARGET_PREPROCESS": 'y = y.astype("category").cat.codes.astype("int64")',
                     "BOOSTER": booster,
+                    "DEVICE": device,
                 }
             )
 
@@ -640,6 +647,9 @@ def validate_args(args: argparse.Namespace) -> None:
         if args.booster is not None and args.booster not in XGBOOST_BOOSTERS:
             allowed = ", ".join(sorted(XGBOOST_BOOSTERS))
             raise ValueError(f"Invalid xgboost --booster '{args.booster}'. Allowed: {allowed}")
+        if args.device is not None and args.device not in XGBOOST_DEVICES:
+            allowed = ", ".join(sorted(XGBOOST_DEVICES))
+            raise ValueError(f"Invalid xgboost --device '{args.device}'. Allowed: {allowed}")
         if args.optimizer is not None or args.learning_rate is not None or args.epochs is not None or args.batch_size is not None:
             raise ValueError("Invalid flags: --optimizer/--learning_rate/--epochs/--batch_size are tensorflow-only")
         if early_stopping_defaults_provided and not _supports_early_stopping_defaults(args):
@@ -663,6 +673,8 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"Invalid --task '{args.task}' for scikit-learn model '{args.model}'. Allowed: {allowed}")
         if args.booster is not None:
             raise ValueError("Invalid flags: --booster is xgboost-only")
+        if args.device is not None:
+            raise ValueError("Invalid flags: --device is xgboost-only")
         if args.optimizer is not None or args.learning_rate is not None or args.epochs is not None or args.batch_size is not None:
             raise ValueError("Invalid flags: --optimizer/--learning_rate/--epochs/--batch_size are tensorflow-only")
         if early_stopping_defaults_provided and not _supports_early_stopping_defaults(args):
@@ -688,6 +700,8 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"Invalid --task '{args.task}' for tensorflow model '{args.model}'. Allowed: {allowed}")
         if args.booster is not None:
             raise ValueError("Invalid flags: --booster is xgboost-only")
+        if args.device is not None:
+            raise ValueError("Invalid flags: --device is xgboost-only")
         if args.optimizer is None:
             raise ValueError("--optimizer is required for tensorflow")
         if args.optimizer not in TENSORFLOW_OPTIMIZERS:
@@ -739,6 +753,12 @@ def main():
         required=False,
         choices=["gbtree", "gblinear", "dart"],
         help="xgboost booster (optional; xgboost only)",
+    )
+    parser.add_argument(
+        "--device",
+        required=False,
+        choices=["auto", "cpu", "gpu"],
+        help="xgboost device (optional; xgboost only)",
     )
     parser.add_argument(
         "--default-max-iter",

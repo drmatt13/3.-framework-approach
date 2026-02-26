@@ -439,6 +439,9 @@ is_binary_problem = len(classifier_classes) == 2
 # ---- Train Metrics (model fit on data it learned from) ----
 print("Train Accuracy:", _round_metric(train_accuracy))  # Proportion of correct predictions on training data
 print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged F1 on training set (equal weight per class)
+
+# ---- Optional Probability-Based Train Metrics ----
+
 if train_logloss_value is not None:
 	print("Train Log Loss:", _round_metric(train_logloss_value))  # Cross-entropy loss on training set (probability quality)
 
@@ -451,24 +454,29 @@ print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 (harm
 print("Test Support Total:", support_total)  # Total number of true samples in test set
 print("Test Support By Class:", support_by_class)  # True sample count per class (class distribution)
 
+# ---- Optional Ranking Metrics (require predict_proba / decision scores) ----
 if test_roc_auc_macro_ovr is not None:
 	print("Test ROC AUC Macro OVR:", _round_metric(test_roc_auc_macro_ovr))  # One-vs-Rest macro ROC-AUC (ranking quality across classes)
 
 if test_pr_auc_macro_ovr is not None:
 	print("Test PR AUC Macro OVR:", _round_metric(test_pr_auc_macro_ovr))  # One-vs-Rest macro PR-AUC (precision-recall tradeoff)
 
+# ---- Optional Probability Calibration Metrics ----
 if test_logloss_value is not None:
 	print("Test Log Loss:", _round_metric(test_logloss_value))  # Cross-entropy loss on test set (penalizes confident wrong predictions)
 
 if brier_score is not None:
 	print("Test Brier Score:", _round_metric(brier_score))  # Mean squared error of predicted probabilities (calibration metric)
 
+# ---- Training Control (early stopping / iteration tracking) ----
 if training_control["enabled"]:
-	print("Training Control Best Step:", training_control["best_step"])
-	print("Training Control Best Score:", training_control["best_score"])
+	print("Training Control Best Step:", training_control["best_step"])  # Best iteration/epoch observed
+	print("Training Control Best Score:", training_control["best_score"])  # Best validation score achieved
 
+# ---- Sanity Checks ----
 print("Classifier:", classifier_name)  # Model identifier for experiment tracking
 print("First 5 predictions:", predictions[:5])  # Quick sanity check of output classes
+print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true values for sanity check
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================

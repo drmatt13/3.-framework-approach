@@ -284,6 +284,19 @@ fit_time_seconds = float(time.perf_counter() - fit_started_at)
 if training_verbose > 0:
 	print(f"Training completed in {fit_time_seconds:.3f}s: LinearRegression")
 
+training_control = {
+	"enabled": False,
+	"strategy": None,
+	"monitor_name": None,
+	"monitor_mode": None,
+	"max_steps_configured": None,
+	"steps_completed": None,
+	"best_step": None,
+	"best_score": None,
+	"n_iter_no_change": None,
+	"validation_fraction": None,
+}
+
 # =============================================================
 # ==================== EVALUATE MODEL =========================
 # =============================================================
@@ -308,6 +321,8 @@ test_mae = mean_absolute_error(y_test, predictions)
 test_rmse = root_mean_squared_error(y_test, predictions)
 test_r2 = r2_score(y_test, predictions)
 test_max_error = max_error(y_test, predictions)
+target_mean_train = float(y_train.mean())
+target_std_train = float(y_train.std())
 
 # =============================================================
 # ============== MODEL METRICS / LOGGING ======================
@@ -327,13 +342,14 @@ print("Test MSE:", _round_metric(test_mse))  # Mean Squared Error on test set (a
 print("Test MAE:", _round_metric(test_mae))  # Mean Absolute Error on test set (average absolute difference from true values)
 print("Test RMSE:", _round_metric(test_rmse))  # Root Mean Squared Error on test set (interpretable error in target units)
 print("Test R2:", _round_metric(test_r2))  # R² score on test set (generalization performance)
-
 print("Test Max Error:", _round_metric(test_max_error))  # Largest single absolute prediction error on test set (worst-case mistake)
+print("Target Mean (Train):", _round_metric(target_mean_train))  # Train-split target mean for leakage-safe summary
+print("Target Std (Train):", _round_metric(target_std_train))  # Train-split target standard deviation for leakage-safe summary
+print("Training Control Enabled:", training_control["enabled"])  # Whether iterative training control / early stopping was used
 
-print("Target Mean:", _round_metric(y.mean()))  # Overall target mean (use y_train.mean() in production to avoid leakage)
-print("Target Std:", _round_metric(y.std()))  # Overall target standard deviation (prefer y_train.std() for clean separation)
-
-print("First 5 predictions:", predictions[:5])  # Sample of predicted values (quick sanity check for scale and realism)
+# ---- Sanity Checks ----
+print("First 5 predictions:", predictions[:5])  # Sample predictions for quick sanity check
+print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true values for sanity check
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
@@ -389,8 +405,9 @@ if SAVE_MODEL:
 			"max_error": _round_metric(test_max_error),
 		},
 		"target_summary": {
-			"mean": _round_metric(y.mean()),
-			"std": _round_metric(y.std()),
+			"split": "train",
+			"mean": _round_metric(target_mean_train),
+			"std": _round_metric(target_std_train),
 		},
 		"data_sizes": {
 			"n_train": int(len(X_train)),
@@ -404,7 +421,8 @@ if SAVE_MODEL:
 			"value": _round_metric(test_rmse),
 		},
 	}
-	metrics["selection"] = None
+	metrics["training_control"] = training_control
+	metrics["selection"] = training_control
 	metrics["calibration"] = {"source": None, "calibrated": None, "calibration_method": None}
 	metrics["timing"] = {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
@@ -532,7 +550,8 @@ print(results)
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
 		},
-		"selection": None,
+		"training_control": training_control,
+		"selection": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),

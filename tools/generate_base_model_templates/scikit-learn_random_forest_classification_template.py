@@ -108,6 +108,40 @@ training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
+
+def _build_preprocessor(frame: pd.DataFrame) -> ColumnTransformer:
+	# Define column groups from the provided frame.
+	# Include "str" explicitly for pandas 3 compatibility.
+	categorical_cols = frame.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
+	numerical_cols = frame.select_dtypes(include=["number"]).columns.tolist()
+
+	# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
+	try:
+		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+	except TypeError:
+		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
+
+	numeric_transformer = Pipeline(
+		steps=[
+			("imputer", SimpleImputer(strategy="median")),
+			("scaler", StandardScaler()),
+		]
+	)
+	categorical_transformer = Pipeline(
+		steps=[
+			("imputer", SimpleImputer(strategy="most_frequent")),
+			("onehot", one_hot_encoder),
+		]
+	)
+
+	return ColumnTransformer(
+		transformers=[
+			("num", numeric_transformer, numerical_cols),
+			("cat", categorical_transformer, categorical_cols),
+		],
+		remainder="drop",
+	)
+
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
 # =============================================================
@@ -224,44 +258,20 @@ X_train, X_test, y_train, y_test = train_test_split(
 	stratify=y,
 )
 
-# Define column groups from training data only.
-# Include "str" explicitly for pandas 3 compatibility.
-categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
-
-# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
-try:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-except TypeError:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
 # Preprocess: impute missing values, then scale numeric and one-hot encode categorical features.
-numeric_transformer = Pipeline(
-	steps=[
-		("imputer", SimpleImputer(strategy="median")),
-		("scaler", StandardScaler()),
-	]
-)
-categorical_transformer = Pipeline(
-	steps=[
-		("imputer", SimpleImputer(strategy="most_frequent")),
-		("onehot", one_hot_encoder),
-	]
-)
-
-preprocessor = ColumnTransformer(
-	transformers=[
-		("num", numeric_transformer, numerical_cols),
-		("cat", categorical_transformer, categorical_cols),
-	],
-	remainder="drop",
-)
+preprocessor = _build_preprocessor(X_train)
 
 # =============================================================
 # ================= BUILD MODEL PIPELINE ======================
 # =============================================================
 
 # Bundle preprocessing + model into one inference-ready pipeline.
+model = Pipeline(
+	steps=[
+		("preprocess", preprocessor),
+		("classifier", RandomForestClassifier(random_state=args.random_state, verbose=training_verbose)),
+	]
+)
 fit_time_seconds = 0.0
 
 # =============================================================
@@ -283,34 +293,7 @@ if args.early_stopping:
 		stratify=y_train,
 	)
 
-	inner_categorical_cols = X_inner_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-	inner_numerical_cols = X_inner_train.select_dtypes(include=["number"]).columns.tolist()
-
-	try:
-		inner_one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-	except TypeError:
-		inner_one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-	inner_numeric_transformer = Pipeline(
-		steps=[
-			("imputer", SimpleImputer(strategy="median")),
-			("scaler", StandardScaler()),
-		]
-	)
-	inner_categorical_transformer = Pipeline(
-		steps=[
-			("imputer", SimpleImputer(strategy="most_frequent")),
-			("onehot", inner_one_hot_encoder),
-		]
-	)
-
-	inner_preprocessor = ColumnTransformer(
-		transformers=[
-			("num", inner_numeric_transformer, inner_numerical_cols),
-			("cat", inner_categorical_transformer, inner_categorical_cols),
-		],
-		remainder="drop",
-	)
+	inner_preprocessor = _build_preprocessor(X_inner_train)
 
 	X_inner_train_processed = inner_preprocessor.fit_transform(X_inner_train)
 	X_valid_processed = inner_preprocessor.transform(X_valid)
@@ -345,12 +328,7 @@ if args.early_stopping:
 		if n_estimators >= MIN_ESTIMATORS_FOR_STOP and rounds_without_improvement >= args.n_iter_no_change:
 			break
 
-	model = Pipeline(
-		steps=[
-			("preprocess", preprocessor),
-			("classifier", RandomForestClassifier(random_state=args.random_state, n_estimators=best_n_estimators, verbose=training_verbose)),
-		]
-	)
+	model.named_steps["classifier"].set_params(n_estimators=best_n_estimators)
 	fit_started_at = time.perf_counter()
 	if training_verbose > 0:
 		print("Training started: RandomForestClassifier")
@@ -359,9 +337,19 @@ if args.early_stopping:
 	if training_verbose > 0:
 		print(f"Training completed in {fit_time_seconds:.3f}s: RandomForestClassifier")
 
-	model_selection = {
+	training_control = {
 		"enabled": True,
 		"type": "incremental_search",
+		"max_steps_configured": int(DEFAULT_MAX_ESTIMATORS),
+		"steps_completed": int(best_n_estimators),
+		"patience": int(args.n_iter_no_change),
+		"monitor_metric": "balanced_accuracy",
+		"monitor_split": "val",
+		"monitor_direction": "max",
+		"best_step": int(best_n_estimators),
+		"best_score": _round_metric(best_validation_balanced_accuracy),
+		"stopped_early": bool(best_n_estimators < DEFAULT_MAX_ESTIMATORS),
+		"best_params": {"n_estimators": int(best_n_estimators)},
 		"search_space": {
 			"n_estimators": {
 				"start": int(DEFAULT_ESTIMATOR_STEP),
@@ -369,24 +357,13 @@ if args.early_stopping:
 				"step": int(DEFAULT_ESTIMATOR_STEP),
 			},
 		},
+		"trials_completed": int(rounds_completed),
+		"best_trial_index": int(best_n_estimators // DEFAULT_ESTIMATOR_STEP),
 		"metric": "balanced_accuracy",
 		"metric_split": "val",
 		"direction": "max",
-		"trials_completed": int(rounds_completed),
-		"best_trial_index": int(best_n_estimators // DEFAULT_ESTIMATOR_STEP),
-		"best_params": {"n_estimators": int(best_n_estimators)},
-		"best_score": _round_metric(best_validation_balanced_accuracy),
-		"stopped_early": bool(best_n_estimators < DEFAULT_MAX_ESTIMATORS),
-		"patience": int(args.n_iter_no_change),
 	}
 else:
-	model = Pipeline(
-		steps=[
-			("preprocess", preprocessor),
-			("classifier", RandomForestClassifier(random_state=args.random_state, verbose=training_verbose)),
-		]
-	)
-
 	# Fit on training data (pipeline fits preprocessors + model).
 	fit_started_at = time.perf_counter()
 	if training_verbose > 0:
@@ -396,9 +373,19 @@ else:
 	if training_verbose > 0:
 		print(f"Training completed in {fit_time_seconds:.3f}s: RandomForestClassifier")
 
-	model_selection = {
+	training_control = {
 		"enabled": False,
 		"type": "incremental_search",
+		"max_steps_configured": int(DEFAULT_MAX_ESTIMATORS),
+		"steps_completed": int(model.named_steps["classifier"].n_estimators),
+		"patience": int(args.n_iter_no_change),
+		"monitor_metric": None,
+		"monitor_split": None,
+		"monitor_direction": None,
+		"best_step": None,
+		"best_score": None,
+		"stopped_early": False,
+		"best_params": {"n_estimators": int(model.named_steps["classifier"].n_estimators)},
 		"search_space": {
 			"n_estimators": {
 				"start": int(DEFAULT_ESTIMATOR_STEP),
@@ -406,15 +393,11 @@ else:
 				"step": int(DEFAULT_ESTIMATOR_STEP),
 			},
 		},
+		"trials_completed": 0,
+		"best_trial_index": None,
 		"metric": "balanced_accuracy",
 		"metric_split": "val",
 		"direction": "max",
-		"trials_completed": 0,
-		"best_trial_index": None,
-		"best_params": {"n_estimators": int(model.named_steps["classifier"].n_estimators)},
-		"best_score": None,
-		"stopped_early": False,
-		"patience": int(args.n_iter_no_change),
 	}
 
 # =============================================================
@@ -489,6 +472,7 @@ is_binary_problem = len(classifier_classes) == 2
 print("Train Accuracy:", _round_metric(train_accuracy))  # Proportion of correct predictions on training data
 print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged F1 on training set (equal weight per class)
 
+# ---- Optional Probability-Based Train Metrics ----
 if train_logloss_value is not None:
 	print("Train Log Loss:", _round_metric(train_logloss_value))  # Cross-entropy loss on training set (probability confidence quality)
 
@@ -498,28 +482,33 @@ print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Avera
 print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision (mean per-class precision)
 print("Test Recall Macro:", _round_metric(test_recall_macro))  # Macro-averaged recall (mean per-class recall)
 print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 score (harmonic mean of precision and recall per class)
-
 print("Test Support Total:", support_total)  # Total number of true test samples used for evaluation
 print("Test Support By Class:", support_by_class)  # True sample count per class (class distribution insight)
 
+# ---- Optional Ranking Metrics (require probability or decision scores) ----
 if test_roc_auc_macro_ovr is not None:
 	print("Test ROC AUC Macro OVR:", _round_metric(test_roc_auc_macro_ovr))  # One-vs-Rest macro ROC-AUC (probability ranking quality)
 
 if test_pr_auc_macro_ovr is not None:
 	print("Test PR AUC Macro OVR:", _round_metric(test_pr_auc_macro_ovr))  # One-vs-Rest macro Precision-Recall AUC (imbalance-sensitive metric)
 
+# ---- Optional Probability / Calibration Metrics ----
 if test_logloss_value is not None:
 	print("Test Log Loss:", _round_metric(test_logloss_value))  # Cross-entropy loss on test set (penalizes confident wrong predictions)
 
 if brier_score is not None:
 	print("Test Brier Score:", _round_metric(brier_score))  # Mean squared error of predicted probabilities (calibration metric)
 
-if model_selection["enabled"]:
-	print("Model Selection Best Trial:", model_selection["best_trial_index"])
-	print("Model Selection Best Params:", model_selection["best_params"])
-	print("Model Selection Best Score:", model_selection["best_score"])
+# ---- Training Control (early stopping / step tracking) ----
+if training_control["enabled"]:
+	print("Training Control Best Step:", training_control["best_step"])  # Best completed step based on validation score
+	print("Training Control Steps Completed:", training_control["steps_completed"])  # Total completed steps in training/selection
+	print("Training Control Best Params:", training_control["best_params"])  # Hyperparameters yielding best score
+	print("Training Control Best Score:", training_control["best_score"])  # Best validation score observed
 
-print("First 5 predictions:", predictions[:5])  # Sample predictions for quick sanity check of output classes
+# ---- Sanity Checks ----
+print("First 5 predictions:", predictions[:5])  # Quick sanity check of output classes
+print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true values for sanity check
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
@@ -584,7 +573,7 @@ if SAVE_MODEL:
 		},
 		"data_sizes": {
 			"n_train": int(len(X_train)),
-			"n_val": int(len(X_valid)) if model_selection["enabled"] else 0,
+			"n_val": int(len(X_valid)) if training_control["enabled"] else 0,
 			"n_test": int(len(X_test)),
 		},
 		"primary_metric": {
@@ -598,9 +587,10 @@ if SAVE_MODEL:
 			"calibrated": False if hasattr(model, "predict_proba") else None,
 			"calibration_method": None,
 		},
-		"model_selection": model_selection,
+		"training_control": training_control,
+		"model_selection": training_control,
 	}
-	metrics["selection"] = model_selection
+	metrics["selection"] = training_control
 	metrics["calibration"] = metrics.get("probabilities")
 	metrics["timing"] = {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
@@ -704,8 +694,8 @@ print(results)
 		json.dump(feature_schema, schema_file, indent=2)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
-	n_val = int(len(X_valid)) if model_selection["enabled"] else 0
-	n_train_effective = int(len(X_inner_train)) if model_selection["enabled"] else int(len(X_train))
+	n_val = int(len(X_valid)) if training_control["enabled"] else 0
+	n_train_effective = int(len(X_inner_train)) if training_control["enabled"] else int(len(X_train))
 	classifier_params = model.named_steps["classifier"].get_params()
 	estimator_params_compact = _select_estimator_params(
 		classifier_params,
@@ -745,10 +735,10 @@ print(results)
 			"random_state": int(args.random_state),
 			"stratify": True,
 			"validation": {
-				"enabled": bool(model_selection["enabled"]),
-				"strategy": "explicit_split" if model_selection["enabled"] else None,
-				"validation_fraction": float(args.validation_fraction) if model_selection["enabled"] else None,
-				"random_state": int(args.random_state) if model_selection["enabled"] else None,
+				"enabled": bool(training_control["enabled"]),
+				"strategy": "explicit_split" if training_control["enabled"] else None,
+				"validation_fraction": float(args.validation_fraction) if training_control["enabled"] else None,
+				"random_state": int(args.random_state) if training_control["enabled"] else None,
 			},
 			"sizes": {
 				"n_rows": data_rows,
@@ -776,8 +766,9 @@ print(results)
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
 		},
-		"selection": model_selection,
-		"model_selection": model_selection,
+		"selection": training_control,
+		"training_control": training_control,
+		"model_selection": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),
@@ -831,11 +822,18 @@ print(results)
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
-				"model_selection_enabled": bool(model_selection["enabled"]),
-				"model_selection_best_score": float(model_selection["best_score"]) if model_selection["best_score"] is not None else None,
-				"model_selection_best_trial_index": int(model_selection["best_trial_index"]) if model_selection["best_trial_index"] is not None else None,
-				"model_selection_best_n_estimators": int(model_selection["best_params"]["n_estimators"]) if model_selection["best_params"] is not None else None,
-				"model_selection_stopped_early": bool(model_selection["stopped_early"]),
+				"training_control_enabled": bool(training_control["enabled"]),
+				"training_control_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
+				"training_control_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
+				"training_control_best_trial_index": int(training_control["best_trial_index"]) if training_control["best_trial_index"] is not None else None,
+				"training_control_best_n_estimators": int(training_control["best_params"]["n_estimators"]) if training_control["best_params"] is not None else None,
+				"training_control_stopped_early": bool(training_control["stopped_early"]),
+				"model_selection_enabled": bool(training_control["enabled"]),
+				"model_selection_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
+				"model_selection_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
+				"model_selection_best_trial_index": int(training_control["best_trial_index"]) if training_control["best_trial_index"] is not None else None,
+				"model_selection_best_n_estimators": int(training_control["best_params"]["n_estimators"]) if training_control["best_params"] is not None else None,
+				"model_selection_stopped_early": bool(training_control["stopped_early"]),
 				"accuracy": _round_metric(test_accuracy),
 				"balanced_accuracy": _round_metric(test_balanced_accuracy),
 				"precision_macro": _round_metric(test_precision_macro),
