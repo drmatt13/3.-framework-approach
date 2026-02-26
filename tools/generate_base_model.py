@@ -126,18 +126,24 @@ DEFAULT_EARLY_STOPPING_BY_TEMPLATE = {
     ("scikit-learn", "logistic_regression", "classification"): True,
     ("scikit-learn", "random_forest", "classification"): True,
     ("xgboost", None, "classification"): True,
+    ("tensorflow", "dense_nn", "classification"): True,
+    ("tensorflow", "dense_nn", "regression"): True,
 }
 
 DEFAULT_VALIDATION_FRACTION_BY_TEMPLATE = {
     ("scikit-learn", "logistic_regression", "classification"): 0.1,
     ("scikit-learn", "random_forest", "classification"): 0.1,
     ("xgboost", None, "classification"): 0.1,
+    ("tensorflow", "dense_nn", "classification"): 0.1,
+    ("tensorflow", "dense_nn", "regression"): 0.1,
 }
 
 DEFAULT_N_ITER_NO_CHANGE_BY_TEMPLATE = {
     ("scikit-learn", "logistic_regression", "classification"): 5,
     ("scikit-learn", "random_forest", "classification"): 5,
     ("xgboost", None, "classification"): 20,
+    ("tensorflow", "dense_nn", "classification"): 5,
+    ("tensorflow", "dense_nn", "regression"): 5,
 }
 
 DEFAULT_MAX_ITER_BY_TEMPLATE = {
@@ -274,6 +280,8 @@ def render_template(template: str, replacements: dict[str, str]) -> str:
 
 def _supports_early_stopping_defaults(args: argparse.Namespace) -> bool:
     family = task_family(args.task)
+    if args.library == "tensorflow" and args.model == "dense_nn":
+        return True
     if family != "classification":
         return False
     if args.library == "xgboost":
@@ -691,10 +699,10 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError("--epochs is required for tensorflow")
         if args.batch_size is None:
             raise ValueError("--batch_size is required for tensorflow")
-        if early_stopping_defaults_provided:
+        if early_stopping_defaults_provided and not _supports_early_stopping_defaults(args):
             raise ValueError(
                 "Invalid flags: --default-early-stopping/--default-validation-fraction/"
-                "--default-n-iter-no-change are not supported for tensorflow"
+                "--default-n-iter-no-change are only supported for tensorflow dense_nn templates"
             )
         if max_iter_default_provided:
             raise ValueError("Invalid flag: --default-max-iter is not supported for tensorflow")
