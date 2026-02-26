@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+from functools import partial
 import numpy as np
 import pickle
 import platform
@@ -34,7 +35,7 @@ from libraries.model_template_helpers import (
 	find_project_root as _project_root,
 	parse_bool_flag as _parse_bool,
 	post_transform_feature_count as _post_transform_feature_count,
-	round_metric as _shared_round_metric,
+	round_metric as _round_metric_base,
 	select_estimator_params as _select_estimator_params,
 	validate_etl_outputs as _validate_etl_outputs,
 )
@@ -52,16 +53,15 @@ from libraries.model_template_helpers import (
 #   --save-model true|false
 #   --random-state <int>
 #   --test-size <float>
+#   --verbose 0|1|2|auto
+#   --metric-decimals <int>
 # ---------------------------------------------------------------------
 
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
-METRIC_DECIMALS = 4
-
-# Helper function: round metrics for cleaner output.
-def _round_metric(value):
-	return _shared_round_metric(value, METRIC_DECIMALS)
+DEFAULT_VERBOSE = "1"
+DEFAULT_METRIC_DECIMALS = 4
 
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Linear Regression baseline")
@@ -73,8 +73,13 @@ parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
+parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
+parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
+training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
+METRIC_DECIMALS = int(args.metric_decimals)
+_round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -95,27 +100,38 @@ SAVE_MODEL = args.save_model
 #   X: pd.DataFrame
 #   y: pd.Series
 #   target_column_name: str
-# Keep custom changes inside DATA ETL; everything below assumes this contract.
+#
+# This block is intentionally swappable. Downstream code relies ONLY on
+# this contract — not on dataset-specific assumptions.
 # ---------------------------------------------------------------------
 
 # ---------------------------------------------------------
 # Load dataset
 # ---------------------------------------------------------
-# Edit points for custom datasets:
-# - DATA_TASK_DIR / DATA_FILE
-# - READ_CSV_STATEMENT / POST_READ_DATASET_SETUP
+
+# Template injection points:
+#   - DATA_TASK_DIR / DATA_FILE
+#   - READ_CSV_STATEMENT / POST_READ_DATASET_SETUP
 project_root = _project_root()
 data_path = project_root / "data" / "template_data" / "{{DATA_TASK_DIR}}" / "{{DATA_FILE}}"
 {{READ_CSV_STATEMENT}}
 {{POST_READ_DATASET_SETUP}}
+
+# Drop common CSV index artifacts (e.g., "Unnamed: 0") so they never leak into features.
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 
+# Optional metadata for run logs / reverse-mapping (mainly for classification).
 target_dtype_original = None
 target_label_map = None
 
 # ---------------------------------------------------------
 # Normalize raw dataframe (dataset-level cleanup)
 # ---------------------------------------------------------
+
+# Goal: reduce category fragmentation and standardize missingness.
+#   - trim whitespace in string-like columns
+#   - convert empty strings to NaN
+#   - normalize pd.NA -> np.nan for consistent downstream behavior
 for column in df.select_dtypes(include=["object", "string"]).columns:
 	series = df[column].astype("string").str.strip()
 	series = series.replace("", np.nan)
@@ -126,26 +142,33 @@ df = df.replace({pd.NA: np.nan})
 # ---------------------------------------------------------
 # Define target + features (semantic boundary)
 # ---------------------------------------------------------
-# Edit points for target/feature mapping:
-# - TARGET_COLUMN
-# - COLUMNS_TO_DROP
+
+# Template injection points:
+#   - TARGET_COLUMN
+#   - COLUMNS_TO_DROP
 TARGET_COLUMN = "{{TARGET_COLUMN}}"
 COLUMNS_TO_DROP = {{COLUMNS_TO_DROP}}
 
 if TARGET_COLUMN not in df.columns:
 	raise ValueError(f"Target column '{TARGET_COLUMN}' not found in dataset.")
 
+# y is the supervised target; X is the feature space (minus optional drops).
 y = df[TARGET_COLUMN]
 X = df.drop(columns=[TARGET_COLUMN])
 
 # ---------------------------------------------------------
 # Drop unwanted feature columns (feature-level filtering)
 # ---------------------------------------------------------
+# Used for: IDs, leaky columns, high-missingness columns, or dataset-specific exclusions.
+
 X = X.drop(columns=COLUMNS_TO_DROP, errors="ignore")
 
 # ---------------------------------------------------------
 # Remove rows with missing target
 # ---------------------------------------------------------
+
+# Training assumes y is defined. We drop rows where y is missing,
+# while leaving missing values in X for downstream imputers to handle.
 valid_target_mask = y.notna()
 X = X.loc[valid_target_mask].copy()
 y = y.loc[valid_target_mask].copy()
@@ -153,6 +176,10 @@ y = y.loc[valid_target_mask].copy()
 # ---------------------------------------------------------
 # Target normalization (regression vs classification fallback)
 # ---------------------------------------------------------
+
+# Normalize y into a downstream-friendly numeric representation:
+#   - numeric y: keep numeric; cast float->int if values are integer-like
+#   - non-numeric y: category-encode to stable integer class IDs (with a label map)
 if pd.api.types.is_numeric_dtype(y):
 	target_dtype_original = str(y.dtype)
 	if pd.api.types.is_float_dtype(y):
@@ -173,6 +200,11 @@ target_column_name = str(TARGET_COLUMN)
 if len(y) == 0:
 	raise ValueError("No rows remain after target filtering. Check selected dataset and target column.")
 
+# ---------------------------------------------------------
+# Final ETL contract validation
+# ---------------------------------------------------------
+
+# Sanity-check the contract so downstream sections can run without defensive checks.
 _validate_etl_outputs(
 	project_root=project_root,
 	data_path=data_path,
@@ -245,8 +277,12 @@ model = Pipeline(
 
 # Fit on training data (pipeline fits preprocessors + model).
 fit_started_at = time.perf_counter()
+if training_verbose > 0:
+	print("Training started: LinearRegression")
 model.fit(X_train, y_train)
 fit_time_seconds = float(time.perf_counter() - fit_started_at)
+if training_verbose > 0:
+	print(f"Training completed in {fit_time_seconds:.3f}s: LinearRegression")
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
@@ -546,10 +582,10 @@ print(results)
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
-				"mse": float(test_mse),
-				"mae": float(test_mae),
-				"rmse": float(test_rmse),
-				"r2": float(test_r2),
+				"mse": _round_metric(test_mse),
+				"mae": _round_metric(test_mae),
+				"rmse": _round_metric(test_rmse),
+				"r2": _round_metric(test_r2),
 				"n_train": int(len(X_train)),
 				"n_test": int(len(X_test)),
 			}

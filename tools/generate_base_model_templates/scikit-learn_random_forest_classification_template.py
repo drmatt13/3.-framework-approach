@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+from functools import partial
 import numpy as np
 import pickle
 import platform
@@ -49,7 +50,7 @@ from libraries.model_template_helpers import (
 	find_project_root as _project_root,
 	parse_bool_flag as _parse_bool,
 	post_transform_feature_count as _post_transform_feature_count,
-	round_metric as _shared_round_metric,
+	round_metric as _round_metric_base,
 	select_estimator_params as _select_estimator_params,
 	validate_etl_outputs as _validate_etl_outputs,
 )
@@ -67,6 +68,8 @@ from libraries.model_template_helpers import (
 #   --save-model true|false
 #   --random-state <int>
 #   --test-size <float>
+#   --verbose 0|1|2|auto
+#   --metric-decimals <int>
 # ---------------------------------------------------------------------
 
 # Default values for optional parameters. These can be overridden via CLI.
@@ -78,11 +81,8 @@ DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
 DEFAULT_MAX_ESTIMATORS = 500
 DEFAULT_ESTIMATOR_STEP = 25
 MIN_ESTIMATORS_FOR_STOP = 100
-METRIC_DECIMALS = 4
-
-# Helper function: round metrics for cleaner output.
-def _round_metric(value):
-	return _shared_round_metric(value, METRIC_DECIMALS)
+DEFAULT_VERBOSE = "1"
+DEFAULT_METRIC_DECIMALS = 4
 
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Random Forest Classifier baseline")
@@ -97,8 +97,13 @@ parser.add_argument("--test-size", type=float, default=0.2)
 parser.add_argument("--early-stopping", type=_parse_bool, default=DEFAULT_EARLY_STOPPING)
 parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
 parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
+parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
+parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
+training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
+METRIC_DECIMALS = int(args.metric_decimals)
+_round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -119,24 +124,34 @@ SAVE_MODEL = args.save_model
 #   X: pd.DataFrame
 #   y: pd.Series
 #   target_column_name: str
-# Keep custom changes inside DATA ETL; everything below assumes this contract.
+#
+# This block is intentionally swappable. Downstream code relies ONLY on
+# this contract — not on dataset-specific assumptions.
 # ---------------------------------------------------------------------
 
 # ---------------------------------------------------------
 # Load dataset
 # ---------------------------------------------------------
-# Edit points for custom datasets:
-# - DATA_TASK_DIR / DATA_FILE
-# - READ_CSV_STATEMENT / POST_READ_DATASET_SETUP
+
+# Template injection points:
+#   - DATA_TASK_DIR / DATA_FILE
+#   - READ_CSV_STATEMENT / POST_READ_DATASET_SETUP
 project_root = _project_root()
 data_path = project_root / "data" / "template_data" / "{{DATA_TASK_DIR}}" / "{{DATA_FILE}}"
 {{READ_CSV_STATEMENT}}
 {{POST_READ_DATASET_SETUP}}
+
+# Drop common CSV index artifacts (e.g., "Unnamed: 0") so they never leak into features.
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 
 # ---------------------------------------------------------
 # Normalize raw dataframe (dataset-level cleanup)
 # ---------------------------------------------------------
+
+# Goal: reduce category fragmentation and standardize missingness.
+#   - trim whitespace in string-like columns
+#   - convert empty strings to NaN
+#   - normalize pd.NA -> np.nan for consistent downstream behavior
 for column in df.select_dtypes(include=["object", "string"]).columns:
 	series = df[column].astype("string").str.strip()
 	series = series.replace("", np.nan)
@@ -147,15 +162,18 @@ df = df.replace({pd.NA: np.nan})
 # ---------------------------------------------------------
 # Define target + features (semantic boundary)
 # ---------------------------------------------------------
-# Edit points for target/feature mapping:
-# - TARGET_COLUMN / FEATURE_DROP_COLUMNS
-# - TARGET_PREPROCESS
+
+# Template injection points:
+#   - TARGET_COLUMN
+#   - FEATURE_DROP_COLUMNS
+#   - TARGET_PREPROCESS
 TARGET_COLUMN = "{{TARGET_COLUMN}}"
 FEATURE_DROP_COLUMNS = {{FEATURE_DROP_COLUMNS}}
 
 if TARGET_COLUMN not in df.columns:
 	raise ValueError(f"Target column '{TARGET_COLUMN}' not found in dataset.")
 
+# y is the supervised target; X is the feature space (minus optional drops).
 y = df[TARGET_COLUMN]
 {{TARGET_PREPROCESS}} # type: ignore
 X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
@@ -163,6 +181,9 @@ X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 # ---------------------------------------------------------
 # Remove rows with missing target
 # ---------------------------------------------------------
+
+# Training assumes y is defined. We drop rows where y is missing,
+# while leaving missing values in X for downstream imputers to handle.
 valid_target_mask = y.notna()
 X = X.loc[valid_target_mask].copy()
 y = y.loc[valid_target_mask].copy()
@@ -172,6 +193,11 @@ target_column_name = str(TARGET_COLUMN)
 if len(y) == 0:
 	raise ValueError("No rows remain after target filtering. Check selected dataset and target column.")
 
+# ---------------------------------------------------------
+# Final ETL contract validation
+# ---------------------------------------------------------
+
+# Sanity-check the contract so downstream sections can run without defensive checks.
 _validate_etl_outputs(
 	project_root=project_root,
 	data_path=data_path,
@@ -290,6 +316,7 @@ if args.early_stopping:
 		random_state=args.random_state,
 		warm_start=True,
 		n_estimators=0,
+		verbose=training_verbose,
 	)
 
 	best_validation_balanced_accuracy = float("-inf")
@@ -318,12 +345,16 @@ if args.early_stopping:
 	model = Pipeline(
 		steps=[
 			("preprocess", preprocessor),
-			("classifier", RandomForestClassifier(random_state=args.random_state, n_estimators=best_n_estimators)),
+			("classifier", RandomForestClassifier(random_state=args.random_state, n_estimators=best_n_estimators, verbose=training_verbose)),
 		]
 	)
 	fit_started_at = time.perf_counter()
+	if training_verbose > 0:
+		print("Training started: RandomForestClassifier")
 	model.fit(X_train, y_train)
 	fit_time_seconds = float(time.perf_counter() - fit_started_at)
+	if training_verbose > 0:
+		print(f"Training completed in {fit_time_seconds:.3f}s: RandomForestClassifier")
 
 	model_selection = {
 		"enabled": True,
@@ -349,14 +380,18 @@ else:
 	model = Pipeline(
 		steps=[
 			("preprocess", preprocessor),
-			("classifier", RandomForestClassifier(random_state=args.random_state)),
+			("classifier", RandomForestClassifier(random_state=args.random_state, verbose=training_verbose)),
 		]
 	)
 
 	# Fit on training data (pipeline fits preprocessors + model).
 	fit_started_at = time.perf_counter()
+	if training_verbose > 0:
+		print("Training started: RandomForestClassifier")
 	model.fit(X_train, y_train)
 	fit_time_seconds = float(time.perf_counter() - fit_started_at)
+	if training_verbose > 0:
+		print(f"Training completed in {fit_time_seconds:.3f}s: RandomForestClassifier")
 
 	model_selection = {
 		"enabled": False,
@@ -797,19 +832,19 @@ print(results)
 				"model_selection_best_trial_index": int(model_selection["best_trial_index"]) if model_selection["best_trial_index"] is not None else None,
 				"model_selection_best_n_estimators": int(model_selection["best_params"]["n_estimators"]) if model_selection["best_params"] is not None else None,
 				"model_selection_stopped_early": bool(model_selection["stopped_early"]),
-				"accuracy": float(test_accuracy),
-				"balanced_accuracy": float(test_balanced_accuracy),
-				"precision_macro": float(test_precision_macro),
-				"recall_macro": float(test_recall_macro),
-				"f1_macro": float(test_f1_macro),
+				"accuracy": _round_metric(test_accuracy),
+				"balanced_accuracy": _round_metric(test_balanced_accuracy),
+				"precision_macro": _round_metric(test_precision_macro),
+				"recall_macro": _round_metric(test_recall_macro),
+				"f1_macro": _round_metric(test_f1_macro),
 				"support": support_total,
-				"roc_auc_macro_ovr": float(test_roc_auc_macro_ovr) if test_roc_auc_macro_ovr is not None else None,
-				"pr_auc_macro_ovr": float(test_pr_auc_macro_ovr) if test_pr_auc_macro_ovr is not None else None,
-				"log_loss": float(test_logloss_value) if test_logloss_value is not None else None,
-				"brier_score": float(brier_score) if brier_score is not None else None,
-				"train_accuracy": float(train_accuracy),
-				"train_f1_macro": float(train_f1_macro),
-				"train_log_loss": float(train_logloss_value) if train_logloss_value is not None else None,
+				"roc_auc_macro_ovr": _round_metric(test_roc_auc_macro_ovr) if test_roc_auc_macro_ovr is not None else None,
+				"pr_auc_macro_ovr": _round_metric(test_pr_auc_macro_ovr) if test_pr_auc_macro_ovr is not None else None,
+				"log_loss": _round_metric(test_logloss_value) if test_logloss_value is not None else None,
+				"brier_score": _round_metric(brier_score) if brier_score is not None else None,
+				"train_accuracy": _round_metric(train_accuracy),
+				"train_f1_macro": _round_metric(train_f1_macro),
+				"train_log_loss": _round_metric(train_logloss_value) if train_logloss_value is not None else None,
 				"n_train": int(len(X_train)),
 				"n_test": int(len(X_test)),
 			}

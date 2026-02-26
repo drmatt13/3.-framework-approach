@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from libraries.cli_helpers import parse_bool_flag
@@ -9,13 +10,18 @@ def round_metric(value, decimals: int = 4):
     return None if value is None else round(float(value), decimals)
 
 
+def to_dense_float32(values):
+    if hasattr(values, "toarray"):
+        values = values.toarray()
+    return np.asarray(values, dtype=np.float32)
+
+
 def find_project_root(marker_file: str = "requirements.txt") -> Path:
     current = Path(__file__).resolve().parent
     for candidate in [current, *current.parents]:
         if (candidate / marker_file).exists():
             return candidate
     return Path(__file__).resolve().parents[1]
-
 
 def validate_etl_outputs(
     project_root,

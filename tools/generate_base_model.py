@@ -23,12 +23,18 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #   --model=linear_regression 
 #   --task=regression 
 #   --name=...
+#
+#   Generated template runtime options (configurable defaults):
+#   --verbose=0|1|2|auto
 
 # Logistic Regression (classification only)
 #   --library=scikit-learn 
 #   --model=logistic_regression 
 #   --task=binary_classification|multiclass_classification 
 #   --name=...
+#
+#   Generated template runtime options (configurable defaults):
+#   --verbose=0|1|2|auto
 
 # Random Forest
 #   --library=scikit-learn 
@@ -37,6 +43,7 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #   --name=...
 #
 #   Generated classification template runtime options (configurable defaults):
+#   --verbose=0|1|2|auto
 #   --early-stopping=true|false
 #   --validation-fraction=<float>
 #   --n-iter-no-change=<int>
@@ -50,6 +57,9 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #
 #   (optional)
 #   --booster=gbtree|gblinear|dart
+#
+#   Generated template runtime options (configurable defaults):
+#   --verbose=0|1|2|auto
 #
 #   Generated classification template runtime options (configurable defaults):
 #   --early-stopping=true|false
@@ -68,6 +78,9 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #   --epochs=<int>
 #   --batch_size=<int>
 #   --name=...
+#
+#   Generated template runtime options (configurable defaults):
+#   --verbose=0|1|2|auto
 
 # Convolutional Neural Network
 #   --library=tensorflow 
@@ -78,6 +91,9 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #   --epochs=<int>
 #   --batch_size=<int>
 #   --name=...
+#
+#   Generated template runtime options (configurable defaults):
+#   --verbose=0|1|2|auto
 
 # ---------------------------------------------------------
 
@@ -487,6 +503,26 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                 "BATCH_SIZE": str(args.batch_size),
             }
         )
+
+        if family == "regression":
+            if starter_dataset is not None:
+                replacements.update(
+                    {
+                        "DATA_FILE": starter_dataset["data_file"],
+                        "TARGET_COLUMN": starter_dataset["target_column"],
+                        "FEATURE_DROP_COLUMNS": starter_dataset["feature_drop_columns"],
+                        "TARGET_PREPROCESS": starter_dataset["target_preprocess"],
+                    }
+                )
+            else:
+                replacements.update(
+                    {
+                        "DATA_FILE": "california_housing.csv",
+                        "TARGET_COLUMN": "median_house_value",
+                        "FEATURE_DROP_COLUMNS": '["median_house_value"]',
+                        "TARGET_PREPROCESS": 'y = y.astype("float64")',
+                    }
+                )
 
         if family == "classification":
             if starter_dataset is not None:
