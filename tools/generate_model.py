@@ -249,7 +249,7 @@ STARTER_DATASET_CONFIG = {
 # Templates
 # ---------------------------------------------------------
 
-TEMPLATES_DIR = Path(__file__).resolve().parent / "generate_base_model_templates"
+TEMPLATES_DIR = Path(__file__).resolve().parent / "model_templates"
 
 
 def task_family(task: str) -> str:

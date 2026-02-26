@@ -114,7 +114,7 @@ def _recommended_es_defaults(library: str, model: str | None) -> tuple[bool, flo
 
 def main() -> int:
     script_dir = Path(__file__).resolve().parent
-    generator_path = script_dir / "generate_base_model.py"
+    generator_path = script_dir / "tools" / "generate_model_tool.py"
 
     if not generator_path.exists():
         print(f"Could not find generator script at: {generator_path}", file=sys.stderr)

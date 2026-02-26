@@ -4,7 +4,6 @@ import subprocess
 import sys
 from collections import Counter
 
-
 def main() -> int:
     workspace_root = Path.cwd().resolve()
     root = Path("artifacts/models")
