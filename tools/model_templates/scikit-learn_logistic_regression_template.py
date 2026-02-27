@@ -54,6 +54,7 @@ from libraries.model_template_helpers import (
 	round_metric as _round_metric_base,
 	select_estimator_params as _select_estimator_params,
 	validate_etl_outputs as _validate_etl_outputs,
+	write_model_schemas as _write_model_schemas,
 )
 
 # =============================================================
@@ -84,6 +85,9 @@ DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
 DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
 DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
 DEFAULT_MAX_ITER = int("{{MAX_ITER_DEFAULT}}")
+DEFAULT_C = float("{{LOGISTIC_C_DEFAULT}}")
+DEFAULT_SOLVER = "{{LOGISTIC_SOLVER_DEFAULT}}"
+LOGISTIC_SOLVERS = ["lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"]
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
 
@@ -111,6 +115,8 @@ parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
 parser.add_argument("--max-iter", type=int, default=DEFAULT_MAX_ITER)
+parser.add_argument("--c", type=float, default=DEFAULT_C)
+parser.add_argument("--solver", choices=LOGISTIC_SOLVERS, default=DEFAULT_SOLVER)
 parser.add_argument("--early-stopping", type=_parse_bool, default=DEFAULT_EARLY_STOPPING)
 parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
 parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
@@ -192,6 +198,7 @@ if TARGET_COLUMN not in df.columns:
 
 # y is the supervised target; X is the feature space (minus optional drops).
 y = df[TARGET_COLUMN]
+y_original = y.copy()
 {{TARGET_PREPROCESS}} # type: ignore
 X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 
@@ -204,6 +211,7 @@ X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 valid_target_mask = y.notna()
 X = X.loc[valid_target_mask].copy()
 y = y.loc[valid_target_mask].copy()
+y_original = y_original.loc[valid_target_mask].copy()
 
 target_column_name = str(TARGET_COLUMN)
 
@@ -281,6 +289,7 @@ if args.early_stopping:
 	classifier = SGDClassifier(
 		loss="log_loss",
 		max_iter=args.max_iter, # Upper bound on iterations; early stopping can halt earlier.
+		alpha=float(1.0 / max(float(args.c), 1e-12)),
 		tol=1e-3, # This is the minimum change in the monitored metric to qualify as an improvement. Adjust as needed.
 		early_stopping=True, 
 		validation_fraction=args.validation_fraction,
@@ -288,10 +297,10 @@ if args.early_stopping:
 		random_state=args.random_state,
 		verbose=training_verbose,
 	)
-	classifier_name = f"SGDClassifier(loss=log_loss, early_stopping=True, max_iter={args.max_iter})"
+	classifier_name = f"SGDClassifier(loss=log_loss, early_stopping=True, max_iter={args.max_iter}, alpha={1.0 / max(float(args.c), 1e-12):.6g})"
 else:
-	classifier = LogisticRegression(max_iter=args.max_iter, verbose=training_verbose)
-	classifier_name = f"LogisticRegression(max_iter={args.max_iter})"
+	classifier = LogisticRegression(max_iter=args.max_iter, C=float(args.c), solver=args.solver, random_state=args.random_state, verbose=training_verbose)
+	classifier_name = f"LogisticRegression(max_iter={args.max_iter}, C={float(args.c):.6g}, solver={args.solver})"
 
 model = Pipeline(
 	steps=[
@@ -625,6 +634,7 @@ if SAVE_MODEL:
 	# Do NOT pre-one-hot-encode these rows; model.pkl handles preprocessing.
 	inference_rows = X_test.iloc[:5].to_dict(orient="records")
 	expected_values = y_test.iloc[:5].tolist()
+	class_labels = [str(label) for label in classifier_classes.tolist()]
 	sample_rows_literal = json.dumps(inference_rows, indent=2)
 	sample_rows_literal = sample_rows_literal.replace(": NaN", ": np.nan")
 	sample_rows_literal = sample_rows_literal.replace(": Infinity", ": np.inf")
@@ -639,17 +649,22 @@ MODEL_PATH = Path(__file__).resolve().parents[1] / "model" / "model.pkl"
 
 sample_rows = {sample_rows_literal}
 expected_y = {json.dumps(expected_values, indent=2)}
+class_labels = {json.dumps(class_labels, indent=2)}
 
 with MODEL_PATH.open("rb") as model_file:
 	model = pickle.load(model_file)
 
 features = pd.DataFrame(sample_rows)
 predictions = model.predict(features)
+probabilities = model.predict_proba(features) if hasattr(model, "predict_proba") else None
 
 print("Inference Example")
 print("Input Rows:", len(features))
 print("Predictions:", predictions.tolist())
 print("Expected:", expected_y)
+if probabilities is not None:
+	print("Class Labels:", class_labels)
+	print("Probabilities:", probabilities.tolist())
 
 results = features.copy()
 results["y_expected"] = expected_y
@@ -659,12 +674,15 @@ print(results)
 	with (inference_dir / "inference_example.py").open("w", encoding="utf-8") as inference_file:
 		inference_file.write(inference_script)
 
-	feature_schema = {
-		"feature_columns": {col: str(dtype) for col, dtype in X.dtypes.items()},
-		"target": {target_column_name: str(y.dtype)},
-	}
-	with (data_dir / "feature_schema.json").open("w", encoding="utf-8") as schema_file:
-		json.dump(feature_schema, schema_file, indent=2)
+	schema_artifacts = _write_model_schemas(
+		schema_dir=data_dir,
+		X_raw=X,
+		y_model=y,
+		target_column_name=target_column_name,
+		transformed_features=model.named_steps["preprocess"].transform(X_train.iloc[:1]),
+		preprocessor=model.named_steps["preprocess"],
+		y_original=y_original,
+	)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
 	n_val = int(len(X_train) * float(args.validation_fraction)) if training_control["enabled"] else 0
@@ -766,6 +784,8 @@ print(results)
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
 			"max_iter": int(args.max_iter),
+			"c": float(args.c),
+			"solver": args.solver,
 		},
 		"selection": training_control,
 		"optimization": {
@@ -785,8 +805,8 @@ print(results)
 			"n_jobs": estimator_params.get("n_jobs"),
 		},
 		"artifacts": _artifact_map(
-			run_dir,
-			{
+				run_dir,
+				{
 				"model": model_dir / "model.pkl",
 				"preprocess": preprocess_dir / "preprocessor.pkl",
 				"eval_metrics": eval_dir / "metrics.json",
@@ -795,8 +815,8 @@ print(results)
 				"eval_predictions_preview": eval_dir / "predictions_preview.csv",
 				"eval_roc_curve": eval_dir / "roc_curve.csv",
 				"eval_roc_curve_plot": eval_dir / "roc_curve.png",
-				"feature_schema": data_dir / "feature_schema.json",
 				"inference_example": inference_dir / "inference_example.py",
+					**schema_artifacts,
 			},
 		),
 		"versions": {

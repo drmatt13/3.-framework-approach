@@ -104,6 +104,7 @@ TASKS = {"regression", "binary_classification", "multiclass_classification"}
 XGBOOST_BOOSTERS = {"gbtree", "gblinear", "dart"}
 XGBOOST_DEVICES = {"auto", "cpu", "gpu"}
 TENSORFLOW_OPTIMIZERS = {"adam", "sgd", "rmsprop", "adagrad", "adamw"}
+SKLEARN_LOGISTIC_SOLVERS = {"lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"}
 
 SKLEARN_MODEL_TASKS = {
     "linear_regression": {"regression"},
@@ -150,6 +151,43 @@ DEFAULT_N_ITER_NO_CHANGE_BY_TEMPLATE = {
 
 DEFAULT_MAX_ITER_BY_TEMPLATE = {
     ("scikit-learn", "logistic_regression", "classification"): 1000,
+}
+
+DEFAULT_XGBOOST_PARAMS_BY_TEMPLATE = {
+    ("xgboost", "classification"): {
+        "n_estimators": 300,
+        "learning_rate": 0.1,
+        "max_depth": 6,
+        "subsample": 1.0,
+        "colsample_bytree": 1.0,
+    },
+    ("xgboost", "regression"): {
+        "n_estimators": 300,
+        "learning_rate": 0.1,
+        "max_depth": 6,
+        "subsample": 1.0,
+        "colsample_bytree": 1.0,
+    },
+}
+
+DEFAULT_LOGISTIC_PARAMS_BY_TEMPLATE = {
+    ("scikit-learn", "logistic_regression", "classification"): {
+        "c": 1.0,
+        "solver": "lbfgs",
+    },
+}
+
+DEFAULT_RANDOM_FOREST_PARAMS_BY_TEMPLATE = {
+    ("scikit-learn", "random_forest", "classification"): {
+        "n_estimators": 300,
+        "max_depth": 16,
+        "min_samples_split": 2,
+    },
+    ("scikit-learn", "random_forest", "regression"): {
+        "n_estimators": 300,
+        "max_depth": 16,
+        "min_samples_split": 2,
+    },
 }
 
 STARTER_DATASETS_BY_FAMILY = {
@@ -381,6 +419,16 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         replacements.update({"MAX_ITER_DEFAULT": str(int(max_iter_default))})
 
     if args.library == "scikit-learn" and args.model == "logistic_regression":
+        logistic_defaults = DEFAULT_LOGISTIC_PARAMS_BY_TEMPLATE[("scikit-learn", "logistic_regression", family)]
+        default_c = args.default_c if args.default_c is not None else logistic_defaults["c"]
+        default_solver = args.default_solver if args.default_solver is not None else logistic_defaults["solver"]
+        replacements.update(
+            {
+                "LOGISTIC_C_DEFAULT": str(float(default_c)),
+                "LOGISTIC_SOLVER_DEFAULT": str(default_solver),
+            }
+        )
+
         if starter_dataset is not None:
             replacements.update(
                 {
@@ -413,6 +461,24 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             )
 
     if args.library == "scikit-learn" and args.model == "random_forest":
+        rf_defaults = DEFAULT_RANDOM_FOREST_PARAMS_BY_TEMPLATE[("scikit-learn", "random_forest", family)]
+        default_rf_n_estimators = (
+            args.default_rf_n_estimators if args.default_rf_n_estimators is not None else rf_defaults["n_estimators"]
+        )
+        default_rf_max_depth = args.default_rf_max_depth if args.default_rf_max_depth is not None else rf_defaults["max_depth"]
+        default_rf_min_samples_split = (
+            args.default_rf_min_samples_split
+            if args.default_rf_min_samples_split is not None
+            else rf_defaults["min_samples_split"]
+        )
+        replacements.update(
+            {
+                "RF_N_ESTIMATORS_DEFAULT": str(int(default_rf_n_estimators)),
+                "RF_MAX_DEPTH_DEFAULT": str(int(default_rf_max_depth)),
+                "RF_MIN_SAMPLES_SPLIT_DEFAULT": str(int(default_rf_min_samples_split)),
+            }
+        )
+
         if family == "classification":
             if starter_dataset is not None:
                 replacements.update(
@@ -459,6 +525,29 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
     if args.library == "xgboost":
         booster = args.booster or "gbtree"
         device = args.device or "auto"
+        xgboost_defaults = DEFAULT_XGBOOST_PARAMS_BY_TEMPLATE[("xgboost", family)]
+        default_n_estimators = args.default_n_estimators if args.default_n_estimators is not None else xgboost_defaults["n_estimators"]
+        default_learning_rate = (
+            args.default_learning_rate if args.default_learning_rate is not None else xgboost_defaults["learning_rate"]
+        )
+        default_max_depth = args.default_max_depth if args.default_max_depth is not None else xgboost_defaults["max_depth"]
+        default_subsample = args.default_subsample if args.default_subsample is not None else xgboost_defaults["subsample"]
+        default_colsample_bytree = (
+            args.default_colsample_bytree
+            if args.default_colsample_bytree is not None
+            else xgboost_defaults["colsample_bytree"]
+        )
+
+        replacements.update(
+            {
+                "XGB_N_ESTIMATORS_DEFAULT": str(int(default_n_estimators)),
+                "XGB_LEARNING_RATE_DEFAULT": str(float(default_learning_rate)),
+                "XGB_MAX_DEPTH_DEFAULT": str(int(default_max_depth)),
+                "XGB_SUBSAMPLE_DEFAULT": str(float(default_subsample)),
+                "XGB_COLSAMPLE_BYTREE_DEFAULT": str(float(default_colsample_bytree)),
+            }
+        )
+
         if starter_dataset is not None:
             replacements.update(
                 {
@@ -621,6 +710,27 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Invalid --default-n-iter-no-change. Must be a positive integer")
     if args.default_max_iter is not None and args.default_max_iter <= 0:
         raise ValueError("Invalid --default-max-iter. Must be a positive integer")
+    if args.default_n_estimators is not None and args.default_n_estimators <= 0:
+        raise ValueError("Invalid --default-n-estimators. Must be a positive integer")
+    if args.default_learning_rate is not None and args.default_learning_rate <= 0:
+        raise ValueError("Invalid --default-learning-rate. Must be a positive number")
+    if args.default_max_depth is not None and args.default_max_depth <= 0:
+        raise ValueError("Invalid --default-max-depth. Must be a positive integer")
+    if args.default_subsample is not None and not (0.0 < args.default_subsample <= 1.0):
+        raise ValueError("Invalid --default-subsample. Allowed range: 0 < value <= 1")
+    if args.default_colsample_bytree is not None and not (0.0 < args.default_colsample_bytree <= 1.0):
+        raise ValueError("Invalid --default-colsample-bytree. Allowed range: 0 < value <= 1")
+    if args.default_c is not None and args.default_c <= 0:
+        raise ValueError("Invalid --default-c. Must be a positive number")
+    if args.default_solver is not None and args.default_solver not in SKLEARN_LOGISTIC_SOLVERS:
+        allowed = ", ".join(sorted(SKLEARN_LOGISTIC_SOLVERS))
+        raise ValueError(f"Invalid --default-solver '{args.default_solver}'. Allowed: {allowed}")
+    if args.default_rf_n_estimators is not None and args.default_rf_n_estimators <= 0:
+        raise ValueError("Invalid --default-rf-n-estimators. Must be a positive integer")
+    if args.default_rf_max_depth is not None and args.default_rf_max_depth <= 0:
+        raise ValueError("Invalid --default-rf-max-depth. Must be a positive integer")
+    if args.default_rf_min_samples_split is not None and args.default_rf_min_samples_split < 2:
+        raise ValueError("Invalid --default-rf-min-samples-split. Must be >= 2")
 
     if args.starter_dataset is not None:
         allowed = STARTER_DATASETS_BY_FAMILY[args.task]
@@ -659,6 +769,17 @@ def validate_args(args: argparse.Namespace) -> None:
             )
         if max_iter_default_provided:
             raise ValueError("Invalid flag: --default-max-iter is not supported for xgboost")
+        if args.default_c is not None or args.default_solver is not None:
+            raise ValueError("Invalid flags: --default-c/--default-solver are scikit-learn logistic-only")
+        if (
+            args.default_rf_n_estimators is not None
+            or args.default_rf_max_depth is not None
+            or args.default_rf_min_samples_split is not None
+        ):
+            raise ValueError(
+                "Invalid flags: --default-rf-n-estimators/--default-rf-max-depth/"
+                "--default-rf-min-samples-split are scikit-learn random_forest-only"
+            )
         return
 
     if args.library == "scikit-learn":
@@ -686,6 +807,32 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(
                 "Invalid flag: --default-max-iter is only supported for scikit-learn logistic_regression classification templates"
             )
+        if (
+            args.default_n_estimators is not None
+            or args.default_learning_rate is not None
+            or args.default_max_depth is not None
+            or args.default_subsample is not None
+            or args.default_colsample_bytree is not None
+        ):
+            raise ValueError(
+                "Invalid flags: --default-n-estimators/--default-learning-rate/--default-max-depth/"
+                "--default-subsample/--default-colsample-bytree are xgboost-only"
+            )
+
+        if args.model == "logistic_regression":
+            if (
+                args.default_rf_n_estimators is not None
+                or args.default_rf_max_depth is not None
+                or args.default_rf_min_samples_split is not None
+            ):
+                raise ValueError(
+                    "Invalid flags: --default-rf-n-estimators/--default-rf-max-depth/"
+                    "--default-rf-min-samples-split are scikit-learn random_forest-only"
+                )
+        else:
+            if args.default_c is not None or args.default_solver is not None:
+                raise ValueError("Invalid flags: --default-c/--default-solver are scikit-learn logistic-only")
+
         return
 
     if args.library == "tensorflow":
@@ -720,6 +867,21 @@ def validate_args(args: argparse.Namespace) -> None:
             )
         if max_iter_default_provided:
             raise ValueError("Invalid flag: --default-max-iter is not supported for tensorflow")
+        if (
+            args.default_n_estimators is not None
+            or args.default_learning_rate is not None
+            or args.default_max_depth is not None
+            or args.default_subsample is not None
+            or args.default_colsample_bytree is not None
+            or args.default_c is not None
+            or args.default_solver is not None
+            or args.default_rf_n_estimators is not None
+            or args.default_rf_max_depth is not None
+            or args.default_rf_min_samples_split is not None
+        ):
+            raise ValueError(
+                "Invalid flags: xgboost/scikit-learn default hyperparameter flags are not supported for tensorflow"
+            )
         return
 
     raise ValueError(f"Unsupported library: {args.library}")
@@ -765,6 +927,66 @@ def main():
         type=int,
         required=False,
         help="Default value injected into generated logistic classification template --max-iter flag",
+    )
+    parser.add_argument(
+        "--default-c",
+        type=float,
+        required=False,
+        help="Default value injected into generated logistic classification template --c flag",
+    )
+    parser.add_argument(
+        "--default-solver",
+        required=False,
+        choices=["lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"],
+        help="Default value injected into generated logistic classification template --solver flag",
+    )
+    parser.add_argument(
+        "--default-rf-n-estimators",
+        type=int,
+        required=False,
+        help="Default value injected into generated random forest template --n-estimators flag",
+    )
+    parser.add_argument(
+        "--default-rf-max-depth",
+        type=int,
+        required=False,
+        help="Default value injected into generated random forest template --max-depth flag",
+    )
+    parser.add_argument(
+        "--default-rf-min-samples-split",
+        type=int,
+        required=False,
+        help="Default value injected into generated random forest template --min-samples-split flag",
+    )
+    parser.add_argument(
+        "--default-n-estimators",
+        type=int,
+        required=False,
+        help="Default value injected into generated xgboost template --n-estimators flag",
+    )
+    parser.add_argument(
+        "--default-learning-rate",
+        type=float,
+        required=False,
+        help="Default value injected into generated xgboost template --learning-rate flag",
+    )
+    parser.add_argument(
+        "--default-max-depth",
+        type=int,
+        required=False,
+        help="Default value injected into generated xgboost template --max-depth flag",
+    )
+    parser.add_argument(
+        "--default-subsample",
+        type=float,
+        required=False,
+        help="Default value injected into generated xgboost template --subsample flag",
+    )
+    parser.add_argument(
+        "--default-colsample-bytree",
+        type=float,
+        required=False,
+        help="Default value injected into generated xgboost template --colsample-bytree flag",
     )
     parser.add_argument(
         "--default-early-stopping",

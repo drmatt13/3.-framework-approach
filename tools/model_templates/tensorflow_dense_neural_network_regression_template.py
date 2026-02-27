@@ -38,6 +38,7 @@ from libraries.model_template_helpers import (
 	round_metric as _round_metric_base,
 	to_dense_float32 as _to_dense_float32,
 	validate_etl_outputs as _validate_etl_outputs,
+	write_model_schemas as _write_model_schemas,
 )
 
 # =============================================================
@@ -170,6 +171,7 @@ if TARGET_COLUMN not in df.columns:
 
 # y is the supervised target; X is the feature space (minus optional drops).
 y = df[TARGET_COLUMN]
+y_original = y.copy()
 {{TARGET_PREPROCESS}} # type: ignore
 X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 
@@ -182,6 +184,7 @@ X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 valid_target_mask = y.notna()
 X = X.loc[valid_target_mask].copy()
 y = pd.to_numeric(y.loc[valid_target_mask], errors="coerce")
+y_original = y_original.loc[valid_target_mask].copy()
 
 # ---------------------------------------------------------
 # Target normalization (regression numeric target)
@@ -191,6 +194,7 @@ y = pd.to_numeric(y.loc[valid_target_mask], errors="coerce")
 valid_target_mask = y.notna()
 X = X.loc[valid_target_mask].copy()
 y = y.loc[valid_target_mask].astype("float64")
+y_original = y_original.loc[valid_target_mask].copy()
 
 target_column_name = str(TARGET_COLUMN)
 
@@ -536,8 +540,15 @@ print("Expected:", expected_y)
 '''
 	(inference_dir / "inference_example.py").write_text(inference_script, encoding="utf-8")
 
-	feature_schema = {"feature_columns": {c: str(t) for c, t in X.dtypes.items()}, "target": {target_column_name: str(y.dtype)}}
-	(data_dir / "feature_schema.json").write_text(json.dumps(feature_schema, indent=2), encoding="utf-8")
+	schema_artifacts = _write_model_schemas(
+		schema_dir=data_dir,
+		X_raw=X,
+		y_model=y,
+		target_column_name=target_column_name,
+		transformed_features=X_train_processed[:1],
+		preprocessor=preprocessor,
+		y_original=y_original,
+	)
 
 	run_metadata = {
 		"run_id": run_id,
@@ -547,6 +558,7 @@ print("Expected:", expected_y)
 		"task": args.task,
 		"algorithm": "dense_neural_network",
 		"estimator_class": "tf.keras.Sequential",
+		"model_id": "tensorflow.keras.sequential.dense_nn.regression",
 		"dataset": {"path": str(data_path.relative_to(project_root)), "sha256": data_hash, "rows": int(len(df)), "columns": int(df.shape[1])},
 		"data_split": {
 			"strategy": "train_test_split",
@@ -593,7 +605,7 @@ print("Expected:", expected_y)
 				"metrics": eval_dir / "metrics.json",
 				"history": eval_dir / "training_history.json",
 				"predictions_preview": eval_dir / "predictions_preview.csv",
-				"feature_schema": data_dir / "feature_schema.json",
+				**schema_artifacts,
 				"inference_example": inference_dir / "inference_example.py",
 			},
 		),

@@ -53,7 +53,19 @@ from libraries.model_template_helpers import (
 	round_metric as _round_metric_base,
 	select_estimator_params as _select_estimator_params,
 	validate_etl_outputs as _validate_etl_outputs,
+	write_model_schemas as _write_model_schemas,
 )
+
+
+def _parse_optional_int(value: str | int | None) -> int | None:
+	if value is None:
+		return None
+	if isinstance(value, int):
+		return value
+	text = str(value).strip().lower()
+	if text in {"none", "null", ""}:
+		return None
+	return int(text)
 
 # =============================================================
 # =============== CONFIGURATION / CLI FLAGS ===================
@@ -81,7 +93,10 @@ DEFAULT_RANDOM_STATE = 1
 DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
 DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
 DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
-DEFAULT_MAX_ESTIMATORS = 500
+DEFAULT_N_ESTIMATORS = int("{{RF_N_ESTIMATORS_DEFAULT}}")
+DEFAULT_MAX_DEPTH = _parse_optional_int("{{RF_MAX_DEPTH_DEFAULT}}")
+DEFAULT_MIN_SAMPLES_SPLIT = int("{{RF_MIN_SAMPLES_SPLIT_DEFAULT}}")
+DEFAULT_MAX_ESTIMATORS = DEFAULT_N_ESTIMATORS
 DEFAULT_ESTIMATOR_STEP = 25
 MIN_ESTIMATORS_FOR_STOP = 100
 DEFAULT_VERBOSE = "1"
@@ -100,6 +115,9 @@ parser.add_argument("--test-size", type=float, default=0.2)
 parser.add_argument("--early-stopping", type=_parse_bool, default=DEFAULT_EARLY_STOPPING)
 parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
 parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
+parser.add_argument("--n-estimators", type=int, default=DEFAULT_N_ESTIMATORS)
+parser.add_argument("--max-depth", type=_parse_optional_int, default=DEFAULT_MAX_DEPTH)
+parser.add_argument("--min-samples-split", type=int, default=DEFAULT_MIN_SAMPLES_SPLIT)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 args = parser.parse_args()
@@ -212,6 +230,7 @@ if TARGET_COLUMN not in df.columns:
 
 # y is the supervised target; X is the feature space (minus optional drops).
 y = df[TARGET_COLUMN]
+y_original = y.copy()
 {{TARGET_PREPROCESS}} # type: ignore
 X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 
@@ -224,6 +243,7 @@ X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 valid_target_mask = y.notna()
 X = X.loc[valid_target_mask].copy()
 y = y.loc[valid_target_mask].copy()
+y_original = y_original.loc[valid_target_mask].copy()
 
 target_column_name = str(TARGET_COLUMN)
 
@@ -269,7 +289,16 @@ preprocessor = _build_preprocessor(X_train)
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
-		("classifier", RandomForestClassifier(random_state=args.random_state, verbose=training_verbose)),
+		(
+			"classifier",
+			RandomForestClassifier(
+				random_state=args.random_state,
+				n_estimators=int(args.n_estimators),
+				max_depth=args.max_depth,
+				min_samples_split=int(args.min_samples_split),
+				verbose=training_verbose,
+			),
+		),
 	]
 )
 fit_time_seconds = 0.0
@@ -302,15 +331,20 @@ if args.early_stopping:
 		random_state=args.random_state,
 		warm_start=True,
 		n_estimators=0,
+		max_depth=args.max_depth,
+		min_samples_split=int(args.min_samples_split),
 		verbose=training_verbose,
 	)
 
+	configured_max_estimators = max(int(args.n_estimators), 1)
+	estimator_step = max(1, min(int(DEFAULT_ESTIMATOR_STEP), configured_max_estimators))
+
 	best_validation_balanced_accuracy = float("-inf")
-	best_n_estimators = DEFAULT_ESTIMATOR_STEP
+	best_n_estimators = estimator_step
 	rounds_without_improvement = 0
 	rounds_completed = 0
 
-	for n_estimators in range(DEFAULT_ESTIMATOR_STEP, DEFAULT_MAX_ESTIMATORS + 1, DEFAULT_ESTIMATOR_STEP):
+	for n_estimators in range(estimator_step, configured_max_estimators + 1, estimator_step):
 		search_classifier.set_params(n_estimators=n_estimators)
 		search_classifier.fit(X_inner_train_processed, y_inner_train)
 
@@ -340,7 +374,7 @@ if args.early_stopping:
 	training_control = {
 		"enabled": True,
 		"type": "incremental_search",
-		"max_steps_configured": int(DEFAULT_MAX_ESTIMATORS),
+		"max_steps_configured": int(configured_max_estimators),
 		"steps_completed": int(best_n_estimators),
 		"patience": int(args.n_iter_no_change),
 		"monitor_metric": "balanced_accuracy",
@@ -348,17 +382,17 @@ if args.early_stopping:
 		"monitor_direction": "max",
 		"best_step": int(best_n_estimators),
 		"best_score": _round_metric(best_validation_balanced_accuracy),
-		"stopped_early": bool(best_n_estimators < DEFAULT_MAX_ESTIMATORS),
+		"stopped_early": bool(best_n_estimators < configured_max_estimators),
 		"best_params": {"n_estimators": int(best_n_estimators)},
 		"search_space": {
 			"n_estimators": {
-				"start": int(DEFAULT_ESTIMATOR_STEP),
-				"stop": int(DEFAULT_MAX_ESTIMATORS),
-				"step": int(DEFAULT_ESTIMATOR_STEP),
+				"start": int(estimator_step),
+				"stop": int(configured_max_estimators),
+				"step": int(estimator_step),
 			},
 		},
 		"trials_completed": int(rounds_completed),
-		"best_trial_index": int(best_n_estimators // DEFAULT_ESTIMATOR_STEP),
+		"best_trial_index": int(max(1, best_n_estimators // estimator_step)),
 		"metric": "balanced_accuracy",
 		"metric_split": "val",
 		"direction": "max",
@@ -376,7 +410,7 @@ else:
 	training_control = {
 		"enabled": False,
 		"type": "incremental_search",
-		"max_steps_configured": int(DEFAULT_MAX_ESTIMATORS),
+		"max_steps_configured": int(args.n_estimators),
 		"steps_completed": int(model.named_steps["classifier"].n_estimators),
 		"patience": int(args.n_iter_no_change),
 		"monitor_metric": None,
@@ -388,8 +422,8 @@ else:
 		"best_params": {"n_estimators": int(model.named_steps["classifier"].n_estimators)},
 		"search_space": {
 			"n_estimators": {
-				"start": int(DEFAULT_ESTIMATOR_STEP),
-				"stop": int(DEFAULT_MAX_ESTIMATORS),
+				"start": int(min(DEFAULT_ESTIMATOR_STEP, int(args.n_estimators))),
+				"stop": int(args.n_estimators),
 				"step": int(DEFAULT_ESTIMATOR_STEP),
 			},
 		},
@@ -652,6 +686,7 @@ if SAVE_MODEL:
 
 	inference_rows = X_test.iloc[:5].to_dict(orient="records")
 	expected_values = y_test.iloc[:5].tolist()
+	class_labels = [str(label) for label in classifier_classes.tolist()]
 	sample_rows_literal = json.dumps(inference_rows, indent=2)
 	sample_rows_literal = sample_rows_literal.replace(": NaN", ": np.nan")
 	sample_rows_literal = sample_rows_literal.replace(": Infinity", ": np.inf")
@@ -666,17 +701,22 @@ MODEL_PATH = Path(__file__).resolve().parents[1] / "model" / "model.pkl"
 
 sample_rows = {sample_rows_literal}
 expected_y = {json.dumps(expected_values, indent=2)}
+class_labels = {json.dumps(class_labels, indent=2)}
 
 with MODEL_PATH.open("rb") as model_file:
 	model = pickle.load(model_file)
 
 features = pd.DataFrame(sample_rows)
 predictions = model.predict(features)
+probabilities = model.predict_proba(features) if hasattr(model, "predict_proba") else None
 
 print("Inference Example")
 print("Input Rows:", len(features))
 print("Predictions:", predictions.tolist())
 print("Expected:", expected_y)
+if probabilities is not None:
+	print("Class Labels:", class_labels)
+	print("Probabilities:", probabilities.tolist())
 
 results = features.copy()
 results["y_expected"] = expected_y
@@ -686,12 +726,15 @@ print(results)
 	with (inference_dir / "inference_example.py").open("w", encoding="utf-8") as inference_file:
 		inference_file.write(inference_script)
 
-	feature_schema = {
-		"feature_columns": {col: str(dtype) for col, dtype in X.dtypes.items()},
-		"target": {target_column_name: str(y.dtype)},
-	}
-	with (data_dir / "feature_schema.json").open("w", encoding="utf-8") as schema_file:
-		json.dump(feature_schema, schema_file, indent=2)
+	schema_artifacts = _write_model_schemas(
+		schema_dir=data_dir,
+		X_raw=X,
+		y_model=y,
+		target_column_name=target_column_name,
+		transformed_features=model.named_steps["preprocess"].transform(X_train.iloc[:1]),
+		preprocessor=model.named_steps["preprocess"],
+		y_original=y_original,
+	)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
 	n_val = int(len(X_valid)) if training_control["enabled"] else 0
@@ -765,6 +808,9 @@ print(results)
 			"estimator_params": _compact_metadata(estimator_params_compact),
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
+			"n_estimators": int(args.n_estimators),
+			"max_depth": int(args.max_depth) if args.max_depth is not None else None,
+			"min_samples_split": int(args.min_samples_split),
 		},
 		"selection": training_control,
 		"training_control": training_control,
@@ -786,8 +832,8 @@ print(results)
 				"eval_predictions_preview": eval_dir / "predictions_preview.csv",
 				"eval_roc_curve": eval_dir / "roc_curve.csv",
 				"eval_roc_curve_plot": eval_dir / "roc_curve.png",
-				"feature_schema": data_dir / "feature_schema.json",
 				"inference_example": inference_dir / "inference_example.py",
+				**schema_artifacts,
 			},
 		),
 		"versions": {

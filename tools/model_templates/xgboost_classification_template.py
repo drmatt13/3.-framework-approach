@@ -55,6 +55,7 @@ from libraries.model_template_helpers import (
 	round_metric as _round_metric_base,
 	select_estimator_params as _select_estimator_params,
 	validate_etl_outputs as _validate_etl_outputs,
+	write_model_schemas as _write_model_schemas,
 )
 
 # =============================================================
@@ -76,6 +77,11 @@ from libraries.model_template_helpers import (
 #   --n-iter-no-change <int>
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
+#   --n-estimators <int>
+#   --learning-rate <float>
+#   --max-depth <int>
+#   --subsample <float>
+#   --colsample-bytree <float>
 # ---------------------------------------------------------------------
 
 # Default values for optional parameters. These can be overridden via CLI.
@@ -86,6 +92,11 @@ DEFAULT_DEVICE = "{{DEVICE}}"
 DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
 DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
 DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
+DEFAULT_N_ESTIMATORS = int("{{XGB_N_ESTIMATORS_DEFAULT}}")
+DEFAULT_LEARNING_RATE = float("{{XGB_LEARNING_RATE_DEFAULT}}")
+DEFAULT_MAX_DEPTH = int("{{XGB_MAX_DEPTH_DEFAULT}}")
+DEFAULT_SUBSAMPLE = float("{{XGB_SUBSAMPLE_DEFAULT}}")
+DEFAULT_COLSAMPLE_BYTREE = float("{{XGB_COLSAMPLE_BYTREE_DEFAULT}}")
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
 
@@ -103,6 +114,11 @@ parser.add_argument("--test-size", type=float, default=0.2)
 parser.add_argument("--early-stopping", type=_parse_bool, default=DEFAULT_EARLY_STOPPING)
 parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
 parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
+parser.add_argument("--n-estimators", type=int, default=DEFAULT_N_ESTIMATORS)
+parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
+parser.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
+parser.add_argument("--subsample", type=float, default=DEFAULT_SUBSAMPLE)
+parser.add_argument("--colsample-bytree", type=float, default=DEFAULT_COLSAMPLE_BYTREE)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 args = parser.parse_args()
@@ -244,6 +260,7 @@ if TARGET_COLUMN not in df.columns:
 
 # y is the supervised target; X is the feature space (minus optional drops).
 y = df[TARGET_COLUMN]
+y_original = y.copy()
 {{TARGET_PREPROCESS}} # type: ignore
 X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 
@@ -256,6 +273,7 @@ X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 valid_target_mask = y.notna()
 X = X.loc[valid_target_mask].copy()
 y = y.loc[valid_target_mask].copy()
+y_original = y_original.loc[valid_target_mask].copy()
 
 target_column_name = str(TARGET_COLUMN)
 
@@ -318,6 +336,11 @@ model_kwargs = {
 	"random_state": args.random_state,
 	"objective": xgb_objective,
 	"eval_metric": xgb_eval_metric,
+	"n_estimators": int(args.n_estimators),
+	"learning_rate": float(args.learning_rate),
+	"max_depth": int(args.max_depth),
+	"subsample": float(args.subsample),
+	"colsample_bytree": float(args.colsample_bytree),
 	"verbosity": xgb_model_verbosity,
 }
 if xgb_num_class is not None:
@@ -721,6 +744,7 @@ if SAVE_MODEL:
 
 	inference_rows = X_test.iloc[:5].to_dict(orient="records")
 	expected_values = y_test.iloc[:5].tolist()
+	class_labels = [str(label) for label in classifier_classes.tolist()]
 	sample_rows_literal = json.dumps(inference_rows, indent=2)
 	sample_rows_literal = sample_rows_literal.replace(": NaN", ": np.nan")
 	sample_rows_literal = sample_rows_literal.replace(": Infinity", ": np.inf")
@@ -735,12 +759,14 @@ MODEL_PATH = Path(__file__).resolve().parents[1] / "model" / "model.pkl"
 
 sample_rows = {sample_rows_literal}
 expected_y = {json.dumps(expected_values, indent=2)}
+class_labels = {json.dumps(class_labels, indent=2)}
 
 with MODEL_PATH.open("rb") as model_file:
 	model = pickle.load(model_file)
 
 features = pd.DataFrame(sample_rows)
 predictions = model.predict(features)
+probabilities = model.predict_proba(features) if hasattr(model, "predict_proba") else None
 
 if isinstance(predictions, np.ndarray) and predictions.ndim > 1:
 	if predictions.shape[1] == 1:
@@ -753,6 +779,9 @@ print("Inference Example")
 print("Input Rows:", len(features))
 print("Predictions:", predictions.tolist())
 print("Expected:", expected_y)
+if probabilities is not None:
+	print("Class Labels:", class_labels)
+	print("Probabilities:", np.asarray(probabilities).tolist())
 
 results = features.copy()
 results["y_expected"] = expected_y
@@ -762,12 +791,15 @@ print(results)
 	with (inference_dir / "inference_example.py").open("w", encoding="utf-8") as inference_file:
 		inference_file.write(inference_script)
 
-	feature_schema = {
-		"feature_columns": {col: str(dtype) for col, dtype in X.dtypes.items()},
-		"target": {target_column_name: str(y.dtype)},
-	}
-	with (data_dir / "feature_schema.json").open("w", encoding="utf-8") as schema_file:
-		json.dump(feature_schema, schema_file, indent=2)
+	schema_artifacts = _write_model_schemas(
+		schema_dir=data_dir,
+		X_raw=X,
+		y_model=y,
+		target_column_name=target_column_name,
+		transformed_features=model.named_steps["preprocess"].transform(X_train.iloc[:1]),
+		preprocessor=model.named_steps["preprocess"],
+		y_original=y_original,
+	)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
 	n_val = int(len(X_valid)) if training_control["enabled"] else 0
@@ -849,6 +881,11 @@ print(results)
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
 			"booster": args.booster,
+			"n_estimators": int(args.n_estimators),
+			"learning_rate": float(args.learning_rate),
+			"max_depth": int(args.max_depth),
+			"subsample": float(args.subsample),
+			"colsample_bytree": float(args.colsample_bytree),
 			"objective": xgb_objective,
 			"eval_metric": xgb_eval_metric,
 			"num_class": xgb_num_class,
@@ -872,8 +909,8 @@ print(results)
 				"eval_predictions_preview": eval_dir / "predictions_preview.csv",
 				"eval_roc_curve": eval_dir / "roc_curve.csv",
 				"eval_roc_curve_plot": eval_dir / "roc_curve.png",
-				"feature_schema": data_dir / "feature_schema.json",
 				"inference_example": inference_dir / "inference_example.py",
+				**schema_artifacts,
 			},
 		),
 		"versions": {

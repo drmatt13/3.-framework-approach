@@ -38,7 +38,19 @@ from libraries.model_template_helpers import (
 	round_metric as _round_metric_base,
 	select_estimator_params as _select_estimator_params,
 	validate_etl_outputs as _validate_etl_outputs,
+	write_model_schemas as _write_model_schemas,
 )
+
+
+def _parse_optional_int(value: str | int | None) -> int | None:
+	if value is None:
+		return None
+	if isinstance(value, int):
+		return value
+	text = str(value).strip().lower()
+	if text in {"none", "null", ""}:
+		return None
+	return int(text)
 
 # =============================================================
 # =============== CONFIGURATION / CLI FLAGS ===================
@@ -60,6 +72,9 @@ from libraries.model_template_helpers import (
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
+DEFAULT_N_ESTIMATORS = int("{{RF_N_ESTIMATORS_DEFAULT}}")
+DEFAULT_MAX_DEPTH = _parse_optional_int("{{RF_MAX_DEPTH_DEFAULT}}")
+DEFAULT_MIN_SAMPLES_SPLIT = int("{{RF_MIN_SAMPLES_SPLIT_DEFAULT}}")
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
 
@@ -73,6 +88,9 @@ parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
+parser.add_argument("--n-estimators", type=int, default=DEFAULT_N_ESTIMATORS)
+parser.add_argument("--max-depth", type=_parse_optional_int, default=DEFAULT_MAX_DEPTH)
+parser.add_argument("--min-samples-split", type=int, default=DEFAULT_MIN_SAMPLES_SPLIT)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 args = parser.parse_args()
@@ -185,6 +203,7 @@ if TARGET_COLUMN not in df.columns:
 
 # y is the supervised target; X is the feature space (minus optional drops).
 y = df[TARGET_COLUMN]
+y_original = y.copy()
 {{TARGET_PREPROCESS}} # type: ignore
 X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 
@@ -197,6 +216,7 @@ X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 valid_target_mask = y.notna()
 X = X.loc[valid_target_mask].copy()
 y = y.loc[valid_target_mask].copy()
+y_original = y_original.loc[valid_target_mask].copy()
 
 target_column_name = str(TARGET_COLUMN)
 
@@ -240,7 +260,16 @@ preprocessor = _build_preprocessor(X_train)
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
-		("regressor", RandomForestRegressor(random_state=args.random_state, verbose=training_verbose)),
+		(
+			"regressor",
+			RandomForestRegressor(
+				random_state=args.random_state,
+				n_estimators=int(args.n_estimators),
+				max_depth=args.max_depth,
+				min_samples_split=int(args.min_samples_split),
+				verbose=training_verbose,
+			),
+		),
 	]
 )
 
@@ -427,12 +456,15 @@ print(results)
 	with (inference_dir / "inference_example.py").open("w", encoding="utf-8") as inference_file:
 		inference_file.write(inference_script)
 
-	feature_schema = {
-		"feature_columns": {col: str(dtype) for col, dtype in X.dtypes.items()},
-		"target": {target_column_name: str(y.dtype)},
-	}
-	with (data_dir / "feature_schema.json").open("w", encoding="utf-8") as schema_file:
-		json.dump(feature_schema, schema_file, indent=2)
+	schema_artifacts = _write_model_schemas(
+		schema_dir=data_dir,
+		X_raw=X,
+		y_model=y,
+		target_column_name=target_column_name,
+		transformed_features=model.named_steps["preprocess"].transform(X_train.iloc[:1]),
+		preprocessor=model.named_steps["preprocess"],
+		y_original=y_original,
+	)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
 	regressor_params = model.named_steps["regressor"].get_params()
@@ -503,6 +535,9 @@ print(results)
 			"estimator_params": _compact_metadata(estimator_params_compact),
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
+			"n_estimators": int(args.n_estimators),
+			"max_depth": int(args.max_depth) if args.max_depth is not None else None,
+			"min_samples_split": int(args.min_samples_split),
 		},
 		"selection": None,
 		"fit_summary": {
@@ -518,7 +553,7 @@ print(results)
 				"preprocess": preprocess_dir / "preprocessor.pkl",
 				"eval_metrics": eval_dir / "metrics.json",
 				"eval_predictions_preview": eval_dir / "predictions_preview.csv",
-				"feature_schema": data_dir / "feature_schema.json",
+				**schema_artifacts,
 				"inference_example": inference_dir / "inference_example.py",
 			},
 		),

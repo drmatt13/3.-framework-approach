@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import numpy as np
 import pandas as pd
@@ -111,3 +112,128 @@ def json_safe(value):
     if isinstance(value, tuple):
         return [json_safe(item) for item in value]
     return value
+
+
+def infer_target_mapping(original_target: pd.Series | None, encoded_target: pd.Series) -> dict[str, int] | None:
+    if original_target is None:
+        return None
+    if pd.api.types.is_numeric_dtype(original_target):
+        return None
+
+    valid_mask = original_target.notna() & encoded_target.notna()
+    if not bool(valid_mask.any()):
+        return None
+
+    original_values = original_target.loc[valid_mask].astype("string")
+    encoded_numeric = pd.to_numeric(encoded_target.loc[valid_mask], errors="coerce")
+    if encoded_numeric.isna().any():
+        return None
+    if not bool((encoded_numeric % 1 == 0).all()):
+        return None
+
+    mapping_frame = pd.DataFrame(
+        {
+            "label": original_values.astype(str),
+            "code": encoded_numeric.astype("int64"),
+        }
+    )
+
+    unique_codes_per_label = mapping_frame.groupby("label")["code"].nunique()
+    if (unique_codes_per_label > 1).any():
+        return None
+
+    first_code_by_label = mapping_frame.groupby("label")["code"].first().sort_values(kind="stable")
+    return {str(label): int(code) for label, code in first_code_by_label.items()}
+
+
+def _stable_unique_non_null(series: pd.Series) -> list:
+    values = []
+    seen = set()
+    for value in series.dropna().tolist():
+        marker = repr(value)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        values.append(value)
+    return values
+
+
+def _to_json_scalar(value):
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        numeric = float(value)
+        if numeric != numeric or numeric in (float("inf"), float("-inf")):
+            return None
+        return numeric
+    return str(value)
+
+
+def infer_binary_semantics(series: pd.Series) -> dict | None:
+    unique_values = _stable_unique_non_null(series)
+    if len(unique_values) != 2:
+        return None
+    values = [_to_json_scalar(value) for value in unique_values]
+    return {
+        "semantic_type": "binary",
+        "values": values,
+    }
+
+
+def write_model_schemas(
+    schema_dir: Path,
+    X_raw: pd.DataFrame,
+    y_model: pd.Series,
+    target_column_name: str,
+    transformed_features,
+    preprocessor=None,
+    y_original: pd.Series | None = None,
+) -> dict[str, Path]:
+    schema_dir.mkdir(parents=True, exist_ok=True)
+
+    feature_columns = []
+    for column in X_raw.columns:
+        series = X_raw[column]
+        column_entry = {
+            "name": str(column),
+            "dtype": str(series.dtype),
+        }
+        binary_semantics = infer_binary_semantics(series)
+        if binary_semantics is not None:
+            column_entry.update(binary_semantics)
+        if (
+            pd.api.types.is_object_dtype(series)
+            or pd.api.types.is_categorical_dtype(series)
+            or pd.api.types.is_string_dtype(series)
+        ) and "values" not in column_entry:
+            unique_values = series.dropna().astype("string").unique().tolist()
+            column_entry["values"] = [str(value) for value in unique_values]
+        feature_columns.append(column_entry)
+
+    input_schema = {
+        "feature_columns": feature_columns,
+    }
+    input_schema_path = schema_dir / "input_schema.json"
+    input_schema_path.write_text(json.dumps(input_schema, indent=2), encoding="utf-8")
+
+    artifacts = {
+        "input_schema": input_schema_path,
+    }
+
+    target_mapping = infer_target_mapping(y_original, y_model)
+    target_mapping_schema = {
+        "target": str(target_column_name),
+        "dtype": str(y_model.dtype),
+    }
+    if target_mapping:
+        target_mapping_schema["mapping"] = [
+            {"label": label, "encoded_value": value} for label, value in target_mapping.items()
+        ]
+
+    target_mapping_schema_path = schema_dir / "target_mapping_schema.json"
+    target_mapping_schema_path.write_text(json.dumps(target_mapping_schema, indent=2), encoding="utf-8")
+    artifacts["target_mapping_schema"] = target_mapping_schema_path
+
+    return artifacts

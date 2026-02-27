@@ -25,6 +25,7 @@ TASKS_BY_LIBRARY_MODEL = {
 
 XGBOOST_BOOSTERS = ["gbtree", "gblinear", "dart"]
 XGBOOST_DEVICE_DEFAULTS = ["cpu", "gpu"]
+SKLEARN_LOGISTIC_SOLVERS = ["lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"]
 
 # Only meaningful for TensorFlow models (gradient-based training)
 TENSORFLOW_OPTIMIZERS = ["adam", "sgd", "rmsprop", "adagrad", "adamw"]
@@ -114,7 +115,7 @@ def _recommended_es_defaults(library: str, model: str | None) -> tuple[bool, flo
 
 def main() -> int:
     script_dir = Path(__file__).resolve().parent
-    generator_path = script_dir / "tools" / "generate_model_tool.py"
+    generator_path = script_dir / "tools" / "generate_model.py"
 
     if not generator_path.exists():
         print(f"Could not find generator script at: {generator_path}", file=sys.stderr)
@@ -245,8 +246,8 @@ def main() -> int:
             return 0
 
         epochs = _ask_text(
-            "Enter epochs (e.g., 10):",
-            default="10",
+            "Enter epochs (e.g., 100):",
+            default="100",
             validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
         )
         if epochs is None:
@@ -266,6 +267,110 @@ def main() -> int:
     default_validation_fraction = None
     default_n_iter_no_change = None
     default_max_iter = None
+    default_n_estimators = None
+    default_learning_rate = None
+    default_max_depth = None
+    default_subsample = None
+    default_colsample_bytree = None
+    default_c = None
+    default_solver = None
+    default_rf_n_estimators = None
+    default_rf_max_depth = None
+    default_rf_min_samples_split = None
+
+    if library == "xgboost":
+        default_n_estimators = _ask_text(
+            "Default n_estimators for template --n-estimators:",
+            default="300",
+            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+        )
+        if default_n_estimators is None:
+            print("Cancelled.")
+            return 0
+
+        default_learning_rate = _ask_text(
+            "Default learning rate for template --learning-rate:",
+            default="0.1",
+            validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
+        )
+        if default_learning_rate is None:
+            print("Cancelled.")
+            return 0
+
+        default_max_depth = _ask_text(
+            "Default max depth for template --max-depth:",
+            default="6",
+            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+        )
+        if default_max_depth is None:
+            print("Cancelled.")
+            return 0
+
+        default_subsample = _ask_text(
+            "Default subsample for template --subsample (0 < value <= 1):",
+            default="1.0",
+            validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
+        )
+        if default_subsample is None:
+            print("Cancelled.")
+            return 0
+
+        default_colsample_bytree = _ask_text(
+            "Default colsample_bytree for template --colsample-bytree (0 < value <= 1):",
+            default="1.0",
+            validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
+        )
+        if default_colsample_bytree is None:
+            print("Cancelled.")
+            return 0
+
+    if library == "scikit-learn" and model == "logistic_regression":
+        default_c = _ask_text(
+            "Default C for template --c:",
+            default="1.0",
+            validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
+        )
+        if default_c is None:
+            print("Cancelled.")
+            return 0
+
+        default_solver = questionary.select(
+            "Default solver for template --solver:",
+            choices=SKLEARN_LOGISTIC_SOLVERS,
+            use_shortcuts=True,
+            style=CUSTOM_STYLE,
+        ).ask()
+        if default_solver is None:
+            print("Cancelled.")
+            return 0
+
+    if library == "scikit-learn" and model == "random_forest":
+        default_rf_n_estimators = _ask_text(
+            "Default n_estimators for template --n-estimators:",
+            default="300",
+            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+        )
+        if default_rf_n_estimators is None:
+            print("Cancelled.")
+            return 0
+
+        default_rf_max_depth = _ask_text(
+            "Default max depth for template --max-depth:",
+            default="16",
+            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+        )
+        if default_rf_max_depth is None:
+            print("Cancelled.")
+            return 0
+
+        default_rf_min_samples_split = _ask_text(
+            "Default min_samples_split for template --min-samples-split:",
+            default="2",
+            validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
+        )
+        if default_rf_min_samples_split is None:
+            print("Cancelled.")
+            return 0
 
     if _supports_default_max_iter(library, model, task):
         default_max_iter = _ask_text(
@@ -380,6 +485,29 @@ def main() -> int:
 
     if default_max_iter is not None:
         cmd.extend(["--default-max-iter", str(int(default_max_iter))])
+
+    if default_n_estimators is not None:
+        cmd.extend(["--default-n-estimators", str(int(default_n_estimators))])
+    if default_learning_rate is not None:
+        cmd.extend(["--default-learning-rate", str(float(default_learning_rate))])
+    if default_max_depth is not None:
+        cmd.extend(["--default-max-depth", str(int(default_max_depth))])
+    if default_subsample is not None:
+        cmd.extend(["--default-subsample", str(float(default_subsample))])
+    if default_colsample_bytree is not None:
+        cmd.extend(["--default-colsample-bytree", str(float(default_colsample_bytree))])
+
+    if default_c is not None:
+        cmd.extend(["--default-c", str(float(default_c))])
+    if default_solver is not None:
+        cmd.extend(["--default-solver", str(default_solver)])
+
+    if default_rf_n_estimators is not None:
+        cmd.extend(["--default-rf-n-estimators", str(int(default_rf_n_estimators))])
+    if default_rf_max_depth is not None:
+        cmd.extend(["--default-rf-max-depth", str(int(default_rf_max_depth))])
+    if default_rf_min_samples_split is not None:
+        cmd.extend(["--default-rf-min-samples-split", str(int(default_rf_min_samples_split))])
 
     # Add TensorFlow-only flags where necessary
     if library == "tensorflow":

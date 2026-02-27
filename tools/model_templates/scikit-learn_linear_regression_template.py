@@ -38,6 +38,7 @@ from libraries.model_template_helpers import (
 	round_metric as _round_metric_base,
 	select_estimator_params as _select_estimator_params,
 	validate_etl_outputs as _validate_etl_outputs,
+	write_model_schemas as _write_model_schemas,
 )
 
 # =============================================================
@@ -154,6 +155,7 @@ if TARGET_COLUMN not in df.columns:
 
 # y is the supervised target; X is the feature space (minus optional drops).
 y = df[TARGET_COLUMN]
+y_original = y.copy()
 X = df.drop(columns=[TARGET_COLUMN])
 
 # ---------------------------------------------------------
@@ -172,6 +174,7 @@ X = X.drop(columns=COLUMNS_TO_DROP, errors="ignore")
 valid_target_mask = y.notna()
 X = X.loc[valid_target_mask].copy()
 y = y.loc[valid_target_mask].copy()
+y_original = y_original.loc[valid_target_mask].copy()
 
 # ---------------------------------------------------------
 # Target normalization (regression vs classification fallback)
@@ -474,12 +477,15 @@ print(results)
 	with (inference_dir / "inference_example.py").open("w", encoding="utf-8") as inference_file:
 		inference_file.write(inference_script)
 
-	feature_schema = {
-		"feature_columns": {col: str(dtype) for col, dtype in X.dtypes.items()},
-		"target": {target_column_name: str(y.dtype)},
-	}
-	with (data_dir / "feature_schema.json").open("w", encoding="utf-8") as schema_file:
-		json.dump(feature_schema, schema_file, indent=2)
+	schema_artifacts = _write_model_schemas(
+		schema_dir=data_dir,
+		X_raw=X,
+		y_model=y,
+		target_column_name=target_column_name,
+		transformed_features=model.named_steps["preprocess"].transform(X_train.iloc[:1]),
+		preprocessor=model.named_steps["preprocess"],
+		y_original=y_original,
+	)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
 	regressor_params = model.named_steps["regressor"].get_params()
@@ -565,7 +571,7 @@ print(results)
 				"preprocess": preprocess_dir / "preprocessor.pkl",
 				"eval_metrics": eval_dir / "metrics.json",
 				"eval_predictions_preview": eval_dir / "predictions_preview.csv",
-				"feature_schema": data_dir / "feature_schema.json",
+				**schema_artifacts,
 				"inference_example": inference_dir / "inference_example.py",
 			},
 		),

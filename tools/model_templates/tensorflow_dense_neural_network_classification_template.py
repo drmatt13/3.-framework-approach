@@ -53,6 +53,7 @@ from libraries.model_template_helpers import (
 	round_metric as _round_metric_base,
 	to_dense_float32 as _to_dense_float32,
 	validate_etl_outputs as _validate_etl_outputs,
+	write_model_schemas as _write_model_schemas,
 )
 
 # =============================================================
@@ -184,6 +185,7 @@ if TARGET_COLUMN not in df.columns:
 
 # y is the supervised target; X is the feature space (minus optional drops).
 y = df[TARGET_COLUMN]
+y_original = y.copy()
 {{TARGET_PREPROCESS}} # type: ignore
 X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 
@@ -196,6 +198,7 @@ X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 valid_target_mask = y.notna()
 X = X.loc[valid_target_mask].copy()
 y = y.loc[valid_target_mask].copy()
+y_original = y_original.loc[valid_target_mask].copy()
 
 # ---------------------------------------------------------
 # Target normalization (classification-safe integer labels)
@@ -210,6 +213,7 @@ else:
 	valid_target_mask = y.notna()
 	X = X.loc[valid_target_mask].copy()
 	y = y.loc[valid_target_mask].astype("int64")
+	y_original = y_original.loc[valid_target_mask].copy()
 
 target_column_name = str(TARGET_COLUMN)
 
@@ -611,6 +615,7 @@ if SAVE_MODEL:
 
 	inference_rows = X_test.iloc[:5].to_dict(orient="records")
 	expected_values = y_test.iloc[:5].tolist()
+	class_labels = [str(label) for label in classes.tolist()]
 	sample_rows_literal = json.dumps(inference_rows, indent=2)
 	sample_rows_literal = sample_rows_literal.replace(": NaN", ": np.nan").replace(": Infinity", ": np.inf").replace(": -Infinity", ": -np.inf")
 	inference_verbose_literal = '"auto"' if args.verbose == "auto" else str(int(args.verbose))
@@ -624,6 +629,7 @@ MODEL_PATH = Path(__file__).resolve().parents[1] / "model" / "model.keras"
 PREPROCESSOR_PATH = Path(__file__).resolve().parents[1] / "preprocess" / "preprocessor.pkl"
 sample_rows = {sample_rows_literal}
 expected_y = {json.dumps(expected_values, indent=2)}
+class_labels = {json.dumps(class_labels, indent=2)}
 
 with PREPROCESSOR_PATH.open("rb") as f:
 	preprocessor = pickle.load(f)
@@ -644,12 +650,20 @@ else:
 print("Inference Example")
 print("Predictions:", predictions.tolist())
 print("Expected:", expected_y)
+print("Class Labels:", class_labels)
 print("Probabilities:", probabilities.tolist())
 '''
 	(inference_dir / "inference_example.py").write_text(inference_script, encoding="utf-8")
 
-	feature_schema = {"feature_columns": {c: str(t) for c, t in X.dtypes.items()}, "target": {target_column_name: str(y.dtype)}}
-	(data_dir / "feature_schema.json").write_text(json.dumps(feature_schema, indent=2), encoding="utf-8")
+	schema_artifacts = _write_model_schemas(
+		schema_dir=data_dir,
+		X_raw=X,
+		y_model=y,
+		target_column_name=target_column_name,
+		transformed_features=X_train_processed[:1],
+		preprocessor=preprocessor,
+		y_original=y_original,
+	)
 
 	run_metadata = {
 		"run_id": run_id,
@@ -659,6 +673,7 @@ print("Probabilities:", probabilities.tolist())
 		"task": args.task,
 		"algorithm": "dense_neural_network",
 		"estimator_class": "tf.keras.Sequential",
+		"model_id": "tensorflow.keras.sequential.dense_nn.classification",
 		"dataset": {"path": str(data_path.relative_to(project_root)), "sha256": data_hash, "rows": int(len(df)), "columns": int(df.shape[1])},
 		"data_split": {
 			"strategy": "train_test_split",
@@ -714,7 +729,7 @@ print("Probabilities:", probabilities.tolist())
 				"roc_curve": eval_dir / "roc_curve.csv",
 				"roc_curve_plot": eval_dir / "roc_curve.png",
 				"predictions_preview": eval_dir / "predictions_preview.csv",
-				"feature_schema": data_dir / "feature_schema.json",
+				**schema_artifacts,
 				"inference_example": inference_dir / "inference_example.py",
 			},
 		),
