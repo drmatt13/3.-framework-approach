@@ -64,7 +64,6 @@ from libraries.model_template_helpers import (
 
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
-#   --library xgboost
 #   --task binary_classification|multiclass_classification
 #   --name <model_name>
 #   --booster gbtree|gblinear|dart
@@ -82,6 +81,9 @@ from libraries.model_template_helpers import (
 #   --max-depth <int>
 #   --subsample <float>
 #   --colsample-bytree <float>
+#   --min-child-weight <float>
+#   --reg-lambda <float>
+#   --reg-alpha <float>
 # ---------------------------------------------------------------------
 
 # Default values for optional parameters. These can be overridden via CLI.
@@ -97,12 +99,14 @@ DEFAULT_LEARNING_RATE = float("{{XGB_LEARNING_RATE_DEFAULT}}")
 DEFAULT_MAX_DEPTH = int("{{XGB_MAX_DEPTH_DEFAULT}}")
 DEFAULT_SUBSAMPLE = float("{{XGB_SUBSAMPLE_DEFAULT}}")
 DEFAULT_COLSAMPLE_BYTREE = float("{{XGB_COLSAMPLE_BYTREE_DEFAULT}}")
+DEFAULT_MIN_CHILD_WEIGHT = float("{{XGB_MIN_CHILD_WEIGHT_DEFAULT}}")
+DEFAULT_REG_LAMBDA = float("{{XGB_REG_LAMBDA_DEFAULT}}")
+DEFAULT_REG_ALPHA = float("{{XGB_REG_ALPHA_DEFAULT}}")
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
 
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="XGBoost Classifier baseline")
-parser.add_argument("--library", choices=["xgboost"], default="xgboost")
 parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
@@ -119,6 +123,9 @@ parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE
 parser.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
 parser.add_argument("--subsample", type=float, default=DEFAULT_SUBSAMPLE)
 parser.add_argument("--colsample-bytree", type=float, default=DEFAULT_COLSAMPLE_BYTREE)
+parser.add_argument("--min-child-weight", type=float, default=DEFAULT_MIN_CHILD_WEIGHT)
+parser.add_argument("--reg-lambda", type=float, default=DEFAULT_REG_LAMBDA)
+parser.add_argument("--reg-alpha", type=float, default=DEFAULT_REG_ALPHA)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 args = parser.parse_args()
@@ -341,6 +348,9 @@ model_kwargs = {
 	"max_depth": int(args.max_depth),
 	"subsample": float(args.subsample),
 	"colsample_bytree": float(args.colsample_bytree),
+	"min_child_weight": float(args.min_child_weight),
+	"reg_lambda": float(args.reg_lambda),
+	"reg_alpha": float(args.reg_alpha),
 	"verbosity": xgb_model_verbosity,
 }
 if xgb_num_class is not None:
@@ -833,7 +843,7 @@ print(results)
 		"run_id": run_id,
 		"name": model_name,
 		"timestamp": timestamp,
-		"library": args.library,
+		"library": "xgboost",
 		"task": args.task,
 		"algorithm": "gradient_boosting",
 		"estimator_class": "XGBClassifier",
@@ -886,6 +896,9 @@ print(results)
 			"max_depth": int(args.max_depth),
 			"subsample": float(args.subsample),
 			"colsample_bytree": float(args.colsample_bytree),
+			"min_child_weight": float(args.min_child_weight),
+			"reg_lambda": float(args.reg_lambda),
+			"reg_alpha": float(args.reg_alpha),
 			"objective": xgb_objective,
 			"eval_metric": xgb_eval_metric,
 			"num_class": xgb_num_class,

@@ -73,16 +73,15 @@ def _parse_optional_int(value: str | int | None) -> int | None:
 
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
-#   --library scikit-learn
-#   --model random_forest
 #   --task binary_classification|multiclass_classification
 #   --name <model_name>
 #   --save-model true|false
 #   --random-state <int>
 #   --test-size <float>
-#   --early-stopping true|false
-#   --validation-fraction <float>
-#   --n-iter-no-change <int>
+#   --n-estimators <int>
+#   --max-depth <int|none>
+#   --min-samples-leaf <int>
+#   --max-features <auto|sqrt|log2|float|none>
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
 # ---------------------------------------------------------------------
@@ -90,34 +89,42 @@ def _parse_optional_int(value: str | int | None) -> int | None:
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
-DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
-DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
-DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
 DEFAULT_N_ESTIMATORS = int("{{RF_N_ESTIMATORS_DEFAULT}}")
 DEFAULT_MAX_DEPTH = _parse_optional_int("{{RF_MAX_DEPTH_DEFAULT}}")
-DEFAULT_MIN_SAMPLES_SPLIT = int("{{RF_MIN_SAMPLES_SPLIT_DEFAULT}}")
-DEFAULT_MAX_ESTIMATORS = DEFAULT_N_ESTIMATORS
-DEFAULT_ESTIMATOR_STEP = 25
-MIN_ESTIMATORS_FOR_STOP = 100
+DEFAULT_MIN_SAMPLES_LEAF = int("{{RF_MIN_SAMPLES_LEAF_DEFAULT}}")
+DEFAULT_MAX_FEATURES = "{{RF_MAX_FEATURES_DEFAULT}}"
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
 
+
+def _parse_max_features(value: str) -> str | float | None:
+	"""Parse --max-features into a value accepted by RandomForestClassifier."""
+	text = str(value).strip().lower()
+	if text in {"none", "null", ""}:
+		return None
+	if text in {"auto", "sqrt", "log2"}:
+		return text
+	try:
+		fval = float(text)
+		if 0.0 < fval <= 1.0:
+			return fval
+		return text  # let sklearn validate
+	except ValueError:
+		return text
+
+
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Random Forest Classifier baseline")
-parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
-parser.add_argument("--model", choices=["random_forest"], default="random_forest")
 parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
-parser.add_argument("--early-stopping", type=_parse_bool, default=DEFAULT_EARLY_STOPPING)
-parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
-parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
 parser.add_argument("--n-estimators", type=int, default=DEFAULT_N_ESTIMATORS)
 parser.add_argument("--max-depth", type=_parse_optional_int, default=DEFAULT_MAX_DEPTH)
-parser.add_argument("--min-samples-split", type=int, default=DEFAULT_MIN_SAMPLES_SPLIT)
+parser.add_argument("--min-samples-leaf", type=int, default=DEFAULT_MIN_SAMPLES_LEAF)
+parser.add_argument("--max-features", type=_parse_max_features, default=DEFAULT_MAX_FEATURES)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 args = parser.parse_args()
@@ -295,7 +302,8 @@ model = Pipeline(
 				random_state=args.random_state,
 				n_estimators=int(args.n_estimators),
 				max_depth=args.max_depth,
-				min_samples_split=int(args.min_samples_split),
+				min_samples_leaf=int(args.min_samples_leaf),
+				max_features=args.max_features,
 				verbose=training_verbose,
 			),
 		),
@@ -306,133 +314,26 @@ fit_time_seconds = 0.0
 # =============================================================
 # ===================== TRAIN MODEL ===========================
 # =============================================================
-# ---------------------------------------------------------------------
-# EARLY STOPPING (optional)
-# - Enabled with --early-stopping=true.
-# - Uses --validation-fraction as holdout split from training data.
-# - Stops when validation score does not improve for --n-iter-no-change rounds.
-# - When disabled, trains once on full training split.
-# ---------------------------------------------------------------------
-if args.early_stopping:
-	X_inner_train, X_valid, y_inner_train, y_valid = train_test_split(
-		X_train,
-		y_train,
-		test_size=args.validation_fraction,
-		random_state=args.random_state,
-		stratify=y_train,
-	)
 
-	inner_preprocessor = _build_preprocessor(X_inner_train)
+# Fit on training data (pipeline fits preprocessors + model).
+fit_started_at = time.perf_counter()
+if training_verbose > 0:
+	print("Training started: RandomForestClassifier")
+model.fit(X_train, y_train)
+fit_time_seconds = float(time.perf_counter() - fit_started_at)
+if training_verbose > 0:
+	print(f"Training completed in {fit_time_seconds:.3f}s: RandomForestClassifier")
 
-	X_inner_train_processed = inner_preprocessor.fit_transform(X_inner_train)
-	X_valid_processed = inner_preprocessor.transform(X_valid)
-
-	search_classifier = RandomForestClassifier(
-		random_state=args.random_state,
-		warm_start=True,
-		n_estimators=0,
-		max_depth=args.max_depth,
-		min_samples_split=int(args.min_samples_split),
-		verbose=training_verbose,
-	)
-
-	configured_max_estimators = max(int(args.n_estimators), 1)
-	estimator_step = max(1, min(int(DEFAULT_ESTIMATOR_STEP), configured_max_estimators))
-
-	best_validation_balanced_accuracy = float("-inf")
-	best_n_estimators = estimator_step
-	rounds_without_improvement = 0
-	rounds_completed = 0
-
-	for n_estimators in range(estimator_step, configured_max_estimators + 1, estimator_step):
-		search_classifier.set_params(n_estimators=n_estimators)
-		search_classifier.fit(X_inner_train_processed, y_inner_train)
-
-		validation_predictions = search_classifier.predict(X_valid_processed)
-		validation_balanced_accuracy = balanced_accuracy_score(y_valid, validation_predictions)
-		rounds_completed += 1
-
-		if validation_balanced_accuracy > (best_validation_balanced_accuracy + 1e-6):
-			best_validation_balanced_accuracy = float(validation_balanced_accuracy)
-			best_n_estimators = n_estimators
-			rounds_without_improvement = 0
-		else:
-			rounds_without_improvement += 1
-
-		if n_estimators >= MIN_ESTIMATORS_FOR_STOP and rounds_without_improvement >= args.n_iter_no_change:
-			break
-
-	model.named_steps["classifier"].set_params(n_estimators=best_n_estimators)
-	fit_started_at = time.perf_counter()
-	if training_verbose > 0:
-		print("Training started: RandomForestClassifier")
-	model.fit(X_train, y_train)
-	fit_time_seconds = float(time.perf_counter() - fit_started_at)
-	if training_verbose > 0:
-		print(f"Training completed in {fit_time_seconds:.3f}s: RandomForestClassifier")
-
-	training_control = {
-		"enabled": True,
-		"type": "incremental_search",
-		"max_steps_configured": int(configured_max_estimators),
-		"steps_completed": int(best_n_estimators),
-		"patience": int(args.n_iter_no_change),
-		"monitor_metric": "balanced_accuracy",
-		"monitor_split": "val",
-		"monitor_direction": "max",
-		"best_step": int(best_n_estimators),
-		"best_score": _round_metric(best_validation_balanced_accuracy),
-		"stopped_early": bool(best_n_estimators < configured_max_estimators),
-		"best_params": {"n_estimators": int(best_n_estimators)},
-		"search_space": {
-			"n_estimators": {
-				"start": int(estimator_step),
-				"stop": int(configured_max_estimators),
-				"step": int(estimator_step),
-			},
-		},
-		"trials_completed": int(rounds_completed),
-		"best_trial_index": int(max(1, best_n_estimators // estimator_step)),
-		"metric": "balanced_accuracy",
-		"metric_split": "val",
-		"direction": "max",
-	}
-else:
-	# Fit on training data (pipeline fits preprocessors + model).
-	fit_started_at = time.perf_counter()
-	if training_verbose > 0:
-		print("Training started: RandomForestClassifier")
-	model.fit(X_train, y_train)
-	fit_time_seconds = float(time.perf_counter() - fit_started_at)
-	if training_verbose > 0:
-		print(f"Training completed in {fit_time_seconds:.3f}s: RandomForestClassifier")
-
-	training_control = {
-		"enabled": False,
-		"type": "incremental_search",
-		"max_steps_configured": int(args.n_estimators),
-		"steps_completed": int(model.named_steps["classifier"].n_estimators),
-		"patience": int(args.n_iter_no_change),
-		"monitor_metric": None,
-		"monitor_split": None,
-		"monitor_direction": None,
-		"best_step": None,
-		"best_score": None,
-		"stopped_early": False,
-		"best_params": {"n_estimators": int(model.named_steps["classifier"].n_estimators)},
-		"search_space": {
-			"n_estimators": {
-				"start": int(min(DEFAULT_ESTIMATOR_STEP, int(args.n_estimators))),
-				"stop": int(args.n_estimators),
-				"step": int(DEFAULT_ESTIMATOR_STEP),
-			},
-		},
-		"trials_completed": 0,
-		"best_trial_index": None,
-		"metric": "balanced_accuracy",
-		"metric_split": "val",
-		"direction": "max",
-	}
+training_control = {
+	"enabled": False,
+	"strategy": None,
+	"monitor_name": None,
+	"monitor_mode": None,
+	"max_steps_configured": None,
+	"steps_completed": None,
+	"best_step": None,
+	"best_score": None,
+}
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
@@ -533,13 +434,6 @@ if test_logloss_value is not None:
 if brier_score is not None:
 	print("Test Brier Score:", _round_metric(brier_score))  # Mean squared error of predicted probabilities (calibration metric)
 
-# ---- Training Control (early stopping / step tracking) ----
-if training_control["enabled"]:
-	print("Training Control Best Step:", training_control["best_step"])  # Best completed step based on validation score
-	print("Training Control Steps Completed:", training_control["steps_completed"])  # Total completed steps in training/selection
-	print("Training Control Best Params:", training_control["best_params"])  # Hyperparameters yielding best score
-	print("Training Control Best Score:", training_control["best_score"])  # Best validation score observed
-
 # ---- Sanity Checks ----
 print("First 5 predictions:", predictions[:5])  # Quick sanity check of output classes
 print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true values for sanity check
@@ -607,7 +501,7 @@ if SAVE_MODEL:
 		},
 		"data_sizes": {
 			"n_train": int(len(X_train)),
-			"n_val": int(len(X_valid)) if training_control["enabled"] else 0,
+			"n_val": 0,
 			"n_test": int(len(X_test)),
 		},
 		"primary_metric": {
@@ -737,8 +631,8 @@ print(results)
 	)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
-	n_val = int(len(X_valid)) if training_control["enabled"] else 0
-	n_train_effective = int(len(X_inner_train)) if training_control["enabled"] else int(len(X_train))
+	n_val = 0
+	n_train_effective = int(len(X_train))
 	classifier_params = model.named_steps["classifier"].get_params()
 	estimator_params_compact = _select_estimator_params(
 		classifier_params,
@@ -761,7 +655,7 @@ print(results)
 		"run_id": run_id,
 		"name": model_name,
 		"timestamp": timestamp,
-		"library": args.library,
+		"library": "scikit-learn",
 		"task": args.task,
 		"algorithm": "random_forest",
 		"estimator_class": "RandomForestClassifier",
@@ -778,10 +672,10 @@ print(results)
 			"random_state": int(args.random_state),
 			"stratify": True,
 			"validation": {
-				"enabled": bool(training_control["enabled"]),
-				"strategy": "explicit_split" if training_control["enabled"] else None,
-				"validation_fraction": float(args.validation_fraction) if training_control["enabled"] else None,
-				"random_state": int(args.random_state) if training_control["enabled"] else None,
+				"enabled": False,
+				"strategy": None,
+				"validation_fraction": None,
+				"random_state": None,
 			},
 			"sizes": {
 				"n_rows": data_rows,
@@ -810,7 +704,8 @@ print(results)
 			"random_state": int(args.random_state),
 			"n_estimators": int(args.n_estimators),
 			"max_depth": int(args.max_depth) if args.max_depth is not None else None,
-			"min_samples_split": int(args.min_samples_split),
+			"min_samples_leaf": int(args.min_samples_leaf),
+			"max_features": str(args.max_features) if args.max_features is not None else None,
 		},
 		"selection": training_control,
 		"training_control": training_control,
@@ -868,18 +763,6 @@ print(results)
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
-				"training_control_enabled": bool(training_control["enabled"]),
-				"training_control_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
-				"training_control_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
-				"training_control_best_trial_index": int(training_control["best_trial_index"]) if training_control["best_trial_index"] is not None else None,
-				"training_control_best_n_estimators": int(training_control["best_params"]["n_estimators"]) if training_control["best_params"] is not None else None,
-				"training_control_stopped_early": bool(training_control["stopped_early"]),
-				"model_selection_enabled": bool(training_control["enabled"]),
-				"model_selection_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
-				"model_selection_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
-				"model_selection_best_trial_index": int(training_control["best_trial_index"]) if training_control["best_trial_index"] is not None else None,
-				"model_selection_best_n_estimators": int(training_control["best_params"]["n_estimators"]) if training_control["best_params"] is not None else None,
-				"model_selection_stopped_early": bool(training_control["stopped_early"]),
 				"accuracy": _round_metric(test_accuracy),
 				"balanced_accuracy": _round_metric(test_balanced_accuracy),
 				"precision_macro": _round_metric(test_precision_macro),

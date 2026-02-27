@@ -62,8 +62,6 @@ from libraries.model_template_helpers import (
 
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
-#   --library tensorflow
-#   --model dense_nn
 #   --task {{TASK_VALUE}}
 #   --name <model_name>
 #   --save-model true|false
@@ -94,8 +92,6 @@ DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
 
 parser = argparse.ArgumentParser(description="TensorFlow Dense Neural Network Classifier baseline")
-parser.add_argument("--library", choices=["tensorflow"], default="tensorflow")
-parser.add_argument("--model", choices=["dense_nn"], default="dense_nn")
 parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
@@ -669,7 +665,7 @@ print("Probabilities:", probabilities.tolist())
 		"run_id": run_id,
 		"name": model_name,
 		"timestamp": timestamp,
-		"library": args.library,
+		"library": "tensorflow",
 		"task": args.task,
 		"algorithm": "dense_neural_network",
 		"estimator_class": "tf.keras.Sequential",

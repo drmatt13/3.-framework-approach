@@ -26,6 +26,8 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #
 #   Generated template runtime options (configurable defaults):
 #   --verbose=0|1|2|auto
+#   --penalty=none|l1|l2|elasticnet
+#   --alpha=<float>
 
 # Logistic Regression (classification only)
 #   --library=scikit-learn 
@@ -42,7 +44,7 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #   --task=regression|binary_classification|multiclass_classification 
 #   --name=...
 #
-#   Generated classification template runtime options (configurable defaults):
+#   Generated template runtime options (configurable defaults):
 #   --verbose=0|1|2|auto
 #   --early-stopping=true|false
 #   --validation-fraction=<float>
@@ -61,8 +63,6 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #
 #   Generated template runtime options (configurable defaults):
 #   --verbose=0|1|2|auto
-#
-#   Generated classification template runtime options (configurable defaults):
 #   --early-stopping=true|false
 #   --validation-fraction=<float>
 #   --n-iter-no-change=<int>
@@ -126,25 +126,22 @@ OPTIMIZER_CLASS_MAP = {
 }
 
 DEFAULT_EARLY_STOPPING_BY_TEMPLATE = {
-    ("scikit-learn", "logistic_regression", "classification"): True,
-    ("scikit-learn", "random_forest", "classification"): True,
     ("xgboost", None, "classification"): True,
+    ("xgboost", None, "regression"): True,
     ("tensorflow", "dense_nn", "classification"): True,
     ("tensorflow", "dense_nn", "regression"): True,
 }
 
 DEFAULT_VALIDATION_FRACTION_BY_TEMPLATE = {
-    ("scikit-learn", "logistic_regression", "classification"): 0.1,
-    ("scikit-learn", "random_forest", "classification"): 0.1,
     ("xgboost", None, "classification"): 0.1,
+    ("xgboost", None, "regression"): 0.1,
     ("tensorflow", "dense_nn", "classification"): 0.1,
     ("tensorflow", "dense_nn", "regression"): 0.1,
 }
 
 DEFAULT_N_ITER_NO_CHANGE_BY_TEMPLATE = {
-    ("scikit-learn", "logistic_regression", "classification"): 5,
-    ("scikit-learn", "random_forest", "classification"): 5,
     ("xgboost", None, "classification"): 20,
+    ("xgboost", None, "regression"): 20,
     ("tensorflow", "dense_nn", "classification"): 5,
     ("tensorflow", "dense_nn", "regression"): 5,
 }
@@ -160,6 +157,9 @@ DEFAULT_XGBOOST_PARAMS_BY_TEMPLATE = {
         "max_depth": 6,
         "subsample": 1.0,
         "colsample_bytree": 1.0,
+        "min_child_weight": 1.0,
+        "reg_lambda": 1.0,
+        "reg_alpha": 0.0,
     },
     ("xgboost", "regression"): {
         "n_estimators": 300,
@@ -167,6 +167,9 @@ DEFAULT_XGBOOST_PARAMS_BY_TEMPLATE = {
         "max_depth": 6,
         "subsample": 1.0,
         "colsample_bytree": 1.0,
+        "min_child_weight": 1.0,
+        "reg_lambda": 1.0,
+        "reg_alpha": 0.0,
     },
 }
 
@@ -174,6 +177,8 @@ DEFAULT_LOGISTIC_PARAMS_BY_TEMPLATE = {
     ("scikit-learn", "logistic_regression", "classification"): {
         "c": 1.0,
         "solver": "lbfgs",
+        "penalty": "l2",
+        "class_weight": "none",
     },
 }
 
@@ -181,12 +186,23 @@ DEFAULT_RANDOM_FOREST_PARAMS_BY_TEMPLATE = {
     ("scikit-learn", "random_forest", "classification"): {
         "n_estimators": 300,
         "max_depth": 16,
-        "min_samples_split": 2,
+        "min_samples_leaf": 1,
+        "max_features": "sqrt",
     },
     ("scikit-learn", "random_forest", "regression"): {
         "n_estimators": 300,
         "max_depth": 16,
-        "min_samples_split": 2,
+        "min_samples_leaf": 1,
+        "max_features": "1.0",
+    },
+}
+
+DEFAULT_LINEAR_REGRESSION_PARAMS_BY_TEMPLATE = {
+    ("scikit-learn", "linear_regression", "regression"): {
+        "penalty": "none",
+        "alpha": 1.0,
+        "fit_intercept": True,
+        "l1_ratio": 0.5,
     },
 }
 
@@ -201,6 +217,34 @@ STARTER_DATASETS_BY_FAMILY = {
         "wine_quality.csv",
     ],
 }
+
+# Pre-computed dataset metadata for context-aware hyperparameter defaults.
+DATASET_META = {
+    "iris.csv": {"rows": 151, "features": 4},
+    "titanic.csv": {"rows": 419, "features": 11},
+    "breast_cancer_wisconsin.csv": {"rows": 569, "features": 30},
+    "insurance.csv": {"rows": 1339, "features": 6},
+    "car_evaluation.csv": {"rows": 1728, "features": 6},
+    "ames_housing.csv": {"rows": 2931, "features": 79},
+    "wine_quality.csv": {"rows": 6498, "features": 12},
+    "mushrooms.csv": {"rows": 8124, "features": 22},
+    "dry_bean.csv": {"rows": 13612, "features": 16},
+    "california_housing.csv": {"rows": 20641, "features": 9},
+    "adult_income.csv": {"rows": 32562, "features": 14},
+    "forest_cover_type.csv": {"rows": 581012, "features": 54},
+}
+
+
+def dataset_size_bucket(dataset_name: str | None) -> str:
+    """Return 'small', 'medium', or 'large' based on pre-computed row count."""
+    if dataset_name is None or dataset_name not in DATASET_META:
+        return "medium"  # safe fallback
+    rows = DATASET_META[dataset_name]["rows"]
+    if rows < 2000:
+        return "small"
+    if rows <= 20000:
+        return "medium"
+    return "large"
 
 STARTER_DATASET_CONFIG = {
     "ames_housing.csv": {
@@ -319,14 +363,11 @@ def render_template(template: str, replacements: dict[str, str]) -> str:
 
 
 def _supports_early_stopping_defaults(args: argparse.Namespace) -> bool:
-    family = task_family(args.task)
     if args.library == "tensorflow" and args.model == "dense_nn":
         return True
-    if family != "classification":
-        return False
     if args.library == "xgboost":
         return True
-    return args.library == "scikit-learn" and args.model in {"logistic_regression", "random_forest"}
+    return False
 
 
 def _supports_max_iter_default(args: argparse.Namespace) -> bool:
@@ -380,12 +421,23 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
 
     if args.library == "scikit-learn" and args.model == "linear_regression":
         linear_dataset = starter_dataset if starter_dataset is not None else STARTER_DATASET_CONFIG["california_housing.csv"]
+        lr_defaults = DEFAULT_LINEAR_REGRESSION_PARAMS_BY_TEMPLATE[("scikit-learn", "linear_regression", "regression")]
+        default_lr_penalty = args.default_lr_penalty if args.default_lr_penalty is not None else lr_defaults["penalty"]
+        default_lr_alpha = args.default_lr_alpha if args.default_lr_alpha is not None else lr_defaults["alpha"]
+        default_lr_fit_intercept = args.default_lr_fit_intercept if args.default_lr_fit_intercept is not None else lr_defaults["fit_intercept"]
+        default_lr_l1_ratio = args.default_lr_l1_ratio if args.default_lr_l1_ratio is not None else lr_defaults["l1_ratio"]
         replacements.update(
             {
                 "DATA_TASK_DIR": _task_dataset_dir(args.task),
                 "DATA_FILE": linear_dataset["data_file"],
                 "TARGET_COLUMN": linear_dataset["target_column"],
                 "COLUMNS_TO_DROP": linear_dataset["columns_to_drop"],
+                "FEATURE_DROP_COLUMNS": linear_dataset["feature_drop_columns"],
+                "TARGET_PREPROCESS": linear_dataset["target_preprocess"],
+                "LR_PENALTY_DEFAULT": str(default_lr_penalty),
+                "LR_ALPHA_DEFAULT": str(float(default_lr_alpha)),
+                "LR_FIT_INTERCEPT_DEFAULT": "True" if default_lr_fit_intercept else "False",
+                "LR_L1_RATIO_DEFAULT": str(float(default_lr_l1_ratio)),
             }
         )
 
@@ -422,10 +474,14 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         logistic_defaults = DEFAULT_LOGISTIC_PARAMS_BY_TEMPLATE[("scikit-learn", "logistic_regression", family)]
         default_c = args.default_c if args.default_c is not None else logistic_defaults["c"]
         default_solver = args.default_solver if args.default_solver is not None else logistic_defaults["solver"]
+        default_penalty = args.default_logistic_penalty if args.default_logistic_penalty is not None else logistic_defaults["penalty"]
+        default_class_weight = args.default_logistic_class_weight if args.default_logistic_class_weight is not None else logistic_defaults["class_weight"]
         replacements.update(
             {
                 "LOGISTIC_C_DEFAULT": str(float(default_c)),
                 "LOGISTIC_SOLVER_DEFAULT": str(default_solver),
+                "LOGISTIC_PENALTY_DEFAULT": str(default_penalty),
+                "LOGISTIC_CLASS_WEIGHT_DEFAULT": str(default_class_weight),
             }
         )
 
@@ -466,16 +522,22 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             args.default_rf_n_estimators if args.default_rf_n_estimators is not None else rf_defaults["n_estimators"]
         )
         default_rf_max_depth = args.default_rf_max_depth if args.default_rf_max_depth is not None else rf_defaults["max_depth"]
-        default_rf_min_samples_split = (
-            args.default_rf_min_samples_split
-            if args.default_rf_min_samples_split is not None
-            else rf_defaults["min_samples_split"]
+        default_rf_min_samples_leaf = (
+            args.default_rf_min_samples_leaf
+            if args.default_rf_min_samples_leaf is not None
+            else rf_defaults["min_samples_leaf"]
+        )
+        default_rf_max_features = (
+            args.default_rf_max_features
+            if args.default_rf_max_features is not None
+            else rf_defaults["max_features"]
         )
         replacements.update(
             {
                 "RF_N_ESTIMATORS_DEFAULT": str(int(default_rf_n_estimators)),
                 "RF_MAX_DEPTH_DEFAULT": str(int(default_rf_max_depth)),
-                "RF_MIN_SAMPLES_SPLIT_DEFAULT": str(int(default_rf_min_samples_split)),
+                "RF_MIN_SAMPLES_LEAF_DEFAULT": str(int(default_rf_min_samples_leaf)),
+                "RF_MAX_FEATURES_DEFAULT": str(default_rf_max_features),
             }
         )
 
@@ -537,6 +599,21 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             if args.default_colsample_bytree is not None
             else xgboost_defaults["colsample_bytree"]
         )
+        default_min_child_weight = (
+            args.default_xgb_min_child_weight
+            if args.default_xgb_min_child_weight is not None
+            else xgboost_defaults["min_child_weight"]
+        )
+        default_reg_lambda = (
+            args.default_xgb_reg_lambda
+            if args.default_xgb_reg_lambda is not None
+            else xgboost_defaults["reg_lambda"]
+        )
+        default_reg_alpha = (
+            args.default_xgb_reg_alpha
+            if args.default_xgb_reg_alpha is not None
+            else xgboost_defaults["reg_alpha"]
+        )
 
         replacements.update(
             {
@@ -545,6 +622,9 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                 "XGB_MAX_DEPTH_DEFAULT": str(int(default_max_depth)),
                 "XGB_SUBSAMPLE_DEFAULT": str(float(default_subsample)),
                 "XGB_COLSAMPLE_BYTREE_DEFAULT": str(float(default_colsample_bytree)),
+                "XGB_MIN_CHILD_WEIGHT_DEFAULT": str(float(default_min_child_weight)),
+                "XGB_REG_LAMBDA_DEFAULT": str(float(default_reg_lambda)),
+                "XGB_REG_ALPHA_DEFAULT": str(float(default_reg_alpha)),
             }
         )
 
@@ -729,8 +809,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Invalid --default-rf-n-estimators. Must be a positive integer")
     if args.default_rf_max_depth is not None and args.default_rf_max_depth <= 0:
         raise ValueError("Invalid --default-rf-max-depth. Must be a positive integer")
-    if args.default_rf_min_samples_split is not None and args.default_rf_min_samples_split < 2:
-        raise ValueError("Invalid --default-rf-min-samples-split. Must be >= 2")
+    if args.default_rf_min_samples_leaf is not None and args.default_rf_min_samples_leaf < 1:
+        raise ValueError("Invalid --default-rf-min-samples-leaf. Must be >= 1")
 
     if args.starter_dataset is not None:
         allowed = STARTER_DATASETS_BY_FAMILY[args.task]
@@ -765,7 +845,7 @@ def validate_args(args: argparse.Namespace) -> None:
         if early_stopping_defaults_provided and not _supports_early_stopping_defaults(args):
             raise ValueError(
                 "Invalid flags: --default-early-stopping/--default-validation-fraction/"
-                "--default-n-iter-no-change are only supported for classification templates"
+                "--default-n-iter-no-change are not supported for this template"
             )
         if max_iter_default_provided:
             raise ValueError("Invalid flag: --default-max-iter is not supported for xgboost")
@@ -774,11 +854,20 @@ def validate_args(args: argparse.Namespace) -> None:
         if (
             args.default_rf_n_estimators is not None
             or args.default_rf_max_depth is not None
-            or args.default_rf_min_samples_split is not None
+            or args.default_rf_min_samples_leaf is not None
+            or args.default_rf_max_features is not None
         ):
             raise ValueError(
                 "Invalid flags: --default-rf-n-estimators/--default-rf-max-depth/"
-                "--default-rf-min-samples-split are scikit-learn random_forest-only"
+                "--default-rf-min-samples-leaf/--default-rf-max-features are scikit-learn random_forest-only"
+            )
+        if args.default_lr_penalty is not None or args.default_lr_alpha is not None or args.default_lr_fit_intercept is not None or args.default_lr_l1_ratio is not None:
+            raise ValueError(
+                "Invalid flags: --default-lr-penalty/--default-lr-alpha/--default-lr-fit-intercept/--default-lr-l1-ratio are scikit-learn linear_regression-only"
+            )
+        if args.default_xgb_min_child_weight is not None or args.default_xgb_reg_lambda is not None or args.default_xgb_reg_alpha is not None:
+            raise ValueError(
+                "Invalid flags: --default-xgb-min-child-weight/--default-xgb-reg-lambda/--default-xgb-reg-alpha are xgboost-only"
             )
         return
 
@@ -801,7 +890,7 @@ def validate_args(args: argparse.Namespace) -> None:
         if early_stopping_defaults_provided and not _supports_early_stopping_defaults(args):
             raise ValueError(
                 "Invalid flags: --default-early-stopping/--default-validation-fraction/"
-                "--default-n-iter-no-change are only supported for classification templates"
+                "--default-n-iter-no-change are not supported for this template"
             )
         if max_iter_default_provided and not _supports_max_iter_default(args):
             raise ValueError(
@@ -813,25 +902,51 @@ def validate_args(args: argparse.Namespace) -> None:
             or args.default_max_depth is not None
             or args.default_subsample is not None
             or args.default_colsample_bytree is not None
+            or args.default_xgb_min_child_weight is not None
+            or args.default_xgb_reg_lambda is not None
+            or args.default_xgb_reg_alpha is not None
         ):
             raise ValueError(
                 "Invalid flags: --default-n-estimators/--default-learning-rate/--default-max-depth/"
-                "--default-subsample/--default-colsample-bytree are xgboost-only"
+                "--default-subsample/--default-colsample-bytree/--default-xgb-min-child-weight/"
+                "--default-xgb-reg-lambda/--default-xgb-reg-alpha are xgboost-only"
             )
 
         if args.model == "logistic_regression":
             if (
                 args.default_rf_n_estimators is not None
                 or args.default_rf_max_depth is not None
-                or args.default_rf_min_samples_split is not None
+                or args.default_rf_min_samples_leaf is not None
+                or args.default_rf_max_features is not None
             ):
                 raise ValueError(
                     "Invalid flags: --default-rf-n-estimators/--default-rf-max-depth/"
-                    "--default-rf-min-samples-split are scikit-learn random_forest-only"
+                    "--default-rf-min-samples-leaf/--default-rf-max-features are scikit-learn random_forest-only"
+                )
+            if args.default_lr_penalty is not None or args.default_lr_alpha is not None or args.default_lr_fit_intercept is not None or args.default_lr_l1_ratio is not None:
+                raise ValueError(
+                    "Invalid flags: --default-lr-penalty/--default-lr-alpha/--default-lr-fit-intercept/--default-lr-l1-ratio are scikit-learn linear_regression-only"
+                )
+        elif args.model == "linear_regression":
+            if args.default_c is not None or args.default_solver is not None or args.default_logistic_penalty is not None or args.default_logistic_class_weight is not None:
+                raise ValueError("Invalid flags: --default-c/--default-solver/--default-logistic-penalty/--default-logistic-class-weight are scikit-learn logistic-only")
+            if (
+                args.default_rf_n_estimators is not None
+                or args.default_rf_max_depth is not None
+                or args.default_rf_min_samples_leaf is not None
+                or args.default_rf_max_features is not None
+            ):
+                raise ValueError(
+                    "Invalid flags: --default-rf-n-estimators/--default-rf-max-depth/"
+                    "--default-rf-min-samples-leaf/--default-rf-max-features are scikit-learn random_forest-only"
                 )
         else:
-            if args.default_c is not None or args.default_solver is not None:
-                raise ValueError("Invalid flags: --default-c/--default-solver are scikit-learn logistic-only")
+            if args.default_c is not None or args.default_solver is not None or args.default_logistic_penalty is not None or args.default_logistic_class_weight is not None:
+                raise ValueError("Invalid flags: --default-c/--default-solver/--default-logistic-penalty/--default-logistic-class-weight are scikit-learn logistic-only")
+            if args.default_lr_penalty is not None or args.default_lr_alpha is not None or args.default_lr_fit_intercept is not None or args.default_lr_l1_ratio is not None:
+                raise ValueError(
+                    "Invalid flags: --default-lr-penalty/--default-lr-alpha/--default-lr-fit-intercept/--default-lr-l1-ratio are scikit-learn linear_regression-only"
+                )
 
         return
 
@@ -863,7 +978,7 @@ def validate_args(args: argparse.Namespace) -> None:
         if early_stopping_defaults_provided and not _supports_early_stopping_defaults(args):
             raise ValueError(
                 "Invalid flags: --default-early-stopping/--default-validation-fraction/"
-                "--default-n-iter-no-change are only supported for tensorflow dense_nn templates"
+                "--default-n-iter-no-change are not supported for this template"
             )
         if max_iter_default_provided:
             raise ValueError("Invalid flag: --default-max-iter is not supported for tensorflow")
@@ -873,11 +988,21 @@ def validate_args(args: argparse.Namespace) -> None:
             or args.default_max_depth is not None
             or args.default_subsample is not None
             or args.default_colsample_bytree is not None
+            or args.default_xgb_min_child_weight is not None
+            or args.default_xgb_reg_lambda is not None
+            or args.default_xgb_reg_alpha is not None
             or args.default_c is not None
             or args.default_solver is not None
+            or args.default_logistic_penalty is not None
+            or args.default_logistic_class_weight is not None
             or args.default_rf_n_estimators is not None
             or args.default_rf_max_depth is not None
-            or args.default_rf_min_samples_split is not None
+            or args.default_rf_min_samples_leaf is not None
+            or args.default_rf_max_features is not None
+            or args.default_lr_penalty is not None
+            or args.default_lr_alpha is not None
+            or args.default_lr_fit_intercept is not None
+            or args.default_lr_l1_ratio is not None
         ):
             raise ValueError(
                 "Invalid flags: xgboost/scikit-learn default hyperparameter flags are not supported for tensorflow"
@@ -953,10 +1078,15 @@ def main():
         help="Default value injected into generated random forest template --max-depth flag",
     )
     parser.add_argument(
-        "--default-rf-min-samples-split",
+        "--default-rf-min-samples-leaf",
         type=int,
         required=False,
-        help="Default value injected into generated random forest template --min-samples-split flag",
+        help="Default value injected into generated random forest template --min-samples-leaf flag",
+    )
+    parser.add_argument(
+        "--default-rf-max-features",
+        required=False,
+        help="Default value injected into generated random forest template --max-features flag (e.g. sqrt, log2, 1.0)",
     )
     parser.add_argument(
         "--default-n-estimators",
@@ -992,19 +1122,73 @@ def main():
         "--default-early-stopping",
         type=_parse_bool,
         required=False,
-        help="Default value injected into generated classification template --early-stopping flag",
+        help="Default value injected into generated template --early-stopping flag",
     )
     parser.add_argument(
         "--default-validation-fraction",
         type=float,
         required=False,
-        help="Default value injected into generated classification template --validation-fraction flag",
+        help="Default value injected into generated template --validation-fraction flag",
     )
     parser.add_argument(
         "--default-n-iter-no-change",
         type=int,
         required=False,
-        help="Default value injected into generated classification template --n-iter-no-change flag",
+        help="Default value injected into generated template --n-iter-no-change flag",
+    )
+    parser.add_argument(
+        "--default-lr-penalty",
+        required=False,
+        choices=["none", "l1", "l2", "elasticnet"],
+        help="Default regularization penalty for linear regression template",
+    )
+    parser.add_argument(
+        "--default-lr-alpha",
+        type=float,
+        required=False,
+        help="Default regularization strength (alpha) for linear regression template",
+    )
+    parser.add_argument(
+        "--default-lr-fit-intercept",
+        type=_parse_bool,
+        required=False,
+        help="Default fit_intercept for linear regression template",
+    )
+    parser.add_argument(
+        "--default-lr-l1-ratio",
+        type=float,
+        required=False,
+        help="Default l1_ratio for linear regression ElasticNet (0-1)",
+    )
+    parser.add_argument(
+        "--default-logistic-penalty",
+        required=False,
+        choices=["none", "l1", "l2", "elasticnet"],
+        help="Default penalty for logistic regression template",
+    )
+    parser.add_argument(
+        "--default-logistic-class-weight",
+        required=False,
+        choices=["none", "balanced"],
+        help="Default class_weight for logistic regression template",
+    )
+    parser.add_argument(
+        "--default-xgb-min-child-weight",
+        type=float,
+        required=False,
+        help="Default min_child_weight for xgboost template",
+    )
+    parser.add_argument(
+        "--default-xgb-reg-lambda",
+        type=float,
+        required=False,
+        help="Default reg_lambda (L2) for xgboost template",
+    )
+    parser.add_argument(
+        "--default-xgb-reg-alpha",
+        type=float,
+        required=False,
+        help="Default reg_alpha (L1) for xgboost template",
     )
     parser.add_argument(
         "--optimizer",

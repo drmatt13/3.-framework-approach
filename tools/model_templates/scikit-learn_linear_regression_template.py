@@ -15,7 +15,7 @@ import pandas as pd
 import sklearn
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, Ridge
 from sklearn.metrics import max_error, mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
@@ -47,8 +47,6 @@ from libraries.model_template_helpers import (
 
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
-#   --library scikit-learn
-#   --model linear_regression
 #   --task regression
 #   --name <model_name>
 #   --save-model true|false
@@ -56,6 +54,10 @@ from libraries.model_template_helpers import (
 #   --test-size <float>
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
+#   --penalty none|l1|l2|elasticnet
+#   --alpha <float>
+#   --fit-intercept true|false
+#   --l1-ratio <float>
 # ---------------------------------------------------------------------
 
 # Default values for optional parameters. These can be overridden via CLI.
@@ -63,11 +65,13 @@ SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
+DEFAULT_PENALTY = "{{LR_PENALTY_DEFAULT}}"
+DEFAULT_ALPHA = {{LR_ALPHA_DEFAULT}}
+DEFAULT_FIT_INTERCEPT = "{{LR_FIT_INTERCEPT_DEFAULT}}" == "True"
+DEFAULT_L1_RATIO = float("{{LR_L1_RATIO_DEFAULT}}")
 
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Linear Regression baseline")
-parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
-parser.add_argument("--model", choices=["linear_regression"], default="linear_regression")
 parser.add_argument("--task", choices=["regression"], default="regression")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
@@ -76,6 +80,10 @@ parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
+parser.add_argument("--penalty", choices=["none", "l1", "l2", "elasticnet"], default=DEFAULT_PENALTY)
+parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA)
+parser.add_argument("--fit-intercept", type=_parse_bool, default=DEFAULT_FIT_INTERCEPT)
+parser.add_argument("--l1-ratio", type=float, default=DEFAULT_L1_RATIO)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
@@ -146,9 +154,9 @@ df = df.replace({pd.NA: np.nan})
 
 # Template injection points:
 #   - TARGET_COLUMN
-#   - COLUMNS_TO_DROP
+#   - FEATURE_DROP_COLUMNS
 TARGET_COLUMN = "{{TARGET_COLUMN}}"
-COLUMNS_TO_DROP = {{COLUMNS_TO_DROP}}
+COLUMNS_TO_DROP = {{FEATURE_DROP_COLUMNS}}
 
 if TARGET_COLUMN not in df.columns:
 	raise ValueError(f"Target column '{TARGET_COLUMN}' not found in dataset.")
@@ -266,11 +274,30 @@ preprocessor = ColumnTransformer(
 # ================= BUILD MODEL PIPELINE ======================
 # =============================================================
 
+# Select estimator based on --penalty flag.
+#   none        -> LinearRegression (ordinary least squares)
+#   l2          -> Ridge (L2 regularization)
+#   l1          -> Lasso (L1 regularization / sparse solutions)
+#   elasticnet  -> ElasticNet (L1 + L2 mix)
+
+_PENALTY_TO_ESTIMATOR = {
+	"none": lambda: LinearRegression(fit_intercept=args.fit_intercept),
+	"l2": lambda: Ridge(alpha=args.alpha, fit_intercept=args.fit_intercept, random_state=args.random_state),
+	"l1": lambda: Lasso(alpha=args.alpha, fit_intercept=args.fit_intercept, random_state=args.random_state, max_iter=10_000),
+	"elasticnet": lambda: ElasticNet(alpha=args.alpha, l1_ratio=args.l1_ratio, fit_intercept=args.fit_intercept, random_state=args.random_state, max_iter=10_000),
+}
+
+if args.penalty not in _PENALTY_TO_ESTIMATOR:
+	raise ValueError(f"Unsupported --penalty '{args.penalty}'. Choose from: {', '.join(_PENALTY_TO_ESTIMATOR)}")
+
+regressor = _PENALTY_TO_ESTIMATOR[args.penalty]()
+regressor_name = type(regressor).__name__
+
 # Bundle preprocessing + model into one inference-ready pipeline.
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
-		("regressor", LinearRegression()),
+		("regressor", regressor),
 	]
 )
 
@@ -281,11 +308,11 @@ model = Pipeline(
 # Fit on training data (pipeline fits preprocessors + model).
 fit_started_at = time.perf_counter()
 if training_verbose > 0:
-	print("Training started: LinearRegression")
+	print(f"Training started: {regressor_name} (penalty={args.penalty}, alpha={args.alpha})")
 model.fit(X_train, y_train)
 fit_time_seconds = float(time.perf_counter() - fit_started_at)
 if training_verbose > 0:
-	print(f"Training completed in {fit_time_seconds:.3f}s: LinearRegression")
+	print(f"Training completed in {fit_time_seconds:.3f}s: {regressor_name}")
 
 training_control = {
 	"enabled": False,
@@ -489,26 +516,29 @@ print(results)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
 	regressor_params = model.named_steps["regressor"].get_params()
-	estimator_params_compact = _select_estimator_params(
-		regressor_params,
-		[
-			"fit_intercept",
-			"copy_X",
-			"tol",
-			"positive",
-			"n_jobs",
-		],
-	)
+	_lr_param_keys = [
+		"fit_intercept",
+		"copy_X",
+		"tol",
+		"positive",
+		"n_jobs",
+	]
+	# Include regularization-specific params when a penalty is active.
+	if args.penalty != "none":
+		_lr_param_keys.extend(["alpha", "max_iter"])
+	if args.penalty == "elasticnet":
+		_lr_param_keys.append("l1_ratio")
+	estimator_params_compact = _select_estimator_params(regressor_params, _lr_param_keys)
 
 	run_metadata = {
 		"run_id": run_id,
 		"name": model_name,
 		"timestamp": timestamp,
-		"library": args.library,
+		"library": "scikit-learn",
 		"task": args.task,
 		"algorithm": "linear_regression",
-		"estimator_class": "LinearRegression",
-		"model_id": "sklearn.linearregression",
+		"estimator_class": regressor_name,
+		"model_id": f"sklearn.{regressor_name.lower()}",
 		"dataset": {
 			"path": str(data_path.relative_to(project_root)),
 			"sha256": data_hash,
@@ -555,6 +585,10 @@ print(results)
 			"estimator_params": _compact_metadata(estimator_params_compact),
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
+			"penalty": args.penalty,
+			"alpha": float(args.alpha),
+			"fit_intercept": bool(args.fit_intercept),
+			"l1_ratio": float(args.l1_ratio) if args.penalty == "elasticnet" else None,
 		},
 		"training_control": training_control,
 		"selection": training_control,

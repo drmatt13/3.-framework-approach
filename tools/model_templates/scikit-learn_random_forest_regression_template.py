@@ -58,13 +58,15 @@ def _parse_optional_int(value: str | int | None) -> int | None:
 
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
-#   --library scikit-learn
-#   --model random_forest
 #   --task regression
 #   --name <model_name>
 #   --save-model true|false
 #   --random-state <int>
 #   --test-size <float>
+#   --n-estimators <int>
+#   --max-depth <int|none>
+#   --min-samples-leaf <int>
+#   --max-features <auto|sqrt|log2|float|none>
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
 # ---------------------------------------------------------------------
@@ -74,14 +76,30 @@ SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 DEFAULT_N_ESTIMATORS = int("{{RF_N_ESTIMATORS_DEFAULT}}")
 DEFAULT_MAX_DEPTH = _parse_optional_int("{{RF_MAX_DEPTH_DEFAULT}}")
-DEFAULT_MIN_SAMPLES_SPLIT = int("{{RF_MIN_SAMPLES_SPLIT_DEFAULT}}")
+DEFAULT_MIN_SAMPLES_LEAF = int("{{RF_MIN_SAMPLES_LEAF_DEFAULT}}")
+DEFAULT_MAX_FEATURES = "{{RF_MAX_FEATURES_DEFAULT}}"
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
 
+
+def _parse_max_features(value: str) -> str | float | None:
+	"""Parse --max-features into a value accepted by RandomForestRegressor."""
+	text = str(value).strip().lower()
+	if text in {"none", "null", ""}:
+		return None
+	if text in {"auto", "sqrt", "log2"}:
+		return text
+	try:
+		fval = float(text)
+		if 0.0 < fval <= 1.0:
+			return fval
+		return text  # let sklearn validate
+	except ValueError:
+		return text
+
+
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Random Forest Regressor baseline")
-parser.add_argument("--library", choices=["scikit-learn"], default="scikit-learn")
-parser.add_argument("--model", choices=["random_forest"], default="random_forest")
 parser.add_argument("--task", choices=["regression"], default="regression")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
@@ -90,7 +108,8 @@ parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
 parser.add_argument("--n-estimators", type=int, default=DEFAULT_N_ESTIMATORS)
 parser.add_argument("--max-depth", type=_parse_optional_int, default=DEFAULT_MAX_DEPTH)
-parser.add_argument("--min-samples-split", type=int, default=DEFAULT_MIN_SAMPLES_SPLIT)
+parser.add_argument("--min-samples-leaf", type=int, default=DEFAULT_MIN_SAMPLES_LEAF)
+parser.add_argument("--max-features", type=_parse_max_features, default=DEFAULT_MAX_FEATURES)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 args = parser.parse_args()
@@ -266,12 +285,14 @@ model = Pipeline(
 				random_state=args.random_state,
 				n_estimators=int(args.n_estimators),
 				max_depth=args.max_depth,
-				min_samples_split=int(args.min_samples_split),
+				min_samples_leaf=int(args.min_samples_leaf),
+				max_features=args.max_features,
 				verbose=training_verbose,
 			),
 		),
 	]
 )
+fit_time_seconds = 0.0
 
 # =============================================================
 # ===================== TRAIN MODEL ===========================
@@ -285,6 +306,17 @@ model.fit(X_train, y_train)
 fit_time_seconds = float(time.perf_counter() - fit_started_at)
 if training_verbose > 0:
 	print(f"Training completed in {fit_time_seconds:.3f}s: RandomForestRegressor")
+
+training_control = {
+	"enabled": False,
+	"strategy": None,
+	"monitor_name": None,
+	"monitor_mode": None,
+	"max_steps_configured": None,
+	"steps_completed": None,
+	"best_step": None,
+	"best_score": None,
+}
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
@@ -406,7 +438,8 @@ if SAVE_MODEL:
 			"value": _round_metric(test_rmse),
 		},
 	}
-	metrics["selection"] = None
+	metrics["training_control"] = training_control
+	metrics["selection"] = training_control
 	metrics["calibration"] = {"source": None, "calibrated": None, "calibration_method": None}
 	metrics["timing"] = {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
@@ -467,6 +500,8 @@ print(results)
 	)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
+	n_val = 0
+	n_train_effective = int(len(X_train))
 	regressor_params = model.named_steps["regressor"].get_params()
 	estimator_params_compact = _select_estimator_params(
 		regressor_params,
@@ -488,7 +523,7 @@ print(results)
 		"run_id": run_id,
 		"name": model_name,
 		"timestamp": timestamp,
-		"library": args.library,
+		"library": "scikit-learn",
 		"task": args.task,
 		"algorithm": "random_forest",
 		"estimator_class": "RandomForestRegressor",
@@ -512,8 +547,8 @@ print(results)
 			},
 			"sizes": {
 				"n_rows": data_rows,
-				"n_train": int(len(X_train)),
-				"n_val": 0,
+				"n_train": n_train_effective,
+				"n_val": n_val,
 				"n_test": int(len(X_test)),
 			},
 		},
@@ -537,9 +572,11 @@ print(results)
 			"random_state": int(args.random_state),
 			"n_estimators": int(args.n_estimators),
 			"max_depth": int(args.max_depth) if args.max_depth is not None else None,
-			"min_samples_split": int(args.min_samples_split),
+			"min_samples_leaf": int(args.min_samples_leaf),
+			"max_features": str(args.max_features) if args.max_features is not None else None,
 		},
-		"selection": None,
+		"selection": training_control,
+		"training_control": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),

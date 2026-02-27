@@ -89,11 +89,9 @@ def _is_int(s: str) -> bool:
 def _supports_early_stopping_defaults(library: str, model: str | None, task: str) -> bool:
     if library == "tensorflow" and model == "dense_nn":
         return True
-    if task == "regression":
-        return False
     if library == "xgboost":
         return True
-    return library == "scikit-learn" and model in {"logistic_regression", "random_forest"}
+    return False
 
 
 def _supports_default_max_iter(library: str, model: str | None, task: str) -> bool:
@@ -108,9 +106,138 @@ def _recommended_es_defaults(library: str, model: str | None) -> tuple[bool, flo
         return True, 0.1, 20
     if library == "tensorflow" and model == "dense_nn":
         return True, 0.1, 5
-    if library == "scikit-learn" and model in {"logistic_regression", "random_forest"}:
-        return True, 0.1, 5
     return True, 0.1, 5
+
+
+# ---------------------------------------------------------
+# Dataset metadata (for size-aware profile defaults)
+# ---------------------------------------------------------
+
+DATASET_META = {
+    "ames_housing.csv": {"rows": 2930, "features": 82},
+    "california_housing.csv": {"rows": 20640, "features": 9},
+    "insurance.csv": {"rows": 1338, "features": 7},
+    "adult_income.csv": {"rows": 32561, "features": 15},
+    "breast_cancer_wisconsin.csv": {"rows": 569, "features": 32},
+    "mushrooms.csv": {"rows": 8124, "features": 23},
+    "titanic.csv": {"rows": 891, "features": 12},
+    "car_evaluation.csv": {"rows": 1728, "features": 7},
+    "dry_bean.csv": {"rows": 13611, "features": 17},
+    "forest_cover_type.csv": {"rows": 581012, "features": 55},
+    "iris.csv": {"rows": 150, "features": 5},
+    "wine_quality.csv": {"rows": 6497, "features": 13},
+}
+
+
+def _dataset_size_bucket(dataset_name: str | None) -> str:
+    """Return 'small', 'medium', or 'large' based on known row counts."""
+    if dataset_name is None or dataset_name not in DATASET_META:
+        return "medium"
+    rows = DATASET_META[dataset_name]["rows"]
+    if rows < 2000:
+        return "small"
+    if rows <= 20000:
+        return "medium"
+    return "large"
+
+
+# ---------------------------------------------------------
+# Training profiles
+# ---------------------------------------------------------
+
+def _get_profile_defaults(
+    library: str,
+    model: str | None,
+    task: str,
+    profile: str,
+    size_bucket: str,
+) -> dict:
+    """Return hyperparameter defaults for the given profile.
+
+    Keys match the variable names used in per-param prompts.
+    A value of None means the param is not applicable.
+    """
+    defaults: dict = {}
+
+    if library == "xgboost":
+        presets = {
+            "Quick": {"n_est": 100, "lr": 0.3, "depth": 3, "sub": 0.8, "col": 0.8, "mcw": 1.0, "rl": 1.0, "ra": 0.0, "es": True, "vf": 0.1, "nic": 10},
+            "Balanced": {"n_est": 300, "lr": 0.1, "depth": 6, "sub": 1.0, "col": 1.0, "mcw": 1.0, "rl": 1.0, "ra": 0.0, "es": True, "vf": 0.1, "nic": 20},
+            "Thorough": {"n_est": 1000, "lr": 0.05, "depth": 8, "sub": 0.8, "col": 0.8, "mcw": 1.0, "rl": 1.0, "ra": 0.1, "es": True, "vf": 0.1, "nic": 30},
+        }
+        if size_bucket == "large":
+            presets["Quick"]["n_est"] = 200
+            presets["Thorough"]["n_est"] = 1500
+        elif size_bucket == "small":
+            presets["Quick"]["depth"] = 2
+            presets["Balanced"]["depth"] = 4
+            presets["Thorough"]["n_est"] = 500
+
+        p = presets.get(profile, presets["Balanced"])
+        defaults = {
+            "default_n_estimators": str(p["n_est"]),
+            "default_learning_rate": str(p["lr"]),
+            "default_max_depth": str(p["depth"]),
+            "default_subsample": str(p["sub"]),
+            "default_colsample_bytree": str(p["col"]),
+            "default_xgb_min_child_weight": str(p["mcw"]),
+            "default_xgb_reg_lambda": str(p["rl"]),
+            "default_xgb_reg_alpha": str(p["ra"]),
+            "default_early_stopping": p["es"],
+            "default_validation_fraction": p["vf"],
+            "default_n_iter_no_change": p["nic"],
+        }
+
+    elif library == "scikit-learn" and model == "random_forest":
+        presets = {
+            "Quick": {"n_est": 100, "depth": 8, "msl": 5, "mf": "sqrt"},
+            "Balanced": {"n_est": 300, "depth": 16, "msl": 1, "mf": "sqrt"},
+            "Thorough": {"n_est": 500, "depth": 32, "msl": 1, "mf": "sqrt"},
+        }
+        if size_bucket == "large":
+            presets["Thorough"]["n_est"] = 800
+        elif size_bucket == "small":
+            presets["Balanced"]["n_est"] = 200
+            presets["Quick"]["depth"] = 6
+
+        p = presets.get(profile, presets["Balanced"])
+        defaults = {
+            "default_rf_n_estimators": str(p["n_est"]),
+            "default_rf_max_depth": str(p["depth"]),
+            "default_rf_min_samples_leaf": str(p["msl"]),
+            "default_rf_max_features": str(p["mf"]),
+        }
+
+    elif library == "scikit-learn" and model == "logistic_regression":
+        presets = {
+            "Quick": {"c": 1.0, "solver": "lbfgs", "max_iter": 500, "penalty": "l2", "class_weight": "none"},
+            "Balanced": {"c": 1.0, "solver": "lbfgs", "max_iter": 1000, "penalty": "l2", "class_weight": "none"},
+            "Thorough": {"c": 0.5, "solver": "saga", "max_iter": 2000, "penalty": "l2", "class_weight": "none"},
+        }
+        p = presets.get(profile, presets["Balanced"])
+        defaults = {
+            "default_c": str(p["c"]),
+            "default_solver": p["solver"],
+            "default_max_iter": p["max_iter"],
+            "default_logistic_penalty": p["penalty"],
+            "default_logistic_class_weight": p["class_weight"],
+        }
+
+    elif library == "scikit-learn" and model == "linear_regression":
+        presets = {
+            "Quick": {"penalty": "none", "alpha": 1.0, "fit_intercept": True, "l1_ratio": 0.5},
+            "Balanced": {"penalty": "l2", "alpha": 1.0, "fit_intercept": True, "l1_ratio": 0.5},
+            "Thorough": {"penalty": "l2", "alpha": 0.1, "fit_intercept": True, "l1_ratio": 0.5},
+        }
+        p = presets.get(profile, presets["Balanced"])
+        defaults = {
+            "default_lr_penalty": p["penalty"],
+            "default_lr_alpha": str(p["alpha"]),
+            "default_lr_fit_intercept": p["fit_intercept"],
+            "default_lr_l1_ratio": str(p["l1_ratio"]),
+        }
+
+    return defaults
 
 
 def main() -> int:
@@ -217,6 +344,33 @@ def main() -> int:
             print("Cancelled.")
             return 0
 
+    # ---------------------------------------------------------
+    # Training profile selection (non-TensorFlow only)
+    # ---------------------------------------------------------
+    profile = None
+    profile_defaults = {}
+    size_bucket = _dataset_size_bucket(starter_dataset)
+
+    if library != "tensorflow":
+        profile = questionary.select(
+            "Select training profile:",
+            choices=[
+                questionary.Choice("Quick", description="Fast iteration, smaller models"),
+                questionary.Choice("Balanced", description="Solid defaults for most tasks"),
+                questionary.Choice("Thorough", description="Larger search, more compute"),
+                questionary.Choice("Custom", description="Set every hyperparameter manually"),
+            ],
+            use_shortcuts=True,
+            style=CUSTOM_STYLE,
+        ).ask()
+
+        if profile is None:
+            print("Cancelled.")
+            return 0
+
+        if profile != "Custom":
+            profile_defaults = _get_profile_defaults(library, model, task, profile, size_bucket)
+
     # TensorFlow training knobs (ONLY where necessary)
     optimizer = None
     learning_rate = None
@@ -276,167 +430,321 @@ def main() -> int:
     default_solver = None
     default_rf_n_estimators = None
     default_rf_max_depth = None
-    default_rf_min_samples_split = None
+    default_rf_min_samples_leaf = None
+    default_rf_max_features = None
+    default_logistic_penalty = None
+    default_logistic_class_weight = None
+    default_lr_penalty = None
+    default_lr_alpha = None
+    default_lr_fit_intercept = None
+    default_lr_l1_ratio = None
+    default_xgb_min_child_weight = None
+    default_xgb_reg_lambda = None
+    default_xgb_reg_alpha = None
+
+    # When a profile provides defaults, use them and skip prompts.
+    use_custom = profile == "Custom" or library == "tensorflow"
 
     if library == "xgboost":
-        default_n_estimators = _ask_text(
-            "Default n_estimators for template --n-estimators:",
-            default="300",
-            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-        )
-        if default_n_estimators is None:
-            print("Cancelled.")
-            return 0
-
-        default_learning_rate = _ask_text(
-            "Default learning rate for template --learning-rate:",
-            default="0.1",
-            validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
-        )
-        if default_learning_rate is None:
-            print("Cancelled.")
-            return 0
-
-        default_max_depth = _ask_text(
-            "Default max depth for template --max-depth:",
-            default="6",
-            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-        )
-        if default_max_depth is None:
-            print("Cancelled.")
-            return 0
-
-        default_subsample = _ask_text(
-            "Default subsample for template --subsample (0 < value <= 1):",
-            default="1.0",
-            validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
-        )
-        if default_subsample is None:
-            print("Cancelled.")
-            return 0
-
-        default_colsample_bytree = _ask_text(
-            "Default colsample_bytree for template --colsample-bytree (0 < value <= 1):",
-            default="1.0",
-            validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
-        )
-        if default_colsample_bytree is None:
-            print("Cancelled.")
-            return 0
-
-    if library == "scikit-learn" and model == "logistic_regression":
-        default_c = _ask_text(
-            "Default C for template --c:",
-            default="1.0",
-            validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
-        )
-        if default_c is None:
-            print("Cancelled.")
-            return 0
-
-        default_solver = questionary.select(
-            "Default solver for template --solver:",
-            choices=SKLEARN_LOGISTIC_SOLVERS,
-            use_shortcuts=True,
-            style=CUSTOM_STYLE,
-        ).ask()
-        if default_solver is None:
-            print("Cancelled.")
-            return 0
-
-    if library == "scikit-learn" and model == "random_forest":
-        default_rf_n_estimators = _ask_text(
-            "Default n_estimators for template --n-estimators:",
-            default="300",
-            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-        )
-        if default_rf_n_estimators is None:
-            print("Cancelled.")
-            return 0
-
-        default_rf_max_depth = _ask_text(
-            "Default max depth for template --max-depth:",
-            default="16",
-            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-        )
-        if default_rf_max_depth is None:
-            print("Cancelled.")
-            return 0
-
-        default_rf_min_samples_split = _ask_text(
-            "Default min_samples_split for template --min-samples-split:",
-            default="2",
-            validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
-        )
-        if default_rf_min_samples_split is None:
-            print("Cancelled.")
-            return 0
-
-    if _supports_default_max_iter(library, model, task):
-        default_max_iter = _ask_text(
-            "Default max iterations for template --max-iter:",
-            default="1000",
-            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-        )
-        if default_max_iter is None:
-            print("Cancelled.")
-            return 0
-        default_max_iter = int(default_max_iter)
-
-    if _supports_early_stopping_defaults(library, model, task):
-        recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change = _recommended_es_defaults(
-            library,
-            model,
-        )
-
-        default_early_stopping = questionary.confirm(
-            "Enable early stopping by default in the generated template (--early-stopping)?",
-            default=bool(recommended_early_stopping),
-            style=CUSTOM_STYLE,
-        ).ask()
-
-        if default_early_stopping is None:
-            print("Cancelled.")
-            return 0
-
-        use_recommended_defaults = questionary.confirm(
-            "Use recommended preset values for --validation-fraction and --n-iter-no-change?",
-            default=True,
-            style=CUSTOM_STYLE,
-        ).ask()
-
-        if use_recommended_defaults is None:
-            print("Cancelled.")
-            return 0
-
-        if use_recommended_defaults:
-            default_validation_fraction = recommended_validation_fraction
-            default_n_iter_no_change = recommended_n_iter_no_change
-        else:
-            default_validation_fraction = _ask_text(
-                "Default validation fraction for template --validation-fraction (0 < value < 1):",
-                default=str(recommended_validation_fraction),
-                validate_fn=lambda s: True
-                if (_is_float(s) and 0.0 < float(s) < 1.0)
-                else "Must be a number where 0 < value < 1",
-            )
-            if default_validation_fraction is None:
-                print("Cancelled.")
-                return 0
-
-            default_n_iter_no_change = _ask_text(
-                "Default n_iter_no_change for template --n-iter-no-change:",
-                default=str(recommended_n_iter_no_change),
+        if use_custom:
+            default_n_estimators = _ask_text(
+                "Default n_estimators for template --n-estimators:",
+                default="300",
                 validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
             )
-            if default_n_iter_no_change is None:
+            if default_n_estimators is None:
                 print("Cancelled.")
                 return 0
 
-            default_validation_fraction = float(default_validation_fraction)
-            default_n_iter_no_change = int(default_n_iter_no_change)
+            default_learning_rate = _ask_text(
+                "Default learning rate for template --learning-rate:",
+                default="0.1",
+                validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
+            )
+            if default_learning_rate is None:
+                print("Cancelled.")
+                return 0
 
-    models_dir = script_dir.parent / "models"
+            default_max_depth = _ask_text(
+                "Default max depth for template --max-depth:",
+                default="6",
+                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+            )
+            if default_max_depth is None:
+                print("Cancelled.")
+                return 0
+
+            default_subsample = _ask_text(
+                "Default subsample for template --subsample (0 < value <= 1):",
+                default="1.0",
+                validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
+            )
+            if default_subsample is None:
+                print("Cancelled.")
+                return 0
+
+            default_colsample_bytree = _ask_text(
+                "Default colsample_bytree for template --colsample-bytree (0 < value <= 1):",
+                default="1.0",
+                validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
+            )
+            if default_colsample_bytree is None:
+                print("Cancelled.")
+                return 0
+
+            default_xgb_min_child_weight = _ask_text(
+                "Default min_child_weight for template --min-child-weight:",
+                default="1.0",
+                validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0) else "Must be a non-negative number",
+            )
+            if default_xgb_min_child_weight is None:
+                print("Cancelled.")
+                return 0
+
+            default_xgb_reg_lambda = _ask_text(
+                "Default reg_lambda (L2) for template --reg-lambda:",
+                default="1.0",
+                validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0) else "Must be a non-negative number",
+            )
+            if default_xgb_reg_lambda is None:
+                print("Cancelled.")
+                return 0
+
+            default_xgb_reg_alpha = _ask_text(
+                "Default reg_alpha (L1) for template --reg-alpha:",
+                default="0.0",
+                validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0) else "Must be a non-negative number",
+            )
+            if default_xgb_reg_alpha is None:
+                print("Cancelled.")
+                return 0
+        else:
+            default_n_estimators = profile_defaults.get("default_n_estimators", "300")
+            default_learning_rate = profile_defaults.get("default_learning_rate", "0.1")
+            default_max_depth = profile_defaults.get("default_max_depth", "6")
+            default_subsample = profile_defaults.get("default_subsample", "1.0")
+            default_colsample_bytree = profile_defaults.get("default_colsample_bytree", "1.0")
+            default_xgb_min_child_weight = profile_defaults.get("default_xgb_min_child_weight", "1.0")
+            default_xgb_reg_lambda = profile_defaults.get("default_xgb_reg_lambda", "1.0")
+            default_xgb_reg_alpha = profile_defaults.get("default_xgb_reg_alpha", "0.0")
+
+    if library == "scikit-learn" and model == "logistic_regression":
+        if use_custom:
+            default_c = _ask_text(
+                "Default C for template --c:",
+                default="1.0",
+                validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
+            )
+            if default_c is None:
+                print("Cancelled.")
+                return 0
+
+            default_solver = questionary.select(
+                "Default solver for template --solver:",
+                choices=SKLEARN_LOGISTIC_SOLVERS,
+                use_shortcuts=True,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if default_solver is None:
+                print("Cancelled.")
+                return 0
+
+            default_logistic_penalty = questionary.select(
+                "Default penalty for template --penalty:",
+                choices=["none", "l1", "l2", "elasticnet"],
+                default="l2",
+                use_shortcuts=True,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if default_logistic_penalty is None:
+                print("Cancelled.")
+                return 0
+
+            default_logistic_class_weight = questionary.select(
+                "Default class_weight for template --class-weight:",
+                choices=["none", "balanced"],
+                default="none",
+                use_shortcuts=True,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if default_logistic_class_weight is None:
+                print("Cancelled.")
+                return 0
+        else:
+            default_c = profile_defaults.get("default_c", "1.0")
+            default_solver = profile_defaults.get("default_solver", "lbfgs")
+            default_logistic_penalty = profile_defaults.get("default_logistic_penalty", "l2")
+            default_logistic_class_weight = profile_defaults.get("default_logistic_class_weight", "none")
+
+    if library == "scikit-learn" and model == "random_forest":
+        if use_custom:
+            default_rf_n_estimators = _ask_text(
+                "Default n_estimators for template --n-estimators:",
+                default="300",
+                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+            )
+            if default_rf_n_estimators is None:
+                print("Cancelled.")
+                return 0
+
+            default_rf_max_depth = _ask_text(
+                "Default max depth for template --max-depth:",
+                default="16",
+                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+            )
+            if default_rf_max_depth is None:
+                print("Cancelled.")
+                return 0
+
+            default_rf_min_samples_leaf = _ask_text(
+                "Default min_samples_leaf for template --min-samples-leaf:",
+                default="1",
+                validate_fn=lambda s: True if (_is_int(s) and int(s) >= 1) else "Must be an integer >= 1",
+            )
+            if default_rf_min_samples_leaf is None:
+                print("Cancelled.")
+                return 0
+
+            default_rf_max_features = questionary.select(
+                "Default max_features for template --max-features:",
+                choices=["sqrt", "log2", "1.0"],
+                default="sqrt",
+                use_shortcuts=True,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if default_rf_max_features is None:
+                print("Cancelled.")
+                return 0
+        else:
+            default_rf_n_estimators = profile_defaults.get("default_rf_n_estimators", "300")
+            default_rf_max_depth = profile_defaults.get("default_rf_max_depth", "16")
+            default_rf_min_samples_leaf = profile_defaults.get("default_rf_min_samples_leaf", "1")
+            default_rf_max_features = profile_defaults.get("default_rf_max_features", "sqrt")
+
+    if library == "scikit-learn" and model == "linear_regression":
+        if use_custom:
+            default_lr_penalty = questionary.select(
+                "Default penalty for template --penalty:",
+                choices=["none", "l1", "l2", "elasticnet"],
+                use_shortcuts=True,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if default_lr_penalty is None:
+                print("Cancelled.")
+                return 0
+
+            if default_lr_penalty != "none":
+                default_lr_alpha = _ask_text(
+                    "Default alpha (regularization strength) for template --alpha:",
+                    default="1.0",
+                    validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
+                )
+                if default_lr_alpha is None:
+                    print("Cancelled.")
+                    return 0
+            else:
+                default_lr_alpha = "1.0"
+
+            default_lr_fit_intercept = questionary.confirm(
+                "Fit intercept in default template? (--fit-intercept)",
+                default=True,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if default_lr_fit_intercept is None:
+                print("Cancelled.")
+                return 0
+
+            if default_lr_penalty == "elasticnet":
+                default_lr_l1_ratio = _ask_text(
+                    "Default l1_ratio for ElasticNet (0 = pure L2, 1 = pure L1) --l1-ratio:",
+                    default="0.5",
+                    validate_fn=lambda s: True if (_is_float(s) and 0.0 <= float(s) <= 1.0) else "Must be in range [0, 1]",
+                )
+                if default_lr_l1_ratio is None:
+                    print("Cancelled.")
+                    return 0
+            else:
+                default_lr_l1_ratio = "0.5"
+        else:
+            default_lr_penalty = profile_defaults.get("default_lr_penalty", "none")
+            default_lr_alpha = profile_defaults.get("default_lr_alpha", "1.0")
+            default_lr_fit_intercept = profile_defaults.get("default_lr_fit_intercept", True)
+            default_lr_l1_ratio = profile_defaults.get("default_lr_l1_ratio", "0.5")
+
+    if _supports_default_max_iter(library, model, task):
+        if use_custom:
+            default_max_iter = _ask_text(
+                "Default max iterations for template --max-iter:",
+                default="1000",
+                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+            )
+            if default_max_iter is None:
+                print("Cancelled.")
+                return 0
+            default_max_iter = int(default_max_iter)
+        else:
+            default_max_iter = int(profile_defaults.get("default_max_iter", 1000))
+
+    if _supports_early_stopping_defaults(library, model, task):
+        if use_custom:
+            recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change = _recommended_es_defaults(
+                library,
+                model,
+            )
+
+            default_early_stopping = questionary.confirm(
+                "Enable early stopping by default in the generated template (--early-stopping)?",
+                default=bool(recommended_early_stopping),
+                style=CUSTOM_STYLE,
+            ).ask()
+
+            if default_early_stopping is None:
+                print("Cancelled.")
+                return 0
+
+            use_recommended_defaults = questionary.confirm(
+                "Use recommended preset values for --validation-fraction and --n-iter-no-change?",
+                default=True,
+                style=CUSTOM_STYLE,
+            ).ask()
+
+            if use_recommended_defaults is None:
+                print("Cancelled.")
+                return 0
+
+            if use_recommended_defaults:
+                default_validation_fraction = recommended_validation_fraction
+                default_n_iter_no_change = recommended_n_iter_no_change
+            else:
+                default_validation_fraction = _ask_text(
+                    "Default validation fraction for template --validation-fraction (0 < value < 1):",
+                    default=str(recommended_validation_fraction),
+                    validate_fn=lambda s: True
+                    if (_is_float(s) and 0.0 < float(s) < 1.0)
+                    else "Must be a number where 0 < value < 1",
+                )
+                if default_validation_fraction is None:
+                    print("Cancelled.")
+                    return 0
+
+                default_n_iter_no_change = _ask_text(
+                    "Default n_iter_no_change for template --n-iter-no-change:",
+                    default=str(recommended_n_iter_no_change),
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                )
+                if default_n_iter_no_change is None:
+                    print("Cancelled.")
+                    return 0
+
+                default_validation_fraction = float(default_validation_fraction)
+                default_n_iter_no_change = int(default_n_iter_no_change)
+        else:
+            # Profile provides ES defaults
+            default_early_stopping = profile_defaults.get("default_early_stopping", True)
+            default_validation_fraction = profile_defaults.get("default_validation_fraction", 0.1)
+            default_n_iter_no_change = profile_defaults.get("default_n_iter_no_change", 5)
+
+    models_dir = script_dir / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
 
     name = None
@@ -496,18 +804,39 @@ def main() -> int:
         cmd.extend(["--default-subsample", str(float(default_subsample))])
     if default_colsample_bytree is not None:
         cmd.extend(["--default-colsample-bytree", str(float(default_colsample_bytree))])
+    if default_xgb_min_child_weight is not None:
+        cmd.extend(["--default-xgb-min-child-weight", str(float(default_xgb_min_child_weight))])
+    if default_xgb_reg_lambda is not None:
+        cmd.extend(["--default-xgb-reg-lambda", str(float(default_xgb_reg_lambda))])
+    if default_xgb_reg_alpha is not None:
+        cmd.extend(["--default-xgb-reg-alpha", str(float(default_xgb_reg_alpha))])
 
     if default_c is not None:
         cmd.extend(["--default-c", str(float(default_c))])
     if default_solver is not None:
         cmd.extend(["--default-solver", str(default_solver)])
+    if default_logistic_penalty is not None:
+        cmd.extend(["--default-logistic-penalty", str(default_logistic_penalty)])
+    if default_logistic_class_weight is not None:
+        cmd.extend(["--default-logistic-class-weight", str(default_logistic_class_weight)])
 
     if default_rf_n_estimators is not None:
         cmd.extend(["--default-rf-n-estimators", str(int(default_rf_n_estimators))])
     if default_rf_max_depth is not None:
         cmd.extend(["--default-rf-max-depth", str(int(default_rf_max_depth))])
-    if default_rf_min_samples_split is not None:
-        cmd.extend(["--default-rf-min-samples-split", str(int(default_rf_min_samples_split))])
+    if default_rf_min_samples_leaf is not None:
+        cmd.extend(["--default-rf-min-samples-leaf", str(int(default_rf_min_samples_leaf))])
+    if default_rf_max_features is not None:
+        cmd.extend(["--default-rf-max-features", str(default_rf_max_features)])
+
+    if default_lr_penalty is not None:
+        cmd.extend(["--default-lr-penalty", str(default_lr_penalty)])
+    if default_lr_alpha is not None:
+        cmd.extend(["--default-lr-alpha", str(float(default_lr_alpha))])
+    if default_lr_fit_intercept is not None:
+        cmd.extend(["--default-lr-fit-intercept", "true" if default_lr_fit_intercept else "false"])
+    if default_lr_l1_ratio is not None:
+        cmd.extend(["--default-lr-l1-ratio", str(float(default_lr_l1_ratio))])
 
     # Add TensorFlow-only flags where necessary
     if library == "tensorflow":

@@ -49,7 +49,6 @@ from libraries.model_template_helpers import (
 
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
-#   --library xgboost
 #   --task regression
 #   --name <model_name>
 #   --booster gbtree|gblinear|dart
@@ -57,11 +56,17 @@ from libraries.model_template_helpers import (
 #   --save-model true|false
 #   --random-state <int>
 #   --test-size <float>
+#   --early-stopping true|false
+#   --validation-fraction <float>
+#   --n-iter-no-change <int>
 #   --n-estimators <int>
 #   --learning-rate <float>
 #   --max-depth <int>
 #   --subsample <float>
 #   --colsample-bytree <float>
+#   --min-child-weight <float>
+#   --reg-lambda <float>
+#   --reg-alpha <float>
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
 # ---------------------------------------------------------------------
@@ -71,17 +76,22 @@ SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 DEFAULT_BOOSTER = "{{BOOSTER}}"
 DEFAULT_DEVICE = "{{DEVICE}}"
+DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
+DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
+DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
 DEFAULT_N_ESTIMATORS = int("{{XGB_N_ESTIMATORS_DEFAULT}}")
 DEFAULT_LEARNING_RATE = float("{{XGB_LEARNING_RATE_DEFAULT}}")
 DEFAULT_MAX_DEPTH = int("{{XGB_MAX_DEPTH_DEFAULT}}")
 DEFAULT_SUBSAMPLE = float("{{XGB_SUBSAMPLE_DEFAULT}}")
 DEFAULT_COLSAMPLE_BYTREE = float("{{XGB_COLSAMPLE_BYTREE_DEFAULT}}")
+DEFAULT_MIN_CHILD_WEIGHT = float("{{XGB_MIN_CHILD_WEIGHT_DEFAULT}}")
+DEFAULT_REG_LAMBDA = float("{{XGB_REG_LAMBDA_DEFAULT}}")
+DEFAULT_REG_ALPHA = float("{{XGB_REG_ALPHA_DEFAULT}}")
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
 
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="XGBoost Regressor baseline")
-parser.add_argument("--library", choices=["xgboost"], default="xgboost")
 parser.add_argument("--task", choices=["regression"], default="regression")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
@@ -90,17 +100,24 @@ parser.add_argument("--device", choices=["auto", "cpu", "gpu"], default=DEFAULT_
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
+parser.add_argument("--early-stopping", type=_parse_bool, default=DEFAULT_EARLY_STOPPING)
+parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
+parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
 parser.add_argument("--n-estimators", type=int, default=DEFAULT_N_ESTIMATORS)
 parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
 parser.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
 parser.add_argument("--subsample", type=float, default=DEFAULT_SUBSAMPLE)
 parser.add_argument("--colsample-bytree", type=float, default=DEFAULT_COLSAMPLE_BYTREE)
+parser.add_argument("--min-child-weight", type=float, default=DEFAULT_MIN_CHILD_WEIGHT)
+parser.add_argument("--reg-lambda", type=float, default=DEFAULT_REG_LAMBDA)
+parser.add_argument("--reg-alpha", type=float, default=DEFAULT_REG_ALPHA)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
 xgb_model_verbosity = min(3, max(0, int(training_verbose)))
+xgb_fit_verbose = bool(training_verbose > 0)
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
@@ -130,6 +147,40 @@ def _resolve_xgboost_device(device_flag: str) -> str:
 	if device_flag == "gpu":
 		return "cuda"
 	return "cuda" if _xgboost_cuda_available() else "cpu"
+
+
+def _build_preprocessor(frame: pd.DataFrame) -> ColumnTransformer:
+	# Define column groups from the provided frame.
+	# Include "str" explicitly for pandas 3 compatibility.
+	categorical_cols = frame.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
+	numerical_cols = frame.select_dtypes(include=["number"]).columns.tolist()
+
+	# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
+	try:
+		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+	except TypeError:
+		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
+
+	numeric_transformer = Pipeline(
+		steps=[
+			("imputer", SimpleImputer(strategy="median")),
+			("scaler", StandardScaler()),
+		]
+	)
+	categorical_transformer = Pipeline(
+		steps=[
+			("imputer", SimpleImputer(strategy="most_frequent")),
+			("onehot", one_hot_encoder),
+		]
+	)
+
+	return ColumnTransformer(
+		transformers=[
+			("num", numeric_transformer, numerical_cols),
+			("cat", categorical_transformer, categorical_cols),
+		],
+		remainder="drop",
+	)
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -247,38 +298,8 @@ X_train, X_test, y_train, y_test = train_test_split(
 	random_state=args.random_state,
 )
 
-# Define column groups from training data only.
-# Include "str" explicitly for pandas 3 compatibility.
-categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
-
-# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
-try:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-except TypeError:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
 # Preprocess: impute missing values, then scale numeric and one-hot encode categorical features.
-numeric_transformer = Pipeline(
-	steps=[
-		("imputer", SimpleImputer(strategy="median")),
-		("scaler", StandardScaler()),
-	]
-)
-categorical_transformer = Pipeline(
-	steps=[
-		("imputer", SimpleImputer(strategy="most_frequent")),
-		("onehot", one_hot_encoder),
-	]
-)
-
-preprocessor = ColumnTransformer(
-	transformers=[
-		("num", numeric_transformer, numerical_cols),
-		("cat", categorical_transformer, categorical_cols),
-	],
-	remainder="drop",
-)
+preprocessor = _build_preprocessor(X_train)
 
 # =============================================================
 # ================= BUILD MODEL PIPELINE ======================
@@ -288,24 +309,31 @@ preprocessor = ColumnTransformer(
 xgb_device = _resolve_xgboost_device(args.device)
 if training_verbose > 0:
 	print(f"Resolved XGBoost device: requested={args.device}, effective={xgb_device}")
+
+xgb_eval_metric = "rmse"
+model_kwargs = {
+	"booster": args.booster,
+	"device": xgb_device,
+	"random_state": args.random_state,
+	"objective": "reg:squarederror",
+	"eval_metric": xgb_eval_metric,
+	"n_estimators": int(args.n_estimators),
+	"learning_rate": float(args.learning_rate),
+	"max_depth": int(args.max_depth),
+	"subsample": float(args.subsample),
+	"colsample_bytree": float(args.colsample_bytree),
+	"min_child_weight": float(args.min_child_weight),
+	"reg_lambda": float(args.reg_lambda),
+	"reg_alpha": float(args.reg_alpha),
+	"verbosity": xgb_model_verbosity,
+}
+
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
 		(
 			"regressor",
-			xgb.XGBRegressor(
-				booster=args.booster,
-				device=xgb_device,
-				random_state=args.random_state,
-				n_estimators=int(args.n_estimators),
-				learning_rate=float(args.learning_rate),
-				max_depth=int(args.max_depth),
-				subsample=float(args.subsample),
-				colsample_bytree=float(args.colsample_bytree),
-				objective="reg:squarederror",
-				eval_metric="rmse",
-				verbosity=xgb_model_verbosity,
-			),
+			xgb.XGBRegressor(**model_kwargs),
 		),
 	]
 )
@@ -313,28 +341,103 @@ model = Pipeline(
 # =============================================================
 # ===================== TRAIN MODEL ===========================
 # =============================================================
+# ---------------------------------------------------------------------
+# EARLY STOPPING (optional)
+# - Enabled with --early-stopping=true.
+# - Uses --validation-fraction as holdout split from training data.
+# - Stops when validation metric does not improve for --n-iter-no-change rounds.
+# - When disabled, trains once on full training split.
+# ---------------------------------------------------------------------
+if args.early_stopping:
+	X_inner_train, X_valid, y_inner_train, y_valid = train_test_split(
+		X_train,
+		y_train,
+		test_size=args.validation_fraction,
+		random_state=args.random_state,
+	)
 
-# Fit on training data (pipeline fits preprocessors + model).
-fit_started_at = time.perf_counter()
-if training_verbose > 0:
-	print("Training started: XGBRegressor")
-model.fit(X_train, y_train)
-fit_time_seconds = float(time.perf_counter() - fit_started_at)
-if training_verbose > 0:
-	print(f"Training completed in {fit_time_seconds:.3f}s: XGBRegressor")
+	inner_preprocessor = _build_preprocessor(X_inner_train)
 
-training_control = {
-	"enabled": False,
-	"strategy": None,
-	"monitor_name": None,
-	"monitor_mode": None,
-	"max_steps_configured": None,
-	"steps_completed": None,
-	"best_step": None,
-	"best_score": None,
-	"n_iter_no_change": None,
-	"validation_fraction": None,
-}
+	X_inner_train_processed = inner_preprocessor.fit_transform(X_inner_train)
+	X_valid_processed = inner_preprocessor.transform(X_valid)
+
+	search_model_kwargs = dict(model_kwargs)
+	search_model_kwargs["early_stopping_rounds"] = int(args.n_iter_no_change)
+	search_regressor = xgb.XGBRegressor(**search_model_kwargs)
+	search_regressor.fit(
+		X_inner_train_processed,
+		y_inner_train,
+		eval_set=[(X_valid_processed, y_valid)],
+		verbose=xgb_fit_verbose,
+	)
+
+	search_n_estimators_raw = search_regressor.get_params().get("n_estimators")
+	search_n_estimators = int(search_n_estimators_raw) if search_n_estimators_raw is not None else 100
+
+	best_iteration = getattr(search_regressor, "best_iteration", None)
+	best_score_raw = getattr(search_regressor, "best_score", None)
+	try:
+		best_validation_score = float(best_score_raw) if best_score_raw is not None else None
+	except (TypeError, ValueError):
+		best_validation_score = None
+
+	if best_iteration is not None:
+		selected_n_estimators = int(best_iteration) + 1
+	else:
+		selected_n_estimators = search_n_estimators
+
+	best_step = int(best_iteration) + 1 if best_iteration is not None else None
+
+	model.named_steps["regressor"].set_params(n_estimators=selected_n_estimators)
+
+	# Refit final model on full training split with selected boosting rounds.
+	fit_started_at = time.perf_counter()
+	if training_verbose > 0:
+		print("Training started: XGBRegressor")
+	model.fit(X_train, y_train)
+	fit_time_seconds = float(time.perf_counter() - fit_started_at)
+	if training_verbose > 0:
+		print(f"Training completed in {fit_time_seconds:.3f}s: XGBRegressor")
+
+	training_control = {
+		"enabled": True,
+		"type": "boosting",
+		"max_steps_configured": int(search_n_estimators),
+		"steps_completed": int(selected_n_estimators),
+		"patience": int(args.n_iter_no_change),
+		"monitor_metric": xgb_eval_metric,
+		"monitor_split": "val",
+		"monitor_direction": "min",
+		"best_step": best_step,
+		"best_score": _round_metric(best_validation_score),
+		"stopped_early": bool(best_iteration is not None and (int(best_iteration) + 1) < int(search_n_estimators)),
+	}
+else:
+	# Fit on training data (pipeline fits preprocessors + model).
+	fit_started_at = time.perf_counter()
+	if training_verbose > 0:
+		print("Training started: XGBRegressor")
+	model.fit(X_train, y_train)
+	fit_time_seconds = float(time.perf_counter() - fit_started_at)
+	if training_verbose > 0:
+		print(f"Training completed in {fit_time_seconds:.3f}s: XGBRegressor")
+
+	configured_n_estimators_raw = model.named_steps["regressor"].get_params().get("n_estimators")
+	configured_n_estimators = int(configured_n_estimators_raw) if configured_n_estimators_raw is not None else 100
+
+	training_control = {
+		"enabled": False,
+		"type": "boosting",
+		"max_steps_configured": configured_n_estimators,
+		"steps_completed": configured_n_estimators,
+		"patience": int(args.n_iter_no_change),
+		"monitor_metric": None,
+		"monitor_split": None,
+		"monitor_direction": None,
+		"best_step": None,
+		"best_score": None,
+		"stopped_early": False,
+	}
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
@@ -449,8 +552,8 @@ if SAVE_MODEL:
 			"std": _round_metric(target_std_train),
 		},
 		"data_sizes": {
-			"n_train": int(len(X_train)),
-			"n_val": 0,
+			"n_train": n_train_effective,
+			"n_val": n_val,
 			"n_test": int(len(X_test)),
 		},
 		"primary_metric": {
@@ -522,6 +625,8 @@ print(results)
 	)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
+	n_val = int(len(X_valid)) if training_control["enabled"] else 0
+	n_train_effective = int(len(X_inner_train)) if training_control["enabled"] else int(len(X_train))
 	regressor_params = _json_safe(model.named_steps["regressor"].get_params())
 	estimator_params_compact = _select_estimator_params(
 		regressor_params,
@@ -550,7 +655,7 @@ print(results)
 		"run_id": run_id,
 		"name": model_name,
 		"timestamp": timestamp,
-		"library": args.library,
+		"library": "xgboost",
 		"task": args.task,
 		"algorithm": "gradient_boosting",
 		"estimator_class": "XGBRegressor",
@@ -567,15 +672,15 @@ print(results)
 			"random_state": int(args.random_state),
 			"stratify": None,
 			"validation": {
-				"enabled": False,
-				"strategy": None,
-				"validation_fraction": None,
-				"random_state": None,
+				"enabled": bool(training_control["enabled"]),
+				"strategy": "explicit_split" if training_control["enabled"] else None,
+				"validation_fraction": float(args.validation_fraction) if training_control["enabled"] else None,
+				"random_state": int(args.random_state) if training_control["enabled"] else None,
 			},
 			"sizes": {
 				"n_rows": data_rows,
-				"n_train": int(len(X_train)),
-				"n_val": 0,
+				"n_train": n_train_effective,
+				"n_val": n_val,
 				"n_test": int(len(X_test)),
 			},
 		},
@@ -603,6 +708,9 @@ print(results)
 			"max_depth": int(args.max_depth),
 			"subsample": float(args.subsample),
 			"colsample_bytree": float(args.colsample_bytree),
+			"min_child_weight": float(args.min_child_weight),
+			"reg_lambda": float(args.reg_lambda),
+			"reg_alpha": float(args.reg_alpha),
 			"objective": "reg:squarederror",
 			"eval_metric": "rmse",
 		},
