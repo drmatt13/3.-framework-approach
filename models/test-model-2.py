@@ -17,7 +17,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, Ridge
 from sklearn.metrics import max_error, mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
@@ -57,6 +57,12 @@ from libraries.model_template_helpers import (
 #   --alpha <float>
 #   --fit-intercept true|false
 #   --l1-ratio <float>
+#   --enable-tuning true|false
+#   --tuning-method grid|random
+#   --cv-folds <int>
+#   --cv-scoring rmse|mae|r2
+#   --cv-n-iter <int>
+#   --cv-n-jobs <int>
 # ---------------------------------------------------------------------
 
 # Default values for optional parameters. These can be overridden via CLI.
@@ -64,13 +70,19 @@ SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
-DEFAULT_PENALTY = "l1"
+DEFAULT_PENALTY = "l2"
 DEFAULT_ALPHA = 1.0 # type: ignore
 DEFAULT_FIT_INTERCEPT = "True" == "True"
 DEFAULT_L1_RATIO = float("0.5")
+DEFAULT_ENABLE_TUNING = "True" == "True"
+DEFAULT_TUNING_METHOD = "random"
+DEFAULT_CV_FOLDS = int("5")
+DEFAULT_CV_SCORING = "mae"
+DEFAULT_CV_N_ITER = int("20")
+DEFAULT_CV_N_JOBS = int("-1")
 
 # Command-line argument parsing.
-parser = argparse.ArgumentParser(description="Linear Regression baseline")
+parser = argparse.ArgumentParser(description="Linear Regression with optional hyperparameter tuning")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
@@ -82,6 +94,12 @@ parser.add_argument("--penalty", choices=["none", "l1", "l2", "elasticnet"], def
 parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA)
 parser.add_argument("--fit-intercept", type=_parse_bool, default=DEFAULT_FIT_INTERCEPT)
 parser.add_argument("--l1-ratio", type=float, default=DEFAULT_L1_RATIO)
+parser.add_argument("--enable-tuning", type=_parse_bool, default=DEFAULT_ENABLE_TUNING)
+parser.add_argument("--tuning-method", choices=["grid", "random"], default=DEFAULT_TUNING_METHOD)
+parser.add_argument("--cv-folds", type=int, default=DEFAULT_CV_FOLDS)
+parser.add_argument("--cv-scoring", choices=["rmse", "mae", "r2"], default=DEFAULT_CV_SCORING)
+parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
+parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
@@ -243,30 +261,121 @@ preprocessor = ColumnTransformer(
 # ================= BUILD MODEL PIPELINE ======================
 # =============================================================
 
-# Select estimator based on --penalty flag.
-#   none        -> LinearRegression (ordinary least squares)
-#   l2          -> Ridge (L2 regularization)
-#   l1          -> Lasso (L1 regularization / sparse solutions)
-#   elasticnet  -> ElasticNet (L1 + L2 mix)
 
-_PENALTY_TO_ESTIMATOR = {
-	"none": lambda: LinearRegression(fit_intercept=args.fit_intercept),
-	"l2": lambda: Ridge(alpha=args.alpha, fit_intercept=args.fit_intercept, random_state=args.random_state),
-	"l1": lambda: Lasso(alpha=args.alpha, fit_intercept=args.fit_intercept, random_state=args.random_state, max_iter=10_000),
-	"elasticnet": lambda: ElasticNet(alpha=args.alpha, l1_ratio=args.l1_ratio, fit_intercept=args.fit_intercept, random_state=args.random_state, max_iter=10_000),
-}
+def _base_regressor_from_flags() -> LinearRegression | Ridge | Lasso | ElasticNet:
+	if args.penalty == "none":
+		return LinearRegression(fit_intercept=args.fit_intercept)
+	if args.penalty == "l2":
+		return Ridge(alpha=args.alpha, fit_intercept=args.fit_intercept, random_state=args.random_state)
+	if args.penalty == "l1":
+		return Lasso(
+			alpha=args.alpha,
+			fit_intercept=args.fit_intercept,
+			random_state=args.random_state,
+			max_iter=10_000,
+		)
+	if args.penalty == "elasticnet":
+		return ElasticNet(
+			alpha=args.alpha,
+			l1_ratio=args.l1_ratio,
+			fit_intercept=args.fit_intercept,
+			random_state=args.random_state,
+			max_iter=10_000,
+		)
+	raise ValueError(f"Unsupported --penalty '{args.penalty}'. Choose from: none, l1, l2, elasticnet")
 
-if args.penalty not in _PENALTY_TO_ESTIMATOR:
-	raise ValueError(f"Unsupported --penalty '{args.penalty}'. Choose from: {', '.join(_PENALTY_TO_ESTIMATOR)}")
 
-regressor = _PENALTY_TO_ESTIMATOR[args.penalty]()
-regressor_name = type(regressor).__name__
+def _cv_scoring_name(name: str) -> str:
+	mapping = {
+		"rmse": "neg_root_mean_squared_error",
+		"mae": "neg_mean_absolute_error",
+		"r2": "r2",
+	}
+	if name not in mapping:
+		raise ValueError(f"Unsupported --cv-scoring '{name}'. Choose from: rmse, mae, r2")
+	return mapping[name]
+
+
+def _build_search_space(penalty: str, random_state: int) -> list[dict[str, list]]:
+	if penalty == "none":
+		return [
+			{
+				"regressor": [LinearRegression()],
+				"regressor__fit_intercept": [True, False],
+			}
+		]
+	if penalty == "l2":
+		return [
+			{
+				"regressor": [Ridge(random_state=random_state)],
+				"regressor__alpha": [1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0],
+				"regressor__fit_intercept": [True, False],
+			}
+		]
+	if penalty == "l1":
+		return [
+			{
+				"regressor": [Lasso(random_state=random_state)],
+				"regressor__alpha": [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
+				"regressor__fit_intercept": [True, False],
+				"regressor__max_iter": [5_000, 10_000, 20_000],
+			}
+		]
+	if penalty == "elasticnet":
+		return [
+			{
+				"regressor": [ElasticNet(random_state=random_state)],
+				"regressor__alpha": [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
+				"regressor__l1_ratio": [0.1, 0.3, 0.5, 0.7, 0.9],
+				"regressor__fit_intercept": [True, False],
+				"regressor__max_iter": [5_000, 10_000, 20_000],
+			}
+		]
+	raise ValueError(f"Unsupported penalty '{penalty}'")
+
+
+def _grid_size(search_space: list[dict[str, list]]) -> int:
+	total = 0
+	for space in search_space:
+		lengths = [len(values) for values in space.values() if isinstance(values, list)]
+		total += int(np.prod(lengths)) if lengths else 0
+	return total
+
+
+def _json_safe_param_value(value):
+	if value is None:
+		return None
+	if isinstance(value, (bool, int, float, str)):
+		if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
+			return None
+		return value
+	if isinstance(value, (np.integer,)):
+		return int(value)
+	if isinstance(value, (np.floating,)):
+		numeric = float(value)
+		if np.isnan(numeric) or np.isinf(numeric):
+			return None
+		return numeric
+	if isinstance(value, (np.bool_,)):
+		return bool(value)
+	if isinstance(value, (list, tuple)):
+		return [_json_safe_param_value(item) for item in value]
+	if isinstance(value, dict):
+		return {str(key): _json_safe_param_value(item) for key, item in value.items()}
+	if hasattr(value, "get_params"):
+		return type(value).__name__
+	return str(value)
+
+
+def _json_safe_best_params(params: dict[str, object]) -> dict[str, object]:
+	return {str(key): _json_safe_param_value(value) for key, value in params.items()}
+
 
 # Bundle preprocessing + model into one inference-ready pipeline.
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
-		("regressor", regressor),
+		("regressor", _base_regressor_from_flags()),
 	]
 )
 
@@ -274,27 +383,104 @@ model = Pipeline(
 # ===================== TRAIN MODEL ===========================
 # =============================================================
 
-# Fit on training data (pipeline fits preprocessors + model).
+selected_cv_scoring = _cv_scoring_name(args.cv_scoring)
+tuning_summary = {
+	"enabled": False,
+	"method": None,
+	"cv_folds": None,
+	"scoring": None,
+	"scoring_sklearn": None,
+	"n_iter": None,
+	"n_candidates": None,
+	"best_score": None,
+	"best_score_std": None,
+	"best_params": None,
+}
+
 fit_started_at = time.perf_counter()
 if training_verbose > 0:
-	print(f"Training started: {regressor_name} (penalty={args.penalty}, alpha={args.alpha})")
-model.fit(X_train, y_train)
+	if args.enable_tuning:
+		print(
+			f"Training started with tuning: method={args.tuning_method}, penalty={args.penalty}, "
+			f"cv={args.cv_folds}, scoring={args.cv_scoring}"
+		)
+	else:
+		print(f"Training started: {type(model.named_steps['regressor']).__name__} (penalty={args.penalty}, alpha={args.alpha})")
+
+if args.enable_tuning:
+	search_space = _build_search_space(args.penalty, int(args.random_state))
+	search = None
+	if args.tuning_method == "grid":
+		search = GridSearchCV(
+			estimator=model,
+			param_grid=search_space,
+			scoring=selected_cv_scoring,
+			cv=int(args.cv_folds),
+			n_jobs=int(args.cv_n_jobs),
+			refit=False,
+		)
+	else:
+		search = RandomizedSearchCV(
+			estimator=model,
+			param_distributions=search_space,
+			n_iter=int(args.cv_n_iter),
+			scoring=selected_cv_scoring,
+			cv=int(args.cv_folds),
+			n_jobs=int(args.cv_n_jobs),
+			refit=False,
+			random_state=int(args.random_state),
+		)
+
+	search.fit(X_train, y_train)
+	best_params = dict(search.best_params_)
+	best_params_for_artifacts = _json_safe_best_params(best_params)
+	model.set_params(**best_params)
+	model.fit(X_train, y_train)
+
+	best_score = float(search.best_score_)
+	if args.cv_scoring in ("rmse", "mae"):
+		best_score = -best_score
+	best_std = None
+	if hasattr(search, "cv_results_") and "std_test_score" in search.cv_results_:
+		best_std = float(search.cv_results_["std_test_score"][search.best_index_])
+		if args.cv_scoring in ("rmse", "mae"):
+			best_std = abs(best_std)
+
+	n_candidates = int(len(search.cv_results_["params"])) if hasattr(search, "cv_results_") else None
+	tuning_summary = {
+		"enabled": True,
+		"method": args.tuning_method,
+		"cv_folds": int(args.cv_folds),
+		"scoring": args.cv_scoring,
+		"scoring_sklearn": selected_cv_scoring,
+		"n_iter": int(args.cv_n_iter) if args.tuning_method == "random" else None,
+		"n_candidates": n_candidates,
+		"best_score": _round_metric(best_score),
+		"best_score_std": _round_metric(best_std) if best_std is not None else None,
+		"best_params": _compact_metadata(best_params_for_artifacts),
+	}
+else:
+	model.fit(X_train, y_train)
+
 fit_time_seconds = float(time.perf_counter() - fit_started_at)
+regressor_name = type(model.named_steps["regressor"]).__name__
 if training_verbose > 0:
 	print(f"Training completed in {fit_time_seconds:.3f}s: {regressor_name}")
 
 training_control = {
-	"enabled": False,
-	"strategy": None,
-	"monitor_name": None,
-	"monitor_mode": None,
-	"max_steps_configured": None,
-	"steps_completed": None,
+	"enabled": bool(tuning_summary["enabled"]),
+	"strategy": f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
+	"monitor_name": f"cv_{args.cv_scoring}" if tuning_summary["enabled"] else None,
+	"monitor_mode": "min" if args.cv_scoring in ("rmse", "mae") else "max",
+	"max_steps_configured": tuning_summary["n_candidates"] if args.tuning_method == "grid" else (int(args.cv_n_iter) if tuning_summary["enabled"] else None),
+	"steps_completed": int(args.cv_folds) * int(tuning_summary["n_candidates"]) if tuning_summary["enabled"] and tuning_summary["n_candidates"] is not None else None,
 	"best_step": None,
-	"best_score": None,
+	"best_score": tuning_summary["best_score"],
 	"n_iter_no_change": None,
 	"validation_fraction": None,
 }
+if not tuning_summary["enabled"]:
+	training_control["monitor_mode"] = None
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
@@ -351,7 +537,7 @@ print("First 5 predictions:", predictions[:5])  # Sample predictions for quick s
 print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true values for sanity check
 
 # =============================================================
-# ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
+# ========= EXPORT ARTIFACTS & MODEL REGISTRY ================
 # =============================================================
 	
 # Artifact export and registry logging.
@@ -418,6 +604,7 @@ if SAVE_MODEL:
 			"direction": "min",
 			"value": _round_metric(test_rmse),
 		},
+		"tuning": tuning_summary,
 	}
 	metrics["training_control"] = training_control
 	metrics["selection"] = training_control
@@ -505,8 +692,8 @@ print(results)
 		"library": "scikit-learn",
 		"task": "regression",
 		"algorithm": "linear_regression",
-		"estimator_class": regressor_name,
-		"model_id": f"sklearn.{regressor_name.lower()}",
+		"estimator_class": type(model.named_steps["regressor"]).__name__,
+		"model_id": f"sklearn.{type(model.named_steps['regressor']).__name__.lower()}",
 		"dataset": {
 			"path": str(data_path.relative_to(_project_root())),
 			"sha256": data_hash,
@@ -519,10 +706,10 @@ print(results)
 			"random_state": int(args.random_state),
 			"stratify": None,
 			"validation": {
-				"enabled": False,
-				"strategy": None,
+				"enabled": bool(tuning_summary["enabled"]),
+				"strategy": f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
 				"validation_fraction": None,
-				"random_state": None,
+				"random_state": int(args.random_state) if tuning_summary["enabled"] else None,
 			},
 			"sizes": {
 				"n_rows": data_rows,
@@ -553,14 +740,21 @@ print(results)
 			"alpha": float(args.alpha),
 			"fit_intercept": bool(args.fit_intercept),
 			"l1_ratio": float(args.l1_ratio) if args.penalty == "elasticnet" else None,
+			"enable_tuning": bool(tuning_summary["enabled"]),
+			"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
+			"cv_folds": int(args.cv_folds) if tuning_summary["enabled"] else None,
+			"cv_scoring": args.cv_scoring if tuning_summary["enabled"] else None,
+			"cv_n_iter": int(args.cv_n_iter) if tuning_summary["enabled"] and args.tuning_method == "random" else None,
+			"cv_n_jobs": int(args.cv_n_jobs) if tuning_summary["enabled"] else None,
 		},
+		"tuning": tuning_summary,
 		"training_control": training_control,
 		"selection": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),
 			"random_state_effective": int(args.random_state),
-			"n_jobs": None,
+			"n_jobs": int(args.cv_n_jobs) if tuning_summary["enabled"] else None,
 		},
 		"artifacts": _artifact_map(
 			run_dir,
@@ -605,6 +799,9 @@ print(results)
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
+				"tuning_enabled": bool(tuning_summary["enabled"]),
+				"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
+				"cv_best_score": tuning_summary["best_score"],
 				"mse": _round_metric(test_mse),
 				"mae": _round_metric(test_mae),
 				"rmse": _round_metric(test_rmse),

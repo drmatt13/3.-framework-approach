@@ -28,6 +28,12 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #   --verbose=0|1|2|auto
 #   --penalty=none|l1|l2|elasticnet
 #   --alpha=<float>
+#   --enable-tuning=true|false
+#   --tuning-method=grid|random
+#   --cv-folds=<int>
+#   --cv-scoring=rmse|mae|r2
+#   --cv-n-iter=<int>
+#   --cv-n-jobs=<int>
 
 # Logistic Regression (classification only)
 #   --library=scikit-learn 
@@ -203,6 +209,12 @@ DEFAULT_LINEAR_REGRESSION_PARAMS_BY_TEMPLATE = {
         "alpha": 1.0,
         "fit_intercept": True,
         "l1_ratio": 0.5,
+        "enable_tuning": False,
+        "tuning_method": "grid",
+        "cv_folds": 5,
+        "cv_scoring": "rmse",
+        "cv_n_iter": 20,
+        "cv_n_jobs": -1,
     },
 }
 
@@ -426,6 +438,18 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         default_lr_alpha = args.default_lr_alpha if args.default_lr_alpha is not None else lr_defaults["alpha"]
         default_lr_fit_intercept = args.default_lr_fit_intercept if args.default_lr_fit_intercept is not None else lr_defaults["fit_intercept"]
         default_lr_l1_ratio = args.default_lr_l1_ratio if args.default_lr_l1_ratio is not None else lr_defaults["l1_ratio"]
+        default_lr_enable_tuning = (
+            args.default_lr_enable_tuning if args.default_lr_enable_tuning is not None else lr_defaults["enable_tuning"]
+        )
+        default_lr_tuning_method = (
+            args.default_lr_tuning_method if args.default_lr_tuning_method is not None else lr_defaults["tuning_method"]
+        )
+        default_lr_cv_folds = args.default_lr_cv_folds if args.default_lr_cv_folds is not None else lr_defaults["cv_folds"]
+        default_lr_cv_scoring = (
+            args.default_lr_cv_scoring if args.default_lr_cv_scoring is not None else lr_defaults["cv_scoring"]
+        )
+        default_lr_cv_n_iter = args.default_lr_cv_n_iter if args.default_lr_cv_n_iter is not None else lr_defaults["cv_n_iter"]
+        default_lr_cv_n_jobs = args.default_lr_cv_n_jobs if args.default_lr_cv_n_jobs is not None else lr_defaults["cv_n_jobs"]
         replacements.update(
             {
                 "DATA_TASK_DIR": _task_dataset_dir(args.task),
@@ -438,6 +462,12 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                 "LR_ALPHA_DEFAULT": str(float(default_lr_alpha)),
                 "LR_FIT_INTERCEPT_DEFAULT": "True" if default_lr_fit_intercept else "False",
                 "LR_L1_RATIO_DEFAULT": str(float(default_lr_l1_ratio)),
+                "LR_ENABLE_TUNING_DEFAULT": "True" if default_lr_enable_tuning else "False",
+                "LR_TUNING_METHOD_DEFAULT": str(default_lr_tuning_method),
+                "LR_CV_FOLDS_DEFAULT": str(int(default_lr_cv_folds)),
+                "LR_CV_SCORING_DEFAULT": str(default_lr_cv_scoring),
+                "LR_CV_N_ITER_DEFAULT": str(int(default_lr_cv_n_iter)),
+                "LR_CV_N_JOBS_DEFAULT": str(int(default_lr_cv_n_jobs)),
             }
         )
 
@@ -811,6 +841,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Invalid --default-rf-max-depth. Must be a positive integer")
     if args.default_rf_min_samples_leaf is not None and args.default_rf_min_samples_leaf < 1:
         raise ValueError("Invalid --default-rf-min-samples-leaf. Must be >= 1")
+    if args.default_lr_l1_ratio is not None and not (0.0 <= args.default_lr_l1_ratio <= 1.0):
+        raise ValueError("Invalid --default-lr-l1-ratio. Allowed range: 0 <= value <= 1")
+    if args.default_lr_cv_folds is not None and args.default_lr_cv_folds < 2:
+        raise ValueError("Invalid --default-lr-cv-folds. Must be >= 2")
+    if args.default_lr_cv_n_iter is not None and args.default_lr_cv_n_iter <= 0:
+        raise ValueError("Invalid --default-lr-cv-n-iter. Must be a positive integer")
 
     if args.starter_dataset is not None:
         allowed = STARTER_DATASETS_BY_FAMILY[args.task]
@@ -861,9 +897,22 @@ def validate_args(args: argparse.Namespace) -> None:
                 "Invalid flags: --default-rf-n-estimators/--default-rf-max-depth/"
                 "--default-rf-min-samples-leaf/--default-rf-max-features are scikit-learn random_forest-only"
             )
-        if args.default_lr_penalty is not None or args.default_lr_alpha is not None or args.default_lr_fit_intercept is not None or args.default_lr_l1_ratio is not None:
+        if (
+            args.default_lr_penalty is not None
+            or args.default_lr_alpha is not None
+            or args.default_lr_fit_intercept is not None
+            or args.default_lr_l1_ratio is not None
+            or args.default_lr_enable_tuning is not None
+            or args.default_lr_tuning_method is not None
+            or args.default_lr_cv_folds is not None
+            or args.default_lr_cv_scoring is not None
+            or args.default_lr_cv_n_iter is not None
+            or args.default_lr_cv_n_jobs is not None
+        ):
             raise ValueError(
-                "Invalid flags: --default-lr-penalty/--default-lr-alpha/--default-lr-fit-intercept/--default-lr-l1-ratio are scikit-learn linear_regression-only"
+                "Invalid flags: --default-lr-penalty/--default-lr-alpha/--default-lr-fit-intercept/--default-lr-l1-ratio/"
+                "--default-lr-enable-tuning/--default-lr-tuning-method/--default-lr-cv-folds/--default-lr-cv-scoring/"
+                "--default-lr-cv-n-iter/--default-lr-cv-n-jobs are scikit-learn linear_regression-only"
             )
         if args.default_xgb_min_child_weight is not None or args.default_xgb_reg_lambda is not None or args.default_xgb_reg_alpha is not None:
             raise ValueError(
@@ -923,9 +972,22 @@ def validate_args(args: argparse.Namespace) -> None:
                     "Invalid flags: --default-rf-n-estimators/--default-rf-max-depth/"
                     "--default-rf-min-samples-leaf/--default-rf-max-features are scikit-learn random_forest-only"
                 )
-            if args.default_lr_penalty is not None or args.default_lr_alpha is not None or args.default_lr_fit_intercept is not None or args.default_lr_l1_ratio is not None:
+            if (
+                args.default_lr_penalty is not None
+                or args.default_lr_alpha is not None
+                or args.default_lr_fit_intercept is not None
+                or args.default_lr_l1_ratio is not None
+                or args.default_lr_enable_tuning is not None
+                or args.default_lr_tuning_method is not None
+                or args.default_lr_cv_folds is not None
+                or args.default_lr_cv_scoring is not None
+                or args.default_lr_cv_n_iter is not None
+                or args.default_lr_cv_n_jobs is not None
+            ):
                 raise ValueError(
-                    "Invalid flags: --default-lr-penalty/--default-lr-alpha/--default-lr-fit-intercept/--default-lr-l1-ratio are scikit-learn linear_regression-only"
+                    "Invalid flags: --default-lr-penalty/--default-lr-alpha/--default-lr-fit-intercept/--default-lr-l1-ratio/"
+                    "--default-lr-enable-tuning/--default-lr-tuning-method/--default-lr-cv-folds/--default-lr-cv-scoring/"
+                    "--default-lr-cv-n-iter/--default-lr-cv-n-jobs are scikit-learn linear_regression-only"
                 )
         elif args.model == "linear_regression":
             if args.default_c is not None or args.default_solver is not None or args.default_logistic_penalty is not None or args.default_logistic_class_weight is not None:
@@ -940,12 +1002,29 @@ def validate_args(args: argparse.Namespace) -> None:
                     "Invalid flags: --default-rf-n-estimators/--default-rf-max-depth/"
                     "--default-rf-min-samples-leaf/--default-rf-max-features are scikit-learn random_forest-only"
                 )
+            if args.default_lr_tuning_method is not None and args.default_lr_tuning_method not in {"grid", "random"}:
+                raise ValueError("Invalid --default-lr-tuning-method. Allowed: grid, random")
+            if args.default_lr_cv_scoring is not None and args.default_lr_cv_scoring not in {"rmse", "mae", "r2"}:
+                raise ValueError("Invalid --default-lr-cv-scoring. Allowed: rmse, mae, r2")
         else:
             if args.default_c is not None or args.default_solver is not None or args.default_logistic_penalty is not None or args.default_logistic_class_weight is not None:
                 raise ValueError("Invalid flags: --default-c/--default-solver/--default-logistic-penalty/--default-logistic-class-weight are scikit-learn logistic-only")
-            if args.default_lr_penalty is not None or args.default_lr_alpha is not None or args.default_lr_fit_intercept is not None or args.default_lr_l1_ratio is not None:
+            if (
+                args.default_lr_penalty is not None
+                or args.default_lr_alpha is not None
+                or args.default_lr_fit_intercept is not None
+                or args.default_lr_l1_ratio is not None
+                or args.default_lr_enable_tuning is not None
+                or args.default_lr_tuning_method is not None
+                or args.default_lr_cv_folds is not None
+                or args.default_lr_cv_scoring is not None
+                or args.default_lr_cv_n_iter is not None
+                or args.default_lr_cv_n_jobs is not None
+            ):
                 raise ValueError(
-                    "Invalid flags: --default-lr-penalty/--default-lr-alpha/--default-lr-fit-intercept/--default-lr-l1-ratio are scikit-learn linear_regression-only"
+                    "Invalid flags: --default-lr-penalty/--default-lr-alpha/--default-lr-fit-intercept/--default-lr-l1-ratio/"
+                    "--default-lr-enable-tuning/--default-lr-tuning-method/--default-lr-cv-folds/--default-lr-cv-scoring/"
+                    "--default-lr-cv-n-iter/--default-lr-cv-n-jobs are scikit-learn linear_regression-only"
                 )
 
         return
@@ -1159,6 +1238,42 @@ def main():
         type=float,
         required=False,
         help="Default l1_ratio for linear regression ElasticNet (0-1)",
+    )
+    parser.add_argument(
+        "--default-lr-enable-tuning",
+        type=_parse_bool,
+        required=False,
+        help="Default enable_tuning for linear regression template",
+    )
+    parser.add_argument(
+        "--default-lr-tuning-method",
+        required=False,
+        choices=["grid", "random"],
+        help="Default tuning method for linear regression template",
+    )
+    parser.add_argument(
+        "--default-lr-cv-folds",
+        type=int,
+        required=False,
+        help="Default cross-validation folds for linear regression template",
+    )
+    parser.add_argument(
+        "--default-lr-cv-scoring",
+        required=False,
+        choices=["rmse", "mae", "r2"],
+        help="Default CV scoring for linear regression template",
+    )
+    parser.add_argument(
+        "--default-lr-cv-n-iter",
+        type=int,
+        required=False,
+        help="Default random-search iterations for linear regression template",
+    )
+    parser.add_argument(
+        "--default-lr-cv-n-jobs",
+        type=int,
+        required=False,
+        help="Default n_jobs for linear regression tuning CV",
     )
     parser.add_argument(
         "--default-logistic-penalty",

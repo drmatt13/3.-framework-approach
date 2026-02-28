@@ -225,9 +225,42 @@ def _get_profile_defaults(
 
     elif library == "scikit-learn" and model == "linear_regression":
         presets = {
-            "Quick": {"penalty": "none", "alpha": 1.0, "fit_intercept": True, "l1_ratio": 0.5},
-            "Balanced": {"penalty": "l2", "alpha": 1.0, "fit_intercept": True, "l1_ratio": 0.5},
-            "Thorough": {"penalty": "l2", "alpha": 0.1, "fit_intercept": True, "l1_ratio": 0.5},
+            "Quick": {
+                "penalty": "none",
+                "alpha": 1.0,
+                "fit_intercept": True,
+                "l1_ratio": 0.5,
+                "enable_tuning": False,
+                "tuning_method": "grid",
+                "cv_folds": 5,
+                "cv_scoring": "rmse",
+                "cv_n_iter": 20,
+                "cv_n_jobs": -1,
+            },
+            "Balanced": {
+                "penalty": "l2",
+                "alpha": 1.0,
+                "fit_intercept": True,
+                "l1_ratio": 0.5,
+                "enable_tuning": False,
+                "tuning_method": "grid",
+                "cv_folds": 5,
+                "cv_scoring": "rmse",
+                "cv_n_iter": 20,
+                "cv_n_jobs": -1,
+            },
+            "Thorough": {
+                "penalty": "l2",
+                "alpha": 0.1,
+                "fit_intercept": True,
+                "l1_ratio": 0.5,
+                "enable_tuning": True,
+                "tuning_method": "grid",
+                "cv_folds": 5,
+                "cv_scoring": "rmse",
+                "cv_n_iter": 30,
+                "cv_n_jobs": -1,
+            },
         }
         p = presets.get(profile, presets["Balanced"])
         defaults = {
@@ -235,6 +268,12 @@ def _get_profile_defaults(
             "default_lr_alpha": str(p["alpha"]),
             "default_lr_fit_intercept": p["fit_intercept"],
             "default_lr_l1_ratio": str(p["l1_ratio"]),
+            "default_lr_enable_tuning": p["enable_tuning"],
+            "default_lr_tuning_method": p["tuning_method"],
+            "default_lr_cv_folds": str(p["cv_folds"]),
+            "default_lr_cv_scoring": p["cv_scoring"],
+            "default_lr_cv_n_iter": str(p["cv_n_iter"]),
+            "default_lr_cv_n_jobs": str(p["cv_n_jobs"]),
         }
 
     return defaults
@@ -438,6 +477,12 @@ def main() -> int:
     default_lr_alpha = None
     default_lr_fit_intercept = None
     default_lr_l1_ratio = None
+    default_lr_enable_tuning = None
+    default_lr_tuning_method = None
+    default_lr_cv_folds = None
+    default_lr_cv_scoring = None
+    default_lr_cv_n_iter = None
+    default_lr_cv_n_jobs = None
     default_xgb_min_child_weight = None
     default_xgb_reg_lambda = None
     default_xgb_reg_alpha = None
@@ -665,11 +710,98 @@ def main() -> int:
                     return 0
             else:
                 default_lr_l1_ratio = "0.5"
+
+            default_lr_enable_tuning = questionary.confirm(
+                "Enable hyperparameter tuning by default in generated template? (--enable-tuning)",
+                default=False,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if default_lr_enable_tuning is None:
+                print("Cancelled.")
+                return 0
+
+            if default_lr_enable_tuning:
+                if default_lr_penalty == "none":
+                    print(
+                        "Note: penalty=none with tuning enabled uses a small search space "
+                        "(primarily fit_intercept)."
+                    )
+
+                default_lr_tuning_method = questionary.select(
+                    "Default tuning method (--tuning-method):",
+                    choices=["grid", "random"],
+                    default="grid",
+                    use_shortcuts=True,
+                    style=CUSTOM_STYLE,
+                ).ask()
+                if default_lr_tuning_method is None:
+                    print("Cancelled.")
+                    return 0
+
+                default_lr_cv_folds = _ask_text(
+                    "Default CV folds (--cv-folds, >=2):",
+                    default="5",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
+                )
+                if default_lr_cv_folds is None:
+                    print("Cancelled.")
+                    return 0
+
+                default_lr_cv_scoring = questionary.select(
+                    "Default CV scoring (--cv-scoring):",
+                    choices=["rmse", "mae", "r2"],
+                    default="rmse",
+                    use_shortcuts=True,
+                    style=CUSTOM_STYLE,
+                ).ask()
+                if default_lr_cv_scoring is None:
+                    print("Cancelled.")
+                    return 0
+
+                if default_lr_tuning_method == "random":
+                    default_lr_cv_n_iter = _ask_text(
+                        "Default random-search iterations (--cv-n-iter, >0):",
+                        default="20",
+                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                    )
+                    if default_lr_cv_n_iter is None:
+                        print("Cancelled.")
+                        return 0
+
+                default_lr_cv_n_jobs = _ask_text(
+                    "Default CV parallel jobs (--cv-n-jobs, e.g., -1):",
+                    default="-1",
+                    validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
+                )
+                if default_lr_cv_n_jobs is None:
+                    print("Cancelled.")
+                    return 0
         else:
             default_lr_penalty = profile_defaults.get("default_lr_penalty", "none")
             default_lr_alpha = profile_defaults.get("default_lr_alpha", "1.0")
             default_lr_fit_intercept = profile_defaults.get("default_lr_fit_intercept", True)
             default_lr_l1_ratio = profile_defaults.get("default_lr_l1_ratio", "0.5")
+            default_lr_enable_tuning = profile_defaults.get("default_lr_enable_tuning", False)
+            default_lr_tuning_method = profile_defaults.get("default_lr_tuning_method", "grid")
+            default_lr_cv_folds = profile_defaults.get("default_lr_cv_folds", "5")
+            default_lr_cv_scoring = profile_defaults.get("default_lr_cv_scoring", "rmse")
+            default_lr_cv_n_iter = profile_defaults.get("default_lr_cv_n_iter", "20")
+            default_lr_cv_n_jobs = profile_defaults.get("default_lr_cv_n_jobs", "-1")
+
+        print("\nResolved linear regression defaults:")
+        print(f"  penalty={default_lr_penalty}, alpha={default_lr_alpha}, fit_intercept={default_lr_fit_intercept}")
+        if default_lr_penalty == "elasticnet":
+            print(f"  l1_ratio={default_lr_l1_ratio}")
+        print(f"  enable_tuning={default_lr_enable_tuning}")
+        if default_lr_enable_tuning:
+            print(
+                f"  tuning_method={default_lr_tuning_method}, cv_folds={default_lr_cv_folds}, "
+                f"cv_scoring={default_lr_cv_scoring}, cv_n_jobs={default_lr_cv_n_jobs}"
+            )
+            if str(default_lr_tuning_method) == "random":
+                print(f"  cv_n_iter={default_lr_cv_n_iter}")
+            if default_lr_penalty == "none":
+                print("  note: penalty=none limits tuning search space (mostly fit_intercept)")
 
     if _supports_default_max_iter(library, model, task):
         if use_custom:
@@ -837,6 +969,18 @@ def main() -> int:
         cmd.extend(["--default-lr-fit-intercept", "true" if default_lr_fit_intercept else "false"])
     if default_lr_l1_ratio is not None:
         cmd.extend(["--default-lr-l1-ratio", str(float(default_lr_l1_ratio))])
+    if default_lr_enable_tuning is not None:
+        cmd.extend(["--default-lr-enable-tuning", "true" if default_lr_enable_tuning else "false"])
+    if default_lr_enable_tuning and default_lr_tuning_method is not None:
+        cmd.extend(["--default-lr-tuning-method", str(default_lr_tuning_method)])
+    if default_lr_enable_tuning and default_lr_cv_folds is not None:
+        cmd.extend(["--default-lr-cv-folds", str(int(default_lr_cv_folds))])
+    if default_lr_enable_tuning and default_lr_cv_scoring is not None:
+        cmd.extend(["--default-lr-cv-scoring", str(default_lr_cv_scoring)])
+    if default_lr_enable_tuning and default_lr_tuning_method == "random" and default_lr_cv_n_iter is not None:
+        cmd.extend(["--default-lr-cv-n-iter", str(int(default_lr_cv_n_iter))])
+    if default_lr_enable_tuning and default_lr_cv_n_jobs is not None:
+        cmd.extend(["--default-lr-cv-n-jobs", str(int(default_lr_cv_n_jobs))])
 
     # Add TensorFlow-only flags where necessary
     if library == "tensorflow":
