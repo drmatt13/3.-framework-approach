@@ -64,10 +64,10 @@ SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
-DEFAULT_PENALTY = "{{LR_PENALTY_DEFAULT}}"
-DEFAULT_ALPHA = {{LR_ALPHA_DEFAULT}} # type: ignore
-DEFAULT_FIT_INTERCEPT = "{{LR_FIT_INTERCEPT_DEFAULT}}" == "True"
-DEFAULT_L1_RATIO = float("{{LR_L1_RATIO_DEFAULT}}")
+DEFAULT_PENALTY = "l1"
+DEFAULT_ALPHA = 1.0 # type: ignore
+DEFAULT_FIT_INTERCEPT = "True" == "True"
+DEFAULT_L1_RATIO = float("0.5")
 
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Linear Regression baseline")
@@ -118,9 +118,9 @@ _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 # Template injection points:
 #   - DATA_TASK_DIR / DATA_FILE
 #   - READ_CSV_STATEMENT / POST_READ_DATASET_SETUP
-data_path = _project_root() / "data" / "template_data" / "{{DATA_TASK_DIR}}" / "{{DATA_FILE}}"
-{{READ_CSV_STATEMENT}}
-{{POST_READ_DATASET_SETUP}}
+data_path = _project_root() / "data" / "template_data" / "regression" / "ames_housing.csv"
+df = pd.read_csv(data_path)
+
 
 # Drop common CSV index artifacts (e.g., "Unnamed: 0") so they never leak into features.
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
@@ -147,8 +147,8 @@ df = df.replace({pd.NA: np.nan})
 # Template injection points:
 #   - TARGET_COLUMN
 #   - FEATURE_DROP_COLUMNS
-TARGET_COLUMN = "{{TARGET_COLUMN}}"
-COLUMNS_TO_DROP = {{FEATURE_DROP_COLUMNS}}
+TARGET_COLUMN = "SalePrice"
+COLUMNS_TO_DROP = ["SalePrice", "Order", "PID"]
 
 if TARGET_COLUMN not in df.columns:
 	raise ValueError(f"Target column '{TARGET_COLUMN}' not found in dataset.")

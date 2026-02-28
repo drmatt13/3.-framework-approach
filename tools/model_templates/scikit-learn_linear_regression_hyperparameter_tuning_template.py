@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import itertools
 import json
 from functools import partial
 import numpy as np
@@ -17,7 +18,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, Ridge
 from sklearn.metrics import max_error, mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
@@ -57,6 +58,12 @@ from libraries.model_template_helpers import (
 #   --alpha <float>
 #   --fit-intercept true|false
 #   --l1-ratio <float>
+#   --enable-tuning true|false
+#   --tuning-method grid|random
+#   --cv-folds <int>
+#   --cv-scoring rmse|mae|r2
+#   --cv-n-iter <int>
+#   --cv-n-jobs <int>
 # ---------------------------------------------------------------------
 
 # Default values for optional parameters. These can be overridden via CLI.
@@ -68,9 +75,15 @@ DEFAULT_PENALTY = "{{LR_PENALTY_DEFAULT}}"
 DEFAULT_ALPHA = {{LR_ALPHA_DEFAULT}} # type: ignore
 DEFAULT_FIT_INTERCEPT = "{{LR_FIT_INTERCEPT_DEFAULT}}" == "True"
 DEFAULT_L1_RATIO = float("{{LR_L1_RATIO_DEFAULT}}")
+DEFAULT_ENABLE_TUNING = False
+DEFAULT_TUNING_METHOD = "grid"
+DEFAULT_CV_FOLDS = 5
+DEFAULT_CV_SCORING = "rmse"
+DEFAULT_CV_N_ITER = 20
+DEFAULT_CV_N_JOBS = -1
 
 # Command-line argument parsing.
-parser = argparse.ArgumentParser(description="Linear Regression baseline")
+parser = argparse.ArgumentParser(description="Linear Regression with optional hyperparameter tuning")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
@@ -82,6 +95,12 @@ parser.add_argument("--penalty", choices=["none", "l1", "l2", "elasticnet"], def
 parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA)
 parser.add_argument("--fit-intercept", type=_parse_bool, default=DEFAULT_FIT_INTERCEPT)
 parser.add_argument("--l1-ratio", type=float, default=DEFAULT_L1_RATIO)
+parser.add_argument("--enable-tuning", type=_parse_bool, default=DEFAULT_ENABLE_TUNING)
+parser.add_argument("--tuning-method", choices=["grid", "random"], default=DEFAULT_TUNING_METHOD)
+parser.add_argument("--cv-folds", type=int, default=DEFAULT_CV_FOLDS)
+parser.add_argument("--cv-scoring", choices=["rmse", "mae", "r2"], default=DEFAULT_CV_SCORING)
+parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
+parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
@@ -274,27 +293,140 @@ model = Pipeline(
 # ===================== TRAIN MODEL ===========================
 # =============================================================
 
-# Fit on training data (pipeline fits preprocessors + model).
-fit_started_at = time.perf_counter()
-if training_verbose > 0:
-	print(f"Training started: {regressor_name} (penalty={args.penalty}, alpha={args.alpha})")
-model.fit(X_train, y_train)
-fit_time_seconds = float(time.perf_counter() - fit_started_at)
-if training_verbose > 0:
-	print(f"Training completed in {fit_time_seconds:.3f}s: {regressor_name}")
+def _cv_scoring_name(name: str) -> str:
+	mapping = {
+		"rmse": "neg_root_mean_squared_error",
+		"mae": "neg_mean_absolute_error",
+		"r2": "r2",
+	}
+	if name not in mapping:
+		raise ValueError(f"Unsupported cv scoring '{name}'")
+	return mapping[name]
 
-training_control = {
-	"enabled": False,
-	"strategy": None,
-	"monitor_name": None,
-	"monitor_mode": None,
-	"max_steps_configured": None,
-	"steps_completed": None,
-	"best_step": None,
-	"best_score": None,
-	"n_iter_no_change": None,
-	"validation_fraction": None,
-}
+
+def _candidate_space_for_penalty(penalty: str) -> list[dict[str, list]]:
+	if penalty == "none":
+		return [
+			{
+				"regressor": [LinearRegression()],
+				"regressor__fit_intercept": [True, False],
+			}
+		]
+	if penalty == "l2":
+		return [
+			{
+				"regressor": [Ridge(random_state=args.random_state)],
+				"regressor__alpha": [1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0],
+				"regressor__fit_intercept": [True, False],
+			}
+		]
+	if penalty == "l1":
+		return [
+			{
+				"regressor": [Lasso(random_state=args.random_state)],
+				"regressor__alpha": [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
+				"regressor__fit_intercept": [True, False],
+				"regressor__max_iter": [5_000, 10_000, 20_000],
+			}
+		]
+	if penalty == "elasticnet":
+		return [
+			{
+				"regressor": [ElasticNet(random_state=args.random_state)],
+				"regressor__alpha": [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
+				"regressor__l1_ratio": [0.1, 0.3, 0.5, 0.7, 0.9],
+				"regressor__fit_intercept": [True, False],
+				"regressor__max_iter": [5_000, 10_000, 20_000],
+			}
+		]
+	raise ValueError(f"Unsupported penalty '{penalty}'")
+
+
+def _grid_size(search_space: list[dict[str, list]]) -> int:
+	size = 0
+	for space in search_space:
+		lengths = [len(values) for values in space.values() if isinstance(values, list)]
+		size += int(np.prod(lengths)) if lengths else 0
+	return size
+
+
+fit_started_at = time.perf_counter()
+selected_cv_scoring = _cv_scoring_name(args.cv_scoring)
+
+if args.enable_tuning:
+	search_space = _candidate_space_for_penalty(args.penalty)
+	if args.tuning_method == "grid":
+		tuner = GridSearchCV(
+			estimator=model,
+			param_grid=search_space,
+			scoring=selected_cv_scoring,
+			cv=int(args.cv_folds),
+			n_jobs=int(args.cv_n_jobs),
+			refit=True,
+		)
+		tuning_trials = _grid_size(search_space)
+	else:
+		tuner = RandomizedSearchCV(
+			estimator=model,
+			param_distributions=search_space,
+			n_iter=int(args.cv_n_iter),
+			scoring=selected_cv_scoring,
+			cv=int(args.cv_folds),
+			n_jobs=int(args.cv_n_jobs),
+			refit=True,
+			random_state=int(args.random_state),
+		)
+		tuning_trials = int(args.cv_n_iter)
+
+	if training_verbose > 0:
+		print(
+			f"Training started with tuning: method={args.tuning_method}, penalty={args.penalty}, "
+			f"cv={args.cv_folds}, scoring={args.cv_scoring}"
+		)
+	tuner.fit(X_train, y_train)
+	model = tuner.best_estimator_
+	regressor_name = type(model.named_steps["regressor"]).__name__
+	fit_time_seconds = float(time.perf_counter() - fit_started_at)
+	if training_verbose > 0:
+		print(f"Training completed in {fit_time_seconds:.3f}s: {regressor_name} (tuned)")
+
+	best_score_raw = tuner.best_score_
+	if args.cv_scoring in ("rmse", "mae"):
+		best_score_raw = -float(best_score_raw)
+	else:
+		best_score_raw = float(best_score_raw)
+
+	training_control = {
+		"enabled": True,
+		"strategy": f"{args.tuning_method}_search_cv",
+		"monitor_name": f"cv_{args.cv_scoring}",
+		"monitor_mode": "min" if args.cv_scoring in ("rmse", "mae") else "max",
+		"max_steps_configured": tuning_trials,
+		"steps_completed": int(getattr(tuner, "n_splits_", args.cv_folds)) * int(tuning_trials),
+		"best_step": None,
+		"best_score": _round_metric(best_score_raw),
+		"n_iter_no_change": None,
+		"validation_fraction": None,
+	}
+else:
+	if training_verbose > 0:
+		print(f"Training started: {regressor_name} (penalty={args.penalty}, alpha={args.alpha})")
+	model.fit(X_train, y_train)
+	fit_time_seconds = float(time.perf_counter() - fit_started_at)
+	if training_verbose > 0:
+		print(f"Training completed in {fit_time_seconds:.3f}s: {regressor_name}")
+	training_control = {
+		"enabled": False,
+		"strategy": None,
+		"monitor_name": None,
+		"monitor_mode": None,
+		"max_steps_configured": None,
+		"steps_completed": None,
+		"best_step": None,
+		"best_score": None,
+		"n_iter_no_change": None,
+		"validation_fraction": None,
+	}
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
@@ -351,7 +483,7 @@ print("First 5 predictions:", predictions[:5])  # Sample predictions for quick s
 print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true values for sanity check
 
 # =============================================================
-# ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
+# ========= EXPORT ARTIFACTS & MODEL REGISTRY ================
 # =============================================================
 	
 # Artifact export and registry logging.
@@ -519,10 +651,10 @@ print(results)
 			"random_state": int(args.random_state),
 			"stratify": None,
 			"validation": {
-				"enabled": False,
-				"strategy": None,
+				"enabled": args.enable_tuning,
+				"strategy": f"{args.tuning_method}_search_cv" if args.enable_tuning else None,
 				"validation_fraction": None,
-				"random_state": None,
+				"random_state": int(args.random_state) if args.enable_tuning else None,
 			},
 			"sizes": {
 				"n_rows": data_rows,
@@ -553,6 +685,12 @@ print(results)
 			"alpha": float(args.alpha),
 			"fit_intercept": bool(args.fit_intercept),
 			"l1_ratio": float(args.l1_ratio) if args.penalty == "elasticnet" else None,
+			"enable_tuning": bool(args.enable_tuning),
+			"tuning_method": args.tuning_method if args.enable_tuning else None,
+			"cv_folds": int(args.cv_folds) if args.enable_tuning else None,
+			"cv_scoring": args.cv_scoring if args.enable_tuning else None,
+			"cv_n_iter": int(args.cv_n_iter) if args.enable_tuning and args.tuning_method == "random" else None,
+			"cv_n_jobs": int(args.cv_n_jobs) if args.enable_tuning else None,
 		},
 		"training_control": training_control,
 		"selection": training_control,
@@ -560,7 +698,7 @@ print(results)
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),
 			"random_state_effective": int(args.random_state),
-			"n_jobs": None,
+			"n_jobs": int(args.cv_n_jobs) if args.enable_tuning else None,
 		},
 		"artifacts": _artifact_map(
 			run_dir,
@@ -605,6 +743,8 @@ print(results)
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
+				"tuning_enabled": bool(args.enable_tuning),
+				"tuning_method": args.tuning_method if args.enable_tuning else None,
 				"mse": _round_metric(test_mse),
 				"mae": _round_metric(test_mae),
 				"rmse": _round_metric(test_rmse),

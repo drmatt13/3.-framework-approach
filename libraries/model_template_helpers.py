@@ -25,15 +25,12 @@ def find_project_root(marker_file: str = "requirements.txt") -> Path:
     return Path(__file__).resolve().parents[1]
 
 def validate_etl_outputs(
-    project_root,
     data_path,
     df,
     X,
     y,
     target_column_name,
 ) -> None:
-    if not isinstance(project_root, Path):
-        raise TypeError("ETL contract violation: 'project_root' must be a pathlib.Path.")
     if not isinstance(data_path, Path):
         raise TypeError("ETL contract violation: 'data_path' must be a pathlib.Path.")
     if not isinstance(df, pd.DataFrame):

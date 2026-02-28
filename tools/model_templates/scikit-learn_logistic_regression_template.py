@@ -152,7 +152,6 @@ _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 # ---------------------------------------------------------------------
 # DATA ETL OUTPUT CONTRACT (required by all downstream sections)
 # At end of ETL, you MUST define:
-#   project_root: Path
 #   data_path: Path
 #   df: pd.DataFrame
 #   X: pd.DataFrame
@@ -170,8 +169,7 @@ _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 # Template injection points:
 #   - DATA_TASK_DIR / DATA_FILE
 #   - READ_CSV_STATEMENT / POST_READ_DATASET_SETUP
-project_root = _project_root()
-data_path = project_root / "data" / "template_data" / "{{DATA_TASK_DIR}}" / "{{DATA_FILE}}"
+data_path = _project_root() / "data" / "template_data" / "{{DATA_TASK_DIR}}" / "{{DATA_FILE}}"
 {{READ_CSV_STATEMENT}}
 {{POST_READ_DATASET_SETUP}}
 
@@ -235,7 +233,6 @@ if len(y) == 0:
 
 # Sanity-check the contract so downstream sections can run without defensive checks.
 _validate_etl_outputs(
-	project_root=project_root,
 	data_path=data_path,
 	df=df,
 	X=X,
@@ -465,9 +462,8 @@ print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true va
 
 # Artifact export and registry logging.
 if SAVE_MODEL:
-	project_root = _project_root()
 	model_name = args.name.strip() or Path(__file__).stem
-	model_root_dir = project_root / "artifacts" / "models" / model_name
+	model_root_dir = _project_root() / "artifacts" / "models" / model_name
 	timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
 	run_id = str(uuid.uuid4())
 	data_hash = hashlib.sha256(data_path.read_bytes()).hexdigest()
@@ -688,7 +684,7 @@ print(results)
 		"estimator_class": estimator_class,
 		"model_id": "sklearn.logisticregression",
 		"dataset": {
-			"path": str(data_path.relative_to(project_root)),
+			"path": str(data_path.relative_to(_project_root())),
 			"sha256": data_hash,
 			"rows": data_rows,
 			"columns": data_columns,
