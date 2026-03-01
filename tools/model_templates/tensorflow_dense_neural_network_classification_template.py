@@ -76,6 +76,10 @@ from libraries.model_template_helpers import (
 #   --n-iter-no-change <int>
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
+#   --enable-tuning true|false
+#   --tuning-method grid|random
+#   --cv-scoring loss|accuracy|f1|f1_macro
+#   --cv-n-iter <int>
 # ---------------------------------------------------------------------
 
 # # Default values for optional parameters. These can be overridden via CLI.
@@ -90,6 +94,10 @@ DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
 DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
+DEFAULT_ENABLE_TUNING = "{{TF_ENABLE_TUNING_DEFAULT}}" == "True"
+DEFAULT_TUNING_METHOD = "{{TF_TUNING_METHOD_DEFAULT}}"
+DEFAULT_CV_SCORING = "{{TF_CV_SCORING_DEFAULT}}"
+DEFAULT_CV_N_ITER = int("{{TF_CV_N_ITER_DEFAULT}}")
 
 parser = argparse.ArgumentParser(description="TensorFlow Dense Neural Network Classifier baseline")
 parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
@@ -107,11 +115,57 @@ parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDAT
 parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
+parser.add_argument("--enable-tuning", type=_parse_bool, default=DEFAULT_ENABLE_TUNING)
+parser.add_argument("--tuning-method", choices=["random"], default=DEFAULT_TUNING_METHOD)
+parser.add_argument("--cv-scoring", choices=["f1_macro"], default=DEFAULT_CV_SCORING)
+parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 training_verbose = "auto" if args.verbose == "auto" else int(args.verbose)
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
+
+
+def _build_dense_classifier(input_dim: int, output_units: int, output_activation: str, optimizer_name: str, learning_rate: float, hidden_layers: list[int], dropout: float, is_binary: bool) -> tf.keras.Sequential:
+	optimizer_ctor = {
+		"adam": tf.keras.optimizers.Adam,
+		"sgd": tf.keras.optimizers.SGD,
+		"rmsprop": tf.keras.optimizers.RMSprop,
+		"adagrad": tf.keras.optimizers.Adagrad,
+		"adamw": tf.keras.optimizers.AdamW,
+	}[optimizer_name]
+	optimizer = optimizer_ctor(learning_rate=float(learning_rate))
+	layers: list[tf.keras.layers.Layer] = [tf.keras.layers.Input(shape=(int(input_dim),))]
+	for width in hidden_layers:
+		layers.append(tf.keras.layers.Dense(int(width), activation="relu"))
+	if float(dropout) > 0:
+		layers.append(tf.keras.layers.Dropout(float(dropout)))
+	layers.append(tf.keras.layers.Dense(output_units, activation=output_activation))
+	model = tf.keras.Sequential(layers)
+	model.compile(
+		optimizer=optimizer,
+		loss="binary_crossentropy" if is_binary else "sparse_categorical_crossentropy",
+		metrics=[tf.keras.metrics.BinaryAccuracy(name="accuracy")] if is_binary else [tf.keras.metrics.SparseCategoricalAccuracy(name="accuracy")],
+	)
+	return model
+
+
+def _predict_class_probabilities(model: tf.keras.Sequential, features: np.ndarray, is_binary: bool) -> np.ndarray:
+	raw = np.asarray(model.predict(features, verbose=0))
+	if is_binary:
+		pos = raw.reshape(-1)
+		return np.column_stack([1.0 - pos, pos])
+	return raw
+
+
+def _classification_score(y_true: np.ndarray, probabilities: np.ndarray, is_binary: bool, scoring: str) -> float:
+	if is_binary:
+		preds = (probabilities[:, -1] >= 0.5).astype(int)
+	else:
+		preds = np.argmax(probabilities, axis=1).astype(int)
+	if scoring == "f1_macro":
+		return float(f1_score(y_true, preds, average="macro", zero_division=0))
+	raise ValueError(f"Unsupported --cv-scoring '{scoring}'")
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -311,9 +365,6 @@ generated_defaults = {"output_units": int("{{OUTPUT_UNITS}}"), "output_activatio
 # Set random seed for reproducibility
 tf.keras.utils.set_random_seed(int(args.random_state))
 
-# Create optimizer with specified learning rate
-optimizer = {{OPTIMIZER_CTOR}}(learning_rate=float(args.learning_rate))
-
 # ---------------------------------------------------------------------
 # TENSORFLOW DENSE MODEL TUNING BLOCK
 # Edit this tf.keras.Sequential block to tune layer widths/depth,
@@ -334,22 +385,107 @@ optimizer = {{OPTIMIZER_CTOR}}(learning_rate=float(args.learning_rate))
 # ---------------------------------------------------------------------
 
 # Adjust the architecture and hyperparameters of the model as needed for your dataset/task.
-keras_model = tf.keras.Sequential(
-	[
-		tf.keras.layers.Input(shape=(int(X_train_processed.shape[1]),)),
-		tf.keras.layers.Dense(128, activation="relu"),
-		tf.keras.layers.Dense(64, activation="relu"),
-		tf.keras.layers.Dropout(0.1),
-		tf.keras.layers.Dense(32, activation="relu"),
-		tf.keras.layers.Dense(output_units, activation=output_activation),
-	]
-)
+selected_hidden_layers = [128, 64, 32]
+selected_dropout = 0.1
+selected_optimizer = args.optimizer
+selected_learning_rate = float(args.learning_rate)
+tuning_summary = {
+	"enabled": False,
+	"method": None,
+	"cv_folds": None,
+	"scoring": None,
+	"scoring_sklearn": None,
+	"n_iter": None,
+	"n_candidates": None,
+	"best_score": None,
+	"best_score_std": None,
+	"best_params": None,
+}
 
-# Compile the model with the specified optimizer, loss function, and metrics.
-keras_model.compile(
-	optimizer=optimizer,
-	loss=loss_fn,
-	metrics=[tf.keras.metrics.BinaryAccuracy(name="accuracy")] if is_binary else [tf.keras.metrics.SparseCategoricalAccuracy(name="accuracy")],
+if args.enable_tuning:
+	rng = np.random.default_rng(int(args.random_state))
+	X_tune_train, X_tune_val, y_tune_train, y_tune_val = train_test_split(
+		X_train_processed,
+		y_train_array,
+		test_size=float(args.validation_fraction),
+		random_state=int(args.random_state),
+		stratify=y_train_array,
+	)
+	candidates = [
+		{"optimizer": opt, "learning_rate": lr, "batch_size": bs, "hidden_layers": hl, "dropout": dr}
+		for opt in ["adam", "sgd", "rmsprop", "adagrad", "adamw"]
+		for lr in [1e-4, 3e-4, 1e-3, 3e-3]
+		for bs in [16, 32, 64]
+		for hl in ([128, 64], [128, 64, 32], [256, 128, 64])
+		for dr in [0.0, 0.1, 0.2]
+	]
+	sampled_indices = rng.choice(len(candidates), size=min(int(args.cv_n_iter), len(candidates)), replace=False)
+	best_candidate = None
+	best_candidate_score = -np.inf
+	for index in sampled_indices.tolist():
+		candidate = candidates[int(index)]
+		tf.keras.backend.clear_session()
+		trial_model = _build_dense_classifier(
+			input_dim=int(X_train_processed.shape[1]),
+			output_units=output_units,
+			output_activation=output_activation,
+			optimizer_name=candidate["optimizer"],
+			learning_rate=float(candidate["learning_rate"]),
+			hidden_layers=list(candidate["hidden_layers"]),
+			dropout=float(candidate["dropout"]),
+			is_binary=is_binary,
+		)
+		trial_callbacks = [
+			tf.keras.callbacks.EarlyStopping(
+				monitor="val_loss",
+				patience=max(2, int(args.n_iter_no_change)),
+				mode="min",
+				restore_best_weights=True,
+			)
+		]
+		trial_model.fit(
+			X_tune_train,
+			y_tune_train,
+			epochs=max(10, min(100, int(args.epochs))),
+			batch_size=int(candidate["batch_size"]),
+			validation_data=(X_tune_val, y_tune_val),
+			callbacks=trial_callbacks,
+			verbose=0,
+		)
+		trial_probabilities = _predict_class_probabilities(trial_model, X_tune_val, is_binary)
+		score = _classification_score(y_tune_val, trial_probabilities, is_binary, args.cv_scoring)
+		if score > best_candidate_score:
+			best_candidate_score = score
+			best_candidate = candidate
+	if best_candidate is not None:
+		selected_optimizer = str(best_candidate["optimizer"])
+		selected_learning_rate = float(best_candidate["learning_rate"])
+		selected_hidden_layers = [int(v) for v in best_candidate["hidden_layers"]]
+		selected_dropout = float(best_candidate["dropout"])
+		args.batch_size = int(best_candidate["batch_size"])
+		tuning_summary = {
+			"enabled": True,
+			"method": "random",
+			"cv_folds": None,
+			"scoring": args.cv_scoring,
+			"scoring_sklearn": args.cv_scoring,
+			"n_iter": int(args.cv_n_iter),
+			"n_candidates": int(len(sampled_indices)),
+			"best_score": _round_metric(best_candidate_score),
+			"best_score_std": None,
+			"best_params": _compact_metadata(_json_safe(best_candidate)),
+		}
+
+tf.keras.backend.clear_session()
+keras_model = _build_dense_classifier(
+	input_dim=int(X_train_processed.shape[1]),
+	output_units=output_units,
+	output_activation=output_activation,
+	optimizer_name=selected_optimizer,
+	learning_rate=float(selected_learning_rate),
+	hidden_layers=selected_hidden_layers,
+	dropout=selected_dropout,
+	is_binary=is_binary,
 )
 
 # =============================================================
@@ -398,19 +534,34 @@ if args.early_stopping:
 		best_step = best_index + 1
 		best_score_raw = float(validation_loss_history[best_index])
 
-training_control = {
-	"enabled": bool(args.early_stopping),
-	"type": "epochs",
-	"max_steps_configured": int(args.epochs),
-	"steps_completed": history_epochs,
-	"patience": int(args.n_iter_no_change),
-	"monitor_metric": "val_loss" if args.early_stopping else None,
-	"monitor_split": "val" if args.early_stopping else None,
-	"monitor_direction": "min" if args.early_stopping else None,
-	"best_step": int(best_step) if best_step is not None else None,
-	"best_score": _round_metric(best_score_raw),
-	"stopped_early": bool(args.early_stopping and history_epochs < int(args.epochs)),
-}
+if tuning_summary["enabled"]:
+	training_control = {
+		"enabled": True,
+		"type": "search_cv",
+		"max_steps_configured": int(args.cv_n_iter),
+		"steps_completed": int(tuning_summary["n_candidates"]),
+		"patience": None,
+		"monitor_metric": f"cv_{args.cv_scoring}",
+		"monitor_split": "cv",
+		"monitor_direction": "max",
+		"best_step": None,
+		"best_score": tuning_summary["best_score"],
+		"stopped_early": False,
+	}
+else:
+	training_control = {
+		"enabled": bool(args.early_stopping),
+		"type": "epochs",
+		"max_steps_configured": int(args.epochs),
+		"steps_completed": history_epochs,
+		"patience": int(args.n_iter_no_change),
+		"monitor_metric": "val_loss" if args.early_stopping else None,
+		"monitor_split": "val" if args.early_stopping else None,
+		"monitor_direction": "min" if args.early_stopping else None,
+		"best_step": int(best_step) if best_step is not None else None,
+		"best_score": _round_metric(best_score_raw),
+		"stopped_early": bool(args.early_stopping and history_epochs < int(args.epochs)),
+	}
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
@@ -539,8 +690,16 @@ if SAVE_MODEL:
 			"precision_macro": _round_metric(test_precision_macro),
 			"recall_macro": _round_metric(test_recall_macro),
 			"f1_macro": _round_metric(test_f1_macro),
-			"roc_auc_macro_ovr": _round_metric(roc_auc_macro_ovr),
-			"pr_auc_macro_ovr": _round_metric(pr_auc_macro_ovr),
+			"roc_auc": {
+				"average": "macro",
+				"multi_class": "ovr",
+				"value": _round_metric(roc_auc_macro_ovr),
+			},
+			"pr_auc": {
+				"average": "macro",
+				"multi_class": "ovr",
+				"value": _round_metric(pr_auc_macro_ovr),
+			},
 			"log_loss": _round_metric(test_log_loss),
 			"brier_score": _round_metric(brier_score_value),
 			"support_total": support_total,
@@ -563,7 +722,7 @@ if SAVE_MODEL:
 			"calibration_method": None,
 		},
 		"training_control": training_control,
-		"model_selection": training_control,
+		"tuning": tuning_summary,
 		"timing": {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)},
 	}
 	metrics["selection"] = training_control
@@ -687,41 +846,47 @@ print("Probabilities:", probabilities.tolist())
 			},
 		},
 		"params": {
-			"optimizer": args.optimizer,
-			"learning_rate": float(args.learning_rate),
+			"optimizer": selected_optimizer,
+			"learning_rate": float(selected_learning_rate),
 			"epochs": int(args.epochs),
 			"batch_size": int(args.batch_size),
 			"early_stopping": bool(args.early_stopping),
 			"validation_fraction": float(args.validation_fraction),
 			"n_iter_no_change": int(args.n_iter_no_change),
+			"enable_tuning": bool(tuning_summary["enabled"]),
+			"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
+			"cv_scoring": args.cv_scoring if tuning_summary["enabled"] else None,
+			"cv_n_iter": int(args.cv_n_iter) if tuning_summary["enabled"] else None,
 			"random_state": int(args.random_state),
-			"hidden_layers": [128, 64, 32],
+			"hidden_layers": selected_hidden_layers,
+			"dropout": float(selected_dropout),
 			"output_units": output_units,
 			"output_activation": output_activation,
 			"loss_fn": loss_fn,
 			"generator_defaults": generated_defaults,
 		},
+		"tuning": tuning_summary,
 		"preprocessing": {"feature_count": {"raw": int(X.shape[1]), "post_transform": _post_transform_feature_count(preprocessor, X_train.iloc[:1])}},
 		"selection": training_control,
 		"training_control": training_control,
-		"model_selection": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),
 			"random_state_effective": int(args.random_state),
+			"n_jobs": None,
 		},
 		"artifacts": _artifact_map(
 			run_dir,
 			{
 				"model": model_dir / "model.keras",
 				"preprocess": preprocess_dir / "preprocessor.pkl",
-				"metrics": eval_dir / "metrics.json",
-				"history": eval_dir / "training_history.json",
-				"confusion_matrix": eval_dir / "confusion_matrix.csv",
-				"confusion_matrix_plot": eval_dir / "confusion_matrix.png",
-				"roc_curve": eval_dir / "roc_curve.csv",
-				"roc_curve_plot": eval_dir / "roc_curve.png",
-				"predictions_preview": eval_dir / "predictions_preview.csv",
+				"eval_metrics": eval_dir / "metrics.json",
+				"eval_training_history": eval_dir / "training_history.json",
+				"eval_confusion_matrix": eval_dir / "confusion_matrix.csv",
+				"eval_confusion_matrix_plot": eval_dir / "confusion_matrix.png",
+				"eval_roc_curve": eval_dir / "roc_curve.csv",
+				"eval_roc_curve_plot": eval_dir / "roc_curve.png",
+				"eval_predictions_preview": eval_dir / "predictions_preview.csv",
 				**schema_artifacts,
 				"inference_example": inference_dir / "inference_example.py",
 			},
@@ -739,21 +904,22 @@ print("Probabilities:", probabilities.tolist())
 			"run_id": run_id,
 			"name": model_name,
 			"timestamp": timestamp,
+			"dataset_sha256": data_hash,
+			"dataset_rows": int(len(df)),
+			"dataset_columns": int(df.shape[1]),
 			"optimizer": args.optimizer,
-			"learning_rate": float(args.learning_rate),
+			"learning_rate": float(selected_learning_rate),
 			"epochs": int(args.epochs),
 			"batch_size": int(args.batch_size),
 			"random_state": int(args.random_state),
+			"tuning_enabled": bool(tuning_summary["enabled"]),
+			"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
+			"cv_best_score": tuning_summary["best_score"],
 			"training_control_enabled": bool(training_control["enabled"]),
 			"training_control_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
 			"training_control_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
 			"training_control_steps_completed": int(training_control["steps_completed"]) if training_control["steps_completed"] is not None else None,
 			"training_control_stopped_early": bool(training_control["stopped_early"]),
-			"model_selection_enabled": bool(training_control["enabled"]),
-			"model_selection_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
-			"model_selection_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
-			"model_selection_steps_completed": int(training_control["steps_completed"]) if training_control["steps_completed"] is not None else None,
-			"model_selection_stopped_early": bool(training_control["stopped_early"]),
 			"num_class": int(num_classes),
 			"accuracy": _round_metric(test_accuracy),
 			"balanced_accuracy": _round_metric(test_balanced_accuracy),

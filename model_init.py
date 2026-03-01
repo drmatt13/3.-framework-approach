@@ -10,7 +10,7 @@ except ImportError:
     sys.exit(1)
 
 SKLEARN_MODELS = ["linear_regression", "logistic_regression", "random_forest"]
-TENSORFLOW_MODELS = ["dense_nn", "cnn"]
+TENSORFLOW_MODELS = ["dense_nn"]
 
 # Valid tasks per model/library (based on your flag combinations)
 TASKS_BY_LIBRARY_MODEL = {
@@ -18,7 +18,6 @@ TASKS_BY_LIBRARY_MODEL = {
     ("scikit-learn", "logistic_regression"): ["binary_classification", "multiclass_classification"],
     ("scikit-learn", "random_forest"): ["regression", "binary_classification", "multiclass_classification"],
     ("tensorflow", "dense_nn"): ["regression", "binary_classification", "multiclass_classification"],
-    ("tensorflow", "cnn"): ["regression", "binary_classification", "multiclass_classification"],
     # xgboost has no --model in your interface; task applies directly to library
     ("xgboost", None): ["regression", "binary_classification", "multiclass_classification"],
 }
@@ -161,9 +160,63 @@ def _get_profile_defaults(
 
     if library == "xgboost":
         presets = {
-            "Quick": {"n_est": 100, "lr": 0.3, "depth": 3, "sub": 0.8, "col": 0.8, "mcw": 1.0, "rl": 1.0, "ra": 0.0, "es": True, "vf": 0.1, "nic": 10},
-            "Balanced": {"n_est": 300, "lr": 0.1, "depth": 6, "sub": 1.0, "col": 1.0, "mcw": 1.0, "rl": 1.0, "ra": 0.0, "es": True, "vf": 0.1, "nic": 20},
-            "Thorough": {"n_est": 1000, "lr": 0.05, "depth": 8, "sub": 0.8, "col": 0.8, "mcw": 1.0, "rl": 1.0, "ra": 0.1, "es": True, "vf": 0.1, "nic": 30},
+            "Quick": {
+                "n_est": 100,
+                "lr": 0.3,
+                "depth": 3,
+                "sub": 0.8,
+                "col": 0.8,
+                "mcw": 1.0,
+                "rl": 1.0,
+                "ra": 0.0,
+                "es": True,
+                "vf": 0.1,
+                "nic": 10,
+                "enable_tuning": False,
+                "tuning_method": "random",
+                "cv_folds": 5,
+                "cv_scoring": "f1_macro" if task != "regression" else "rmse",
+                "cv_n_iter": 10,
+                "cv_n_jobs": -1,
+            },
+            "Balanced": {
+                "n_est": 300,
+                "lr": 0.1,
+                "depth": 6,
+                "sub": 1.0,
+                "col": 1.0,
+                "mcw": 1.0,
+                "rl": 1.0,
+                "ra": 0.0,
+                "es": True,
+                "vf": 0.1,
+                "nic": 20,
+                "enable_tuning": False,
+                "tuning_method": "random",
+                "cv_folds": 5,
+                "cv_scoring": "f1_macro" if task != "regression" else "rmse",
+                "cv_n_iter": 20,
+                "cv_n_jobs": -1,
+            },
+            "Thorough": {
+                "n_est": 1000,
+                "lr": 0.05,
+                "depth": 8,
+                "sub": 0.8,
+                "col": 0.8,
+                "mcw": 1.0,
+                "rl": 1.0,
+                "ra": 0.1,
+                "es": True,
+                "vf": 0.1,
+                "nic": 30,
+                "enable_tuning": True,
+                "tuning_method": "random",
+                "cv_folds": 5,
+                "cv_scoring": "f1_macro" if task != "regression" else "rmse",
+                "cv_n_iter": 30,
+                "cv_n_jobs": -1,
+            },
         }
         if size_bucket == "large":
             presets["Quick"]["n_est"] = 200
@@ -186,13 +239,52 @@ def _get_profile_defaults(
             "default_early_stopping": p["es"],
             "default_validation_fraction": p["vf"],
             "default_n_iter_no_change": p["nic"],
+            "default_xgb_enable_tuning": p["enable_tuning"],
+            "default_xgb_tuning_method": p["tuning_method"],
+            "default_xgb_cv_folds": str(p["cv_folds"]),
+            "default_xgb_cv_scoring": p["cv_scoring"],
+            "default_xgb_cv_n_iter": str(p["cv_n_iter"]),
+            "default_xgb_cv_n_jobs": str(p["cv_n_jobs"]),
         }
 
     elif library == "scikit-learn" and model == "random_forest":
         presets = {
-            "Quick": {"n_est": 100, "depth": 8, "msl": 5, "mf": "sqrt"},
-            "Balanced": {"n_est": 300, "depth": 16, "msl": 1, "mf": "sqrt"},
-            "Thorough": {"n_est": 500, "depth": 32, "msl": 1, "mf": "sqrt"},
+            "Quick": {
+                "n_est": 100,
+                "depth": 8,
+                "msl": 5,
+                "mf": "sqrt",
+                "enable_tuning": False,
+                "tuning_method": "grid",
+                "cv_folds": 5,
+                "cv_scoring": "f1_macro" if task != "regression" else "rmse",
+                "cv_n_iter": 20,
+                "cv_n_jobs": -1,
+            },
+            "Balanced": {
+                "n_est": 300,
+                "depth": 16,
+                "msl": 1,
+                "mf": "sqrt",
+                "enable_tuning": False,
+                "tuning_method": "grid",
+                "cv_folds": 5,
+                "cv_scoring": "f1_macro" if task != "regression" else "rmse",
+                "cv_n_iter": 20,
+                "cv_n_jobs": -1,
+            },
+            "Thorough": {
+                "n_est": 500,
+                "depth": 32,
+                "msl": 1,
+                "mf": "sqrt",
+                "enable_tuning": True,
+                "tuning_method": "grid",
+                "cv_folds": 5,
+                "cv_scoring": "f1_macro" if task != "regression" else "rmse",
+                "cv_n_iter": 30,
+                "cv_n_jobs": -1,
+            },
         }
         if size_bucket == "large":
             presets["Thorough"]["n_est"] = 800
@@ -206,13 +298,55 @@ def _get_profile_defaults(
             "default_rf_max_depth": str(p["depth"]),
             "default_rf_min_samples_leaf": str(p["msl"]),
             "default_rf_max_features": str(p["mf"]),
+            "default_rf_enable_tuning": p["enable_tuning"],
+            "default_rf_tuning_method": p["tuning_method"],
+            "default_rf_cv_folds": str(p["cv_folds"]),
+            "default_rf_cv_scoring": p["cv_scoring"],
+            "default_rf_cv_n_iter": str(p["cv_n_iter"]),
+            "default_rf_cv_n_jobs": str(p["cv_n_jobs"]),
         }
 
     elif library == "scikit-learn" and model == "logistic_regression":
         presets = {
-            "Quick": {"c": 1.0, "solver": "lbfgs", "max_iter": 500, "penalty": "l2", "class_weight": "none"},
-            "Balanced": {"c": 1.0, "solver": "lbfgs", "max_iter": 1000, "penalty": "l2", "class_weight": "none"},
-            "Thorough": {"c": 0.5, "solver": "saga", "max_iter": 2000, "penalty": "l2", "class_weight": "none"},
+            "Quick": {
+                "c": 1.0,
+                "solver": "lbfgs",
+                "max_iter": 500,
+                "penalty": "l2",
+                "class_weight": "none",
+                "enable_tuning": False,
+                "tuning_method": "grid",
+                "cv_folds": 5,
+                "cv_scoring": "f1_macro",
+                "cv_n_iter": 20,
+                "cv_n_jobs": -1,
+            },
+            "Balanced": {
+                "c": 1.0,
+                "solver": "lbfgs",
+                "max_iter": 1000,
+                "penalty": "l2",
+                "class_weight": "none",
+                "enable_tuning": False,
+                "tuning_method": "grid",
+                "cv_folds": 5,
+                "cv_scoring": "f1_macro",
+                "cv_n_iter": 20,
+                "cv_n_jobs": -1,
+            },
+            "Thorough": {
+                "c": 0.5,
+                "solver": "saga",
+                "max_iter": 2000,
+                "penalty": "l2",
+                "class_weight": "none",
+                "enable_tuning": True,
+                "tuning_method": "grid",
+                "cv_folds": 5,
+                "cv_scoring": "f1_macro",
+                "cv_n_iter": 30,
+                "cv_n_jobs": -1,
+            },
         }
         p = presets.get(profile, presets["Balanced"])
         defaults = {
@@ -221,6 +355,12 @@ def _get_profile_defaults(
             "default_max_iter": p["max_iter"],
             "default_logistic_penalty": p["penalty"],
             "default_logistic_class_weight": p["class_weight"],
+            "default_logistic_enable_tuning": p["enable_tuning"],
+            "default_logistic_tuning_method": p["tuning_method"],
+            "default_logistic_cv_folds": str(p["cv_folds"]),
+            "default_logistic_cv_scoring": p["cv_scoring"],
+            "default_logistic_cv_n_iter": str(p["cv_n_iter"]),
+            "default_logistic_cv_n_jobs": str(p["cv_n_jobs"]),
         }
 
     elif library == "scikit-learn" and model == "linear_regression":
@@ -473,6 +613,18 @@ def main() -> int:
     default_rf_max_features = None
     default_logistic_penalty = None
     default_logistic_class_weight = None
+    default_logistic_enable_tuning = None
+    default_logistic_tuning_method = None
+    default_logistic_cv_folds = None
+    default_logistic_cv_scoring = None
+    default_logistic_cv_n_iter = None
+    default_logistic_cv_n_jobs = None
+    default_rf_enable_tuning = None
+    default_rf_tuning_method = None
+    default_rf_cv_folds = None
+    default_rf_cv_scoring = None
+    default_rf_cv_n_iter = None
+    default_rf_cv_n_jobs = None
     default_lr_penalty = None
     default_lr_alpha = None
     default_lr_fit_intercept = None
@@ -486,6 +638,16 @@ def main() -> int:
     default_xgb_min_child_weight = None
     default_xgb_reg_lambda = None
     default_xgb_reg_alpha = None
+    default_xgb_enable_tuning = None
+    default_xgb_tuning_method = None
+    default_xgb_cv_folds = None
+    default_xgb_cv_scoring = None
+    default_xgb_cv_n_iter = None
+    default_xgb_cv_n_jobs = None
+    default_tf_enable_tuning = None
+    default_tf_tuning_method = None
+    default_tf_cv_scoring = None
+    default_tf_cv_n_iter = None
 
     # When a profile provides defaults, use them and skip prompts.
     use_custom = profile == "Custom" or library == "tensorflow"
@@ -563,6 +725,51 @@ def main() -> int:
             if default_xgb_reg_alpha is None:
                 print("Cancelled.")
                 return 0
+
+            default_xgb_enable_tuning = questionary.confirm(
+                "Enable hyperparameter tuning by default? (--enable-tuning)",
+                default=False,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if default_xgb_enable_tuning is None:
+                print("Cancelled.")
+                return 0
+            if default_xgb_enable_tuning:
+                default_xgb_tuning_method = "random"
+                default_xgb_cv_folds = _ask_text(
+                    "Default CV folds (--cv-folds, >=2):",
+                    default="5",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
+                )
+                if default_xgb_cv_folds is None:
+                    print("Cancelled.")
+                    return 0
+                default_xgb_cv_scoring = questionary.select(
+                    "Default CV scoring (--cv-scoring):",
+                    choices=["rmse", "mae", "r2"] if task == "regression" else ["f1_macro", "accuracy", "roc_auc_ovr"],
+                    default="rmse" if task == "regression" else "f1_macro",
+                    use_shortcuts=True,
+                    style=CUSTOM_STYLE,
+                ).ask()
+                if default_xgb_cv_scoring is None:
+                    print("Cancelled.")
+                    return 0
+                default_xgb_cv_n_iter = _ask_text(
+                    "Default random-search iterations (--cv-n-iter, >0):",
+                    default="20",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                )
+                if default_xgb_cv_n_iter is None:
+                    print("Cancelled.")
+                    return 0
+                default_xgb_cv_n_jobs = _ask_text(
+                    "Default CV parallel jobs (--cv-n-jobs, e.g., -1):",
+                    default="-1",
+                    validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
+                )
+                if default_xgb_cv_n_jobs is None:
+                    print("Cancelled.")
+                    return 0
         else:
             default_n_estimators = profile_defaults.get("default_n_estimators", "300")
             default_learning_rate = profile_defaults.get("default_learning_rate", "0.1")
@@ -572,6 +779,15 @@ def main() -> int:
             default_xgb_min_child_weight = profile_defaults.get("default_xgb_min_child_weight", "1.0")
             default_xgb_reg_lambda = profile_defaults.get("default_xgb_reg_lambda", "1.0")
             default_xgb_reg_alpha = profile_defaults.get("default_xgb_reg_alpha", "0.0")
+            default_xgb_enable_tuning = profile_defaults.get("default_xgb_enable_tuning", False)
+            default_xgb_tuning_method = profile_defaults.get("default_xgb_tuning_method", "random")
+            default_xgb_cv_folds = profile_defaults.get("default_xgb_cv_folds", "5")
+            default_xgb_cv_scoring = profile_defaults.get(
+                "default_xgb_cv_scoring",
+                "rmse" if task == "regression" else "f1_macro",
+            )
+            default_xgb_cv_n_iter = profile_defaults.get("default_xgb_cv_n_iter", "20")
+            default_xgb_cv_n_jobs = profile_defaults.get("default_xgb_cv_n_jobs", "-1")
 
     if library == "scikit-learn" and model == "logistic_regression":
         if use_custom:
@@ -615,11 +831,72 @@ def main() -> int:
             if default_logistic_class_weight is None:
                 print("Cancelled.")
                 return 0
+
+            default_logistic_enable_tuning = questionary.confirm(
+                "Enable hyperparameter tuning by default? (--enable-tuning)",
+                default=False,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if default_logistic_enable_tuning is None:
+                print("Cancelled.")
+                return 0
+            if default_logistic_enable_tuning:
+                default_logistic_tuning_method = questionary.select(
+                    "Default tuning method (--tuning-method):",
+                    choices=["grid", "random"],
+                    default="grid",
+                    use_shortcuts=True,
+                    style=CUSTOM_STYLE,
+                ).ask()
+                if default_logistic_tuning_method is None:
+                    print("Cancelled.")
+                    return 0
+                default_logistic_cv_folds = _ask_text(
+                    "Default CV folds (--cv-folds, >=2):",
+                    default="5",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
+                )
+                if default_logistic_cv_folds is None:
+                    print("Cancelled.")
+                    return 0
+                default_logistic_cv_scoring = questionary.select(
+                    "Default CV scoring (--cv-scoring):",
+                    choices=["f1_macro", "accuracy", "roc_auc_ovr"],
+                    default="f1_macro",
+                    use_shortcuts=True,
+                    style=CUSTOM_STYLE,
+                ).ask()
+                if default_logistic_cv_scoring is None:
+                    print("Cancelled.")
+                    return 0
+                if default_logistic_tuning_method == "random":
+                    default_logistic_cv_n_iter = _ask_text(
+                        "Default random-search iterations (--cv-n-iter, >0):",
+                        default="20",
+                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                    )
+                    if default_logistic_cv_n_iter is None:
+                        print("Cancelled.")
+                        return 0
+                default_logistic_cv_n_jobs = _ask_text(
+                    "Default CV parallel jobs (--cv-n-jobs, e.g., -1):",
+                    default="-1",
+                    validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
+                )
+                if default_logistic_cv_n_jobs is None:
+                    print("Cancelled.")
+                    return 0
         else:
             default_c = profile_defaults.get("default_c", "1.0")
             default_solver = profile_defaults.get("default_solver", "lbfgs")
             default_logistic_penalty = profile_defaults.get("default_logistic_penalty", "l2")
             default_logistic_class_weight = profile_defaults.get("default_logistic_class_weight", "none")
+            default_logistic_enable_tuning = profile_defaults.get("default_logistic_enable_tuning", False)
+            default_logistic_tuning_method = profile_defaults.get("default_logistic_tuning_method", "grid")
+            default_logistic_cv_folds = profile_defaults.get("default_logistic_cv_folds", "5")
+            default_logistic_cv_scoring = profile_defaults.get("default_logistic_cv_scoring", "f1_macro")
+            default_logistic_cv_n_iter = profile_defaults.get("default_logistic_cv_n_iter", "20")
+            default_logistic_cv_n_jobs = profile_defaults.get("default_logistic_cv_n_jobs", "-1")
 
     if library == "scikit-learn" and model == "random_forest":
         if use_custom:
@@ -660,11 +937,105 @@ def main() -> int:
             if default_rf_max_features is None:
                 print("Cancelled.")
                 return 0
+
+            default_rf_enable_tuning = questionary.confirm(
+                "Enable hyperparameter tuning by default? (--enable-tuning)",
+                default=False,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if default_rf_enable_tuning is None:
+                print("Cancelled.")
+                return 0
+            if default_rf_enable_tuning:
+                default_rf_tuning_method = questionary.select(
+                    "Default tuning method (--tuning-method):",
+                    choices=["grid", "random"],
+                    default="grid",
+                    use_shortcuts=True,
+                    style=CUSTOM_STYLE,
+                ).ask()
+                if default_rf_tuning_method is None:
+                    print("Cancelled.")
+                    return 0
+                default_rf_cv_folds = _ask_text(
+                    "Default CV folds (--cv-folds, >=2):",
+                    default="5",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
+                )
+                if default_rf_cv_folds is None:
+                    print("Cancelled.")
+                    return 0
+                default_rf_cv_scoring = questionary.select(
+                    "Default CV scoring (--cv-scoring):",
+                    choices=["rmse", "mae", "r2"] if task == "regression" else ["f1_macro", "accuracy", "roc_auc_ovr"],
+                    default="rmse" if task == "regression" else "f1_macro",
+                    use_shortcuts=True,
+                    style=CUSTOM_STYLE,
+                ).ask()
+                if default_rf_cv_scoring is None:
+                    print("Cancelled.")
+                    return 0
+                if default_rf_tuning_method == "random":
+                    default_rf_cv_n_iter = _ask_text(
+                        "Default random-search iterations (--cv-n-iter, >0):",
+                        default="20",
+                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                    )
+                    if default_rf_cv_n_iter is None:
+                        print("Cancelled.")
+                        return 0
+                default_rf_cv_n_jobs = _ask_text(
+                    "Default CV parallel jobs (--cv-n-jobs, e.g., -1):",
+                    default="-1",
+                    validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
+                )
+                if default_rf_cv_n_jobs is None:
+                    print("Cancelled.")
+                    return 0
         else:
             default_rf_n_estimators = profile_defaults.get("default_rf_n_estimators", "300")
             default_rf_max_depth = profile_defaults.get("default_rf_max_depth", "16")
             default_rf_min_samples_leaf = profile_defaults.get("default_rf_min_samples_leaf", "1")
             default_rf_max_features = profile_defaults.get("default_rf_max_features", "sqrt")
+            default_rf_enable_tuning = profile_defaults.get("default_rf_enable_tuning", False)
+            default_rf_tuning_method = profile_defaults.get("default_rf_tuning_method", "grid")
+            default_rf_cv_folds = profile_defaults.get("default_rf_cv_folds", "5")
+            default_rf_cv_scoring = profile_defaults.get(
+                "default_rf_cv_scoring",
+                "rmse" if task == "regression" else "f1_macro",
+            )
+            default_rf_cv_n_iter = profile_defaults.get("default_rf_cv_n_iter", "20")
+            default_rf_cv_n_jobs = profile_defaults.get("default_rf_cv_n_jobs", "-1")
+
+    if library == "tensorflow" and model == "dense_nn":
+        default_tf_enable_tuning = questionary.confirm(
+            "Enable hyperparameter tuning by default? (--enable-tuning)",
+            default=False,
+            style=CUSTOM_STYLE,
+        ).ask()
+        if default_tf_enable_tuning is None:
+            print("Cancelled.")
+            return 0
+        if default_tf_enable_tuning:
+            default_tf_tuning_method = "random"
+            default_tf_cv_scoring = questionary.select(
+                "Default tuning scoring (--cv-scoring):",
+                choices=["rmse"] if task == "regression" else ["f1_macro"],
+                default="rmse" if task == "regression" else "f1_macro",
+                use_shortcuts=True,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if default_tf_cv_scoring is None:
+                print("Cancelled.")
+                return 0
+            default_tf_cv_n_iter = _ask_text(
+                "Default random-search iterations (--cv-n-iter, >0):",
+                default="10",
+                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+            )
+            if default_tf_cv_n_iter is None:
+                print("Cancelled.")
+                return 0
 
     if library == "scikit-learn" and model == "linear_regression":
         if use_custom:
@@ -951,6 +1322,18 @@ def main() -> int:
         cmd.extend(["--default-logistic-penalty", str(default_logistic_penalty)])
     if default_logistic_class_weight is not None:
         cmd.extend(["--default-logistic-class-weight", str(default_logistic_class_weight)])
+    if default_logistic_enable_tuning is not None:
+        cmd.extend(["--default-logistic-enable-tuning", "true" if default_logistic_enable_tuning else "false"])
+    if default_logistic_tuning_method is not None:
+        cmd.extend(["--default-logistic-tuning-method", str(default_logistic_tuning_method)])
+    if default_logistic_cv_folds is not None:
+        cmd.extend(["--default-logistic-cv-folds", str(int(default_logistic_cv_folds))])
+    if default_logistic_cv_scoring is not None:
+        cmd.extend(["--default-logistic-cv-scoring", str(default_logistic_cv_scoring)])
+    if default_logistic_tuning_method == "random" and default_logistic_cv_n_iter is not None:
+        cmd.extend(["--default-logistic-cv-n-iter", str(int(default_logistic_cv_n_iter))])
+    if default_logistic_cv_n_jobs is not None:
+        cmd.extend(["--default-logistic-cv-n-jobs", str(int(default_logistic_cv_n_jobs))])
 
     if default_rf_n_estimators is not None:
         cmd.extend(["--default-rf-n-estimators", str(int(default_rf_n_estimators))])
@@ -960,6 +1343,31 @@ def main() -> int:
         cmd.extend(["--default-rf-min-samples-leaf", str(int(default_rf_min_samples_leaf))])
     if default_rf_max_features is not None:
         cmd.extend(["--default-rf-max-features", str(default_rf_max_features)])
+    if default_rf_enable_tuning is not None:
+        cmd.extend(["--default-rf-enable-tuning", "true" if default_rf_enable_tuning else "false"])
+    if default_rf_tuning_method is not None:
+        cmd.extend(["--default-rf-tuning-method", str(default_rf_tuning_method)])
+    if default_rf_cv_folds is not None:
+        cmd.extend(["--default-rf-cv-folds", str(int(default_rf_cv_folds))])
+    if default_rf_cv_scoring is not None:
+        cmd.extend(["--default-rf-cv-scoring", str(default_rf_cv_scoring)])
+    if default_rf_tuning_method == "random" and default_rf_cv_n_iter is not None:
+        cmd.extend(["--default-rf-cv-n-iter", str(int(default_rf_cv_n_iter))])
+    if default_rf_cv_n_jobs is not None:
+        cmd.extend(["--default-rf-cv-n-jobs", str(int(default_rf_cv_n_jobs))])
+
+    if default_xgb_enable_tuning is not None:
+        cmd.extend(["--default-xgb-enable-tuning", "true" if default_xgb_enable_tuning else "false"])
+    if default_xgb_tuning_method is not None:
+        cmd.extend(["--default-xgb-tuning-method", str(default_xgb_tuning_method)])
+    if default_xgb_cv_folds is not None:
+        cmd.extend(["--default-xgb-cv-folds", str(int(default_xgb_cv_folds))])
+    if default_xgb_cv_scoring is not None:
+        cmd.extend(["--default-xgb-cv-scoring", str(default_xgb_cv_scoring)])
+    if default_xgb_cv_n_iter is not None:
+        cmd.extend(["--default-xgb-cv-n-iter", str(int(default_xgb_cv_n_iter))])
+    if default_xgb_cv_n_jobs is not None:
+        cmd.extend(["--default-xgb-cv-n-jobs", str(int(default_xgb_cv_n_jobs))])
 
     if default_lr_penalty is not None:
         cmd.extend(["--default-lr-penalty", str(default_lr_penalty)])
@@ -971,15 +1379,15 @@ def main() -> int:
         cmd.extend(["--default-lr-l1-ratio", str(float(default_lr_l1_ratio))])
     if default_lr_enable_tuning is not None:
         cmd.extend(["--default-lr-enable-tuning", "true" if default_lr_enable_tuning else "false"])
-    if default_lr_enable_tuning and default_lr_tuning_method is not None:
+    if default_lr_tuning_method is not None:
         cmd.extend(["--default-lr-tuning-method", str(default_lr_tuning_method)])
-    if default_lr_enable_tuning and default_lr_cv_folds is not None:
+    if default_lr_cv_folds is not None:
         cmd.extend(["--default-lr-cv-folds", str(int(default_lr_cv_folds))])
-    if default_lr_enable_tuning and default_lr_cv_scoring is not None:
+    if default_lr_cv_scoring is not None:
         cmd.extend(["--default-lr-cv-scoring", str(default_lr_cv_scoring)])
-    if default_lr_enable_tuning and default_lr_tuning_method == "random" and default_lr_cv_n_iter is not None:
+    if default_lr_tuning_method == "random" and default_lr_cv_n_iter is not None:
         cmd.extend(["--default-lr-cv-n-iter", str(int(default_lr_cv_n_iter))])
-    if default_lr_enable_tuning and default_lr_cv_n_jobs is not None:
+    if default_lr_cv_n_jobs is not None:
         cmd.extend(["--default-lr-cv-n-jobs", str(int(default_lr_cv_n_jobs))])
 
     # Add TensorFlow-only flags where necessary
@@ -989,6 +1397,14 @@ def main() -> int:
         cmd.extend(["--learning_rate", str(float(learning_rate))])
         cmd.extend(["--epochs", str(int(epochs))])
         cmd.extend(["--batch_size", str(int(batch_size))])
+        if default_tf_enable_tuning is not None:
+            cmd.extend(["--default-tf-enable-tuning", "true" if default_tf_enable_tuning else "false"])
+        if default_tf_tuning_method is not None:
+            cmd.extend(["--default-tf-tuning-method", str(default_tf_tuning_method)])
+        if default_tf_cv_scoring is not None:
+            cmd.extend(["--default-tf-cv-scoring", str(default_tf_cv_scoring)])
+        if default_tf_cv_n_iter is not None:
+            cmd.extend(["--default-tf-cv-n-iter", str(int(default_tf_cv_n_iter))])
 
     print("\nRunning:")
     print("  " + " ".join(cmd) + "\n")

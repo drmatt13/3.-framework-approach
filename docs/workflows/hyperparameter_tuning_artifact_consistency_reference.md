@@ -1,6 +1,6 @@
 # Hyperparameter Tuning Artifact Consistency Reference
 
-This reference documents artifact-quality rules discovered while integrating hyperparameter tuning into the `scikit-learn` linear regression template, and provides a repeatable rollout pattern for other templates.
+This reference documents artifact-quality rules used for hyperparameter tuning across non-CNN templates (`scikit-learn`, `xgboost`, and `tensorflow dense`) and provides a repeatable rollout pattern for new templates.
 
 ## Why This Reference Exists
 
@@ -15,10 +15,17 @@ Root cause:
 Additional issue found during validation:
 - The non-tuning path did not call `model.fit(...)`, causing `NotFittedError` before artifact export.
 
-## What Was Updated (Linear Regression Template)
+## What Was Updated (Non-CNN Templates)
 
-File updated:
+Representative files:
 - [tools/model_templates/scikit-learn_linear_regression_template.py](tools/model_templates/scikit-learn_linear_regression_template.py)
+- [tools/model_templates/scikit-learn_logistic_regression_template.py](tools/model_templates/scikit-learn_logistic_regression_template.py)
+- [tools/model_templates/scikit-learn_random_forest_classification_template.py](tools/model_templates/scikit-learn_random_forest_classification_template.py)
+- [tools/model_templates/scikit-learn_random_forest_regression_template.py](tools/model_templates/scikit-learn_random_forest_regression_template.py)
+- [tools/model_templates/xgboost_classification_template.py](tools/model_templates/xgboost_classification_template.py)
+- [tools/model_templates/xgboost_regression_template.py](tools/model_templates/xgboost_regression_template.py)
+- [tools/model_templates/tensorflow_dense_neural_network_classification_template.py](tools/model_templates/tensorflow_dense_neural_network_classification_template.py)
+- [tools/model_templates/tensorflow_dense_neural_network_regression_template.py](tools/model_templates/tensorflow_dense_neural_network_regression_template.py)
 
 Changes:
 1. Added JSON-safe tuning-param sanitization helpers:
@@ -30,6 +37,8 @@ Changes:
    - Write sanitized params to artifacts (`best_params`)
 3. Restored non-tuning training path:
    - Added `model.fit(X_train, y_train)` when `--enable-tuning=false`
+4. Standardized metadata blocks:
+   - `training_control`, `selection`, and `tuning` consistently written to `metrics.json` and `run.json`
 
 ## Artifact Contract Expectations for Tuning
 
@@ -101,4 +110,12 @@ python .\tools\generate_model.py --library scikit-learn --model linear_regressio
 
 ```powershell
 .\.venv\Scripts\python.exe .\models\lr_artifact_notune_check.py --save-model=true
+```
+
+```powershell
+python .\tools\generate_model.py --library xgboost --task regression --name xgb_artifact_tune_check --default-xgb-enable-tuning true --default-xgb-cv-scoring rmse --default-xgb-cv-n-iter 8
+```
+
+```powershell
+python .\tools\generate_model.py --library tensorflow --model dense_nn --task regression --name tf_artifact_tune_check --optimizer adam --learning_rate 0.001 --epochs 20 --batch_size 32 --default-tf-enable-tuning true --default-tf-cv-scoring rmse --default-tf-cv-n-iter 6
 ```

@@ -32,7 +32,7 @@ from sklearn.metrics import (
 	roc_auc_score,
 	roc_curve,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 
@@ -74,6 +74,12 @@ from libraries.model_template_helpers import (
 #   --class-weight none|balanced
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
+#   --enable-tuning true|false
+#   --tuning-method grid|random
+#   --cv-folds <int>
+#   --cv-scoring accuracy|f1|f1_macro|roc_auc
+#   --cv-n-iter <int>
+#   --cv-n-jobs <int>
 # ---------------------------------------------------------------------
 
 # Default values for optional parameters. These can be overridden via CLI.
@@ -88,6 +94,12 @@ LOGISTIC_SOLVERS = ["lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag",
 LOGISTIC_PENALTIES = ["none", "l1", "l2", "elasticnet"]
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
+DEFAULT_ENABLE_TUNING = "{{LOGISTIC_ENABLE_TUNING_DEFAULT}}" == "True"
+DEFAULT_TUNING_METHOD = "{{LOGISTIC_TUNING_METHOD_DEFAULT}}"
+DEFAULT_CV_FOLDS = int("{{LOGISTIC_CV_FOLDS_DEFAULT}}")
+DEFAULT_CV_SCORING = "{{LOGISTIC_CV_SCORING_DEFAULT}}"
+DEFAULT_CV_N_ITER = int("{{LOGISTIC_CV_N_ITER_DEFAULT}}")
+DEFAULT_CV_N_JOBS = int("{{LOGISTIC_CV_N_JOBS_DEFAULT}}")
 
 # Helper function: resolve n_iter_ for iterative classifiers, handling different formats.
 def _resolved_n_iter(model_step) -> int | None:
@@ -117,6 +129,12 @@ parser.add_argument("--penalty", choices=LOGISTIC_PENALTIES, default=DEFAULT_PEN
 parser.add_argument("--class-weight", choices=["none", "balanced"], default=DEFAULT_CLASS_WEIGHT)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
+parser.add_argument("--enable-tuning", type=_parse_bool, default=DEFAULT_ENABLE_TUNING)
+parser.add_argument("--tuning-method", choices=["grid", "random"], default=DEFAULT_TUNING_METHOD)
+parser.add_argument("--cv-folds", type=int, default=DEFAULT_CV_FOLDS)
+parser.add_argument("--cv-scoring", choices=["f1_macro", "accuracy", "roc_auc_ovr"], default=DEFAULT_CV_SCORING)
+parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
+parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
 args = parser.parse_args()
 
 # Solver/penalty compatibility validation.
@@ -134,6 +152,91 @@ if args.penalty not in _SOLVER_PENALTY_COMPAT.get(args.solver, set()):
 		f"Solver '{args.solver}' does not support penalty='{args.penalty}'. "
 		f"Valid penalties for {args.solver}: {valid_penalties}"
 	)
+
+
+def _cv_scoring_name(name: str) -> str:
+	mapping = {
+		"f1_macro": "f1_macro",
+		"accuracy": "accuracy",
+		"roc_auc_ovr": "roc_auc_ovr",
+	}
+	if name not in mapping:
+		raise ValueError(f"Unsupported --cv-scoring '{name}'. Choose from: f1_macro, accuracy, roc_auc_ovr")
+	return mapping[name]
+
+
+def _build_search_space(random_state: int) -> list[dict[str, list]]:
+	common_c = [0.01, 0.1, 1.0, 10.0]
+	common_max_iter = [500, 1000, 2000]
+	return [
+		{
+			"classifier__solver": ["lbfgs", "newton-cg", "sag", "newton-cholesky"],
+			"classifier__penalty": [None, "l2"],
+			"classifier__C": common_c,
+			"classifier__class_weight": [None, "balanced"],
+			"classifier__max_iter": common_max_iter,
+		},
+		{
+			"classifier__solver": ["liblinear"],
+			"classifier__penalty": ["l1", "l2"],
+			"classifier__C": common_c,
+			"classifier__class_weight": [None, "balanced"],
+			"classifier__max_iter": common_max_iter,
+		},
+		{
+			"classifier__solver": ["saga"],
+			"classifier__penalty": ["l1", "l2", None],
+			"classifier__C": common_c,
+			"classifier__class_weight": [None, "balanced"],
+			"classifier__max_iter": common_max_iter,
+		},
+		{
+			"classifier__solver": ["saga"],
+			"classifier__penalty": ["elasticnet"],
+			"classifier__l1_ratio": [0.2, 0.5, 0.8],
+			"classifier__C": common_c,
+			"classifier__class_weight": [None, "balanced"],
+			"classifier__max_iter": common_max_iter,
+		},
+	]
+
+
+def _search_space_size(search_space: list[dict[str, list]]) -> int:
+	total = 0
+	for space in search_space:
+		lengths = [len(values) for values in space.values() if isinstance(values, list)]
+		total += int(np.prod(lengths)) if lengths else 0
+	return total
+
+
+def _json_safe_param_value(value):
+	if value is None:
+		return None
+	if isinstance(value, (bool, int, float, str)):
+		if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
+			return None
+		return value
+	if isinstance(value, (np.integer,)):
+		return int(value)
+	if isinstance(value, (np.floating,)):
+		numeric = float(value)
+		if np.isnan(numeric) or np.isinf(numeric):
+			return None
+		return numeric
+	if isinstance(value, (np.bool_,)):
+		return bool(value)
+	if isinstance(value, (list, tuple)):
+		return [_json_safe_param_value(item) for item in value]
+	if isinstance(value, dict):
+		return {str(key): _json_safe_param_value(item) for key, item in value.items()}
+	if hasattr(value, "get_params"):
+		return type(value).__name__
+	return str(value)
+
+
+def _json_safe_best_params(params: dict[str, object]) -> dict[str, object]:
+	return {str(key): _json_safe_param_value(value) for key, value in params.items()}
+
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
 METRIC_DECIMALS = int(args.metric_decimals)
@@ -318,35 +421,101 @@ model = Pipeline(
 # =============================================================
 # ===================== TRAIN MODEL ===========================
 # =============================================================
-# ---------------------------------------------------------------------
-# EARLY STOPPING (optional)
-# - Enabled with --early-stopping=true.
-# - Uses --validation-fraction as holdout split from training data.
-# - Stops when validation score does not improve for --n-iter-no-change rounds.
-# - When disabled, trains once on full training split.
-# ---------------------------------------------------------------------
+selected_cv_scoring = _cv_scoring_name(args.cv_scoring)
+tuning_summary = {
+	"enabled": False,
+	"method": None,
+	"cv_folds": None,
+	"scoring": None,
+	"scoring_sklearn": None,
+	"n_iter": None,
+	"n_candidates": None,
+	"best_score": None,
+	"best_score_std": None,
+	"best_params": None,
+}
 
-# Fit on training data (pipeline fits preprocessors + model).
 fit_started_at = time.perf_counter()
 if training_verbose > 0:
-	print(f"Training started: {classifier_name}")
-model.fit(X_train, y_train)
-fit_time_seconds = float(time.perf_counter() - fit_started_at)
-if training_verbose > 0:
-	print(f"Training completed in {fit_time_seconds:.3f}s: {classifier_name}")
+	if args.enable_tuning:
+		print(
+			f"Training started with tuning: method={args.tuning_method}, "
+			f"cv={args.cv_folds}, scoring={args.cv_scoring}"
+		)
+	else:
+		print(f"Training started: {classifier_name}")
 
+if args.enable_tuning:
+	search_space = _build_search_space(int(args.random_state))
+	if args.tuning_method == "grid":
+		search = GridSearchCV(
+			estimator=model,
+			param_grid=search_space,
+			scoring=selected_cv_scoring,
+			cv=int(args.cv_folds),
+			n_jobs=int(args.cv_n_jobs),
+			refit=False,
+		)
+	else:
+		n_iter = int(args.cv_n_iter)
+		n_candidates_upper = _search_space_size(search_space)
+		if n_candidates_upper > 0:
+			n_iter = min(n_iter, n_candidates_upper)
+		search = RandomizedSearchCV(
+			estimator=model,
+			param_distributions=search_space,
+			n_iter=int(n_iter),
+			scoring=selected_cv_scoring,
+			cv=int(args.cv_folds),
+			n_jobs=int(args.cv_n_jobs),
+			refit=False,
+			random_state=int(args.random_state),
+		)
+
+	search.fit(X_train, y_train)
+	best_params = dict(search.best_params_)
+	best_params_for_artifacts = _json_safe_best_params(best_params)
+	model.set_params(**best_params)
+	model.fit(X_train, y_train)
+
+	best_score = float(search.best_score_)
+	best_std = None
+	if hasattr(search, "cv_results_") and "std_test_score" in search.cv_results_:
+		best_std = float(search.cv_results_["std_test_score"][search.best_index_])
+	n_candidates = int(len(search.cv_results_["params"])) if hasattr(search, "cv_results_") else None
+	tuning_summary = {
+		"enabled": True,
+		"method": args.tuning_method,
+		"cv_folds": int(args.cv_folds),
+		"scoring": args.cv_scoring,
+		"scoring_sklearn": selected_cv_scoring,
+			"n_iter": int(search.n_iter) if args.tuning_method == "random" else None,
+		"n_candidates": n_candidates,
+		"best_score": _round_metric(best_score),
+		"best_score_std": _round_metric(best_std) if best_std is not None else None,
+		"best_params": _compact_metadata(best_params_for_artifacts),
+	}
+else:
+	model.fit(X_train, y_train)
+
+fit_time_seconds = float(time.perf_counter() - fit_started_at)
 classifier_step = model.named_steps["classifier"]
 resolved_n_iter = _resolved_n_iter(classifier_step)
+if training_verbose > 0:
+	print(f"Training completed in {fit_time_seconds:.3f}s: {type(classifier_step).__name__}")
 
 training_control = {
-	"enabled": False,
-	"strategy": None,
-	"monitor_name": None,
-	"monitor_mode": None,
-	"max_steps_configured": int(args.max_iter),
-	"steps_completed": int(resolved_n_iter) if resolved_n_iter is not None else None,
+	"enabled": bool(tuning_summary["enabled"]),
+	"type": f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
+	"max_steps_configured": tuning_summary["n_candidates"] if args.tuning_method == "grid" else (int(tuning_summary["n_iter"]) if tuning_summary["enabled"] and tuning_summary["n_iter"] is not None else int(args.max_iter)),
+	"steps_completed": int(args.cv_folds) * int(tuning_summary["n_candidates"]) if tuning_summary["enabled"] and tuning_summary["n_candidates"] is not None else (int(resolved_n_iter) if resolved_n_iter is not None else None),
+	"patience": None,
+	"monitor_metric": f"cv_{args.cv_scoring}" if tuning_summary["enabled"] else None,
+	"monitor_split": "cv" if tuning_summary["enabled"] else None,
+	"monitor_direction": "max" if tuning_summary["enabled"] else None,
 	"best_step": None,
-	"best_score": None,
+	"best_score": tuning_summary["best_score"],
+	"stopped_early": False,
 }
 
 # =============================================================
@@ -537,6 +706,7 @@ if SAVE_MODEL:
 			"calibration_method": None,
 		},
 		"training_control": training_control,
+		"tuning": tuning_summary,
 	}
 	metrics["selection"] = training_control
 	metrics["calibration"] = metrics.get("probabilities")
@@ -695,10 +865,10 @@ print(results)
 			"random_state": int(args.random_state),
 			"stratify": True,
 			"validation": {
-				"enabled": False,
-				"strategy": None,
+				"enabled": bool(tuning_summary["enabled"]),
+				"strategy": f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
 				"validation_fraction": None,
-				"random_state": None,
+				"random_state": int(args.random_state) if tuning_summary["enabled"] else None,
 			},
 			"sizes": {
 				"n_rows": data_rows,
@@ -730,17 +900,15 @@ print(results)
 			"c": float(args.c),
 			"solver": args.solver,
 			"class_weight": args.class_weight,
+			"enable_tuning": bool(tuning_summary["enabled"]),
+			"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
+			"cv_folds": int(args.cv_folds) if tuning_summary["enabled"] else None,
+			"cv_scoring": args.cv_scoring if tuning_summary["enabled"] else None,
+			"cv_n_iter": int(args.cv_n_iter) if tuning_summary["enabled"] and args.tuning_method == "random" else None,
+			"cv_n_jobs": int(args.cv_n_jobs) if tuning_summary["enabled"] else None,
 		},
+		"tuning": tuning_summary,
 		"selection": training_control,
-		"optimization": {
-			"optimizer": None,
-			"learning_rate": None,
-			"batch_size": None,
-			"epochs_configured": None,
-			"epochs_completed": None,
-			"gradient_clip_norm": None,
-			"lr_scheduler": None,
-		},
 		"training_control": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
@@ -795,6 +963,9 @@ print(results)
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
 				"random_state": int(args.random_state),
+				"tuning_enabled": bool(tuning_summary["enabled"]),
+				"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
+				"cv_best_score": tuning_summary["best_score"],
 				"accuracy": _round_metric(test_accuracy),
 				"balanced_accuracy": _round_metric(test_balanced_accuracy),
 				"precision_macro": _round_metric(test_precision_macro),

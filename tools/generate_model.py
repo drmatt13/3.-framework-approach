@@ -105,12 +105,14 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 # ---------------------------------------------------------
 
 SKLEARN_MODELS = {"linear_regression", "logistic_regression", "random_forest"}
-TENSORFLOW_MODELS = {"dense_nn", "cnn"}
+TENSORFLOW_MODELS = {"dense_nn"}
 TASKS = {"regression", "binary_classification", "multiclass_classification"}
 XGBOOST_BOOSTERS = {"gbtree", "gblinear", "dart"}
 XGBOOST_DEVICES = {"auto", "cpu", "gpu"}
 TENSORFLOW_OPTIMIZERS = {"adam", "sgd", "rmsprop", "adagrad", "adamw"}
 SKLEARN_LOGISTIC_SOLVERS = {"lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"}
+CLASSIFICATION_CV_SCORINGS = {"f1_macro", "accuracy", "roc_auc_ovr"}
+REGRESSION_CV_SCORINGS = {"rmse", "mae", "r2"}
 
 SKLEARN_MODEL_TASKS = {
     "linear_regression": {"regression"},
@@ -120,7 +122,6 @@ SKLEARN_MODEL_TASKS = {
 
 TENSORFLOW_MODEL_TASKS = {
     "dense_nn": TASKS,
-    "cnn": TASKS,
 }
 
 OPTIMIZER_CLASS_MAP = {
@@ -166,6 +167,12 @@ DEFAULT_XGBOOST_PARAMS_BY_TEMPLATE = {
         "min_child_weight": 1.0,
         "reg_lambda": 1.0,
         "reg_alpha": 0.0,
+        "enable_tuning": False,
+        "tuning_method": "random",
+        "cv_folds": 5,
+        "cv_scoring": "f1_macro",
+        "cv_n_iter": 20,
+        "cv_n_jobs": -1,
     },
     ("xgboost", "regression"): {
         "n_estimators": 300,
@@ -176,6 +183,12 @@ DEFAULT_XGBOOST_PARAMS_BY_TEMPLATE = {
         "min_child_weight": 1.0,
         "reg_lambda": 1.0,
         "reg_alpha": 0.0,
+        "enable_tuning": False,
+        "tuning_method": "random",
+        "cv_folds": 5,
+        "cv_scoring": "rmse",
+        "cv_n_iter": 20,
+        "cv_n_jobs": -1,
     },
 }
 
@@ -185,6 +198,12 @@ DEFAULT_LOGISTIC_PARAMS_BY_TEMPLATE = {
         "solver": "lbfgs",
         "penalty": "l2",
         "class_weight": "none",
+        "enable_tuning": False,
+        "tuning_method": "grid",
+        "cv_folds": 5,
+        "cv_scoring": "f1_macro",
+        "cv_n_iter": 20,
+        "cv_n_jobs": -1,
     },
 }
 
@@ -194,12 +213,39 @@ DEFAULT_RANDOM_FOREST_PARAMS_BY_TEMPLATE = {
         "max_depth": 16,
         "min_samples_leaf": 1,
         "max_features": "sqrt",
+        "enable_tuning": False,
+        "tuning_method": "grid",
+        "cv_folds": 5,
+        "cv_scoring": "f1_macro",
+        "cv_n_iter": 20,
+        "cv_n_jobs": -1,
     },
     ("scikit-learn", "random_forest", "regression"): {
         "n_estimators": 300,
         "max_depth": 16,
         "min_samples_leaf": 1,
         "max_features": "1.0",
+        "enable_tuning": False,
+        "tuning_method": "grid",
+        "cv_folds": 5,
+        "cv_scoring": "rmse",
+        "cv_n_iter": 20,
+        "cv_n_jobs": -1,
+    },
+}
+
+DEFAULT_TENSORFLOW_DENSE_PARAMS_BY_TEMPLATE = {
+    ("tensorflow", "dense_nn", "classification"): {
+        "enable_tuning": False,
+        "tuning_method": "random",
+        "cv_scoring": "f1_macro",
+        "cv_n_iter": 10,
+    },
+    ("tensorflow", "dense_nn", "regression"): {
+        "enable_tuning": False,
+        "tuning_method": "random",
+        "cv_scoring": "rmse",
+        "cv_n_iter": 10,
     },
 }
 
@@ -230,54 +276,24 @@ STARTER_DATASETS_BY_FAMILY = {
     ],
 }
 
-# Pre-computed dataset metadata for context-aware hyperparameter defaults.
-DATASET_META = {
-    "iris.csv": {"rows": 151, "features": 4},
-    "titanic.csv": {"rows": 419, "features": 11},
-    "breast_cancer_wisconsin.csv": {"rows": 569, "features": 30},
-    "insurance.csv": {"rows": 1339, "features": 6},
-    "car_evaluation.csv": {"rows": 1728, "features": 6},
-    "ames_housing.csv": {"rows": 2931, "features": 79},
-    "wine_quality.csv": {"rows": 6498, "features": 12},
-    "mushrooms.csv": {"rows": 8124, "features": 22},
-    "dry_bean.csv": {"rows": 13612, "features": 16},
-    "california_housing.csv": {"rows": 20641, "features": 9},
-    "adult_income.csv": {"rows": 32562, "features": 14},
-    "forest_cover_type.csv": {"rows": 581012, "features": 54},
-}
-
-
-def dataset_size_bucket(dataset_name: str | None) -> str:
-    """Return 'small', 'medium', or 'large' based on pre-computed row count."""
-    if dataset_name is None or dataset_name not in DATASET_META:
-        return "medium"  # safe fallback
-    rows = DATASET_META[dataset_name]["rows"]
-    if rows < 2000:
-        return "small"
-    if rows <= 20000:
-        return "medium"
-    return "large"
 
 STARTER_DATASET_CONFIG = {
     "ames_housing.csv": {
         "data_file": "ames_housing.csv",
         "target_column": "SalePrice",
         "feature_drop_columns": '["SalePrice", "Order", "PID"]',
-        "columns_to_drop": '["Order", "PID"]',
         "target_preprocess": 'y = y.astype("float64")',
     },
     "california_housing.csv": {
         "data_file": "california_housing.csv",
         "target_column": "median_house_value",
         "feature_drop_columns": '["median_house_value"]',
-        "columns_to_drop": '[]',
         "target_preprocess": 'y = y.astype("float64")',
     },
     "insurance.csv": {
         "data_file": "insurance.csv",
         "target_column": "charges",
         "feature_drop_columns": '["charges"]',
-        "columns_to_drop": '[]',
         "target_preprocess": 'y = y.astype("float64")',
     },
     "adult_income.csv": {
@@ -416,12 +432,6 @@ def template_filename(args: argparse.Namespace) -> str:
                 if family == "classification"
                 else "tensorflow_dense_neural_network_regression_template.py"
             )
-        if args.model == "cnn":
-            return (
-                "tensorflow_convolutional_neural_network_classification_template.py"
-                if family == "classification"
-                else "tensorflow_convolutional_neural_network_regression_template.py"
-            )
 
     raise ValueError("No template mapping found for provided flags")
 
@@ -455,7 +465,6 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                 "DATA_TASK_DIR": _task_dataset_dir(args.task),
                 "DATA_FILE": linear_dataset["data_file"],
                 "TARGET_COLUMN": linear_dataset["target_column"],
-                "COLUMNS_TO_DROP": linear_dataset["columns_to_drop"],
                 "FEATURE_DROP_COLUMNS": linear_dataset["feature_drop_columns"],
                 "TARGET_PREPROCESS": linear_dataset["target_preprocess"],
                 "LR_PENALTY_DEFAULT": str(default_lr_penalty),
@@ -506,12 +515,24 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         default_solver = args.default_solver if args.default_solver is not None else logistic_defaults["solver"]
         default_penalty = args.default_logistic_penalty if args.default_logistic_penalty is not None else logistic_defaults["penalty"]
         default_class_weight = args.default_logistic_class_weight if args.default_logistic_class_weight is not None else logistic_defaults["class_weight"]
+        default_enable_tuning = args.default_logistic_enable_tuning if args.default_logistic_enable_tuning is not None else logistic_defaults["enable_tuning"]
+        default_tuning_method = args.default_logistic_tuning_method if args.default_logistic_tuning_method is not None else logistic_defaults["tuning_method"]
+        default_cv_folds = args.default_logistic_cv_folds if args.default_logistic_cv_folds is not None else logistic_defaults["cv_folds"]
+        default_cv_scoring = args.default_logistic_cv_scoring if args.default_logistic_cv_scoring is not None else logistic_defaults["cv_scoring"]
+        default_cv_n_iter = args.default_logistic_cv_n_iter if args.default_logistic_cv_n_iter is not None else logistic_defaults["cv_n_iter"]
+        default_cv_n_jobs = args.default_logistic_cv_n_jobs if args.default_logistic_cv_n_jobs is not None else logistic_defaults["cv_n_jobs"]
         replacements.update(
             {
                 "LOGISTIC_C_DEFAULT": str(float(default_c)),
                 "LOGISTIC_SOLVER_DEFAULT": str(default_solver),
                 "LOGISTIC_PENALTY_DEFAULT": str(default_penalty),
                 "LOGISTIC_CLASS_WEIGHT_DEFAULT": str(default_class_weight),
+                "LOGISTIC_ENABLE_TUNING_DEFAULT": "True" if default_enable_tuning else "False",
+                "LOGISTIC_TUNING_METHOD_DEFAULT": str(default_tuning_method),
+                "LOGISTIC_CV_FOLDS_DEFAULT": str(int(default_cv_folds)),
+                "LOGISTIC_CV_SCORING_DEFAULT": str(default_cv_scoring),
+                "LOGISTIC_CV_N_ITER_DEFAULT": str(int(default_cv_n_iter)),
+                "LOGISTIC_CV_N_JOBS_DEFAULT": str(int(default_cv_n_jobs)),
             }
         )
 
@@ -562,12 +583,24 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             if args.default_rf_max_features is not None
             else rf_defaults["max_features"]
         )
+        default_enable_tuning = args.default_rf_enable_tuning if args.default_rf_enable_tuning is not None else rf_defaults["enable_tuning"]
+        default_tuning_method = args.default_rf_tuning_method if args.default_rf_tuning_method is not None else rf_defaults["tuning_method"]
+        default_cv_folds = args.default_rf_cv_folds if args.default_rf_cv_folds is not None else rf_defaults["cv_folds"]
+        default_cv_scoring = args.default_rf_cv_scoring if args.default_rf_cv_scoring is not None else rf_defaults["cv_scoring"]
+        default_cv_n_iter = args.default_rf_cv_n_iter if args.default_rf_cv_n_iter is not None else rf_defaults["cv_n_iter"]
+        default_cv_n_jobs = args.default_rf_cv_n_jobs if args.default_rf_cv_n_jobs is not None else rf_defaults["cv_n_jobs"]
         replacements.update(
             {
                 "RF_N_ESTIMATORS_DEFAULT": str(int(default_rf_n_estimators)),
                 "RF_MAX_DEPTH_DEFAULT": str(int(default_rf_max_depth)),
                 "RF_MIN_SAMPLES_LEAF_DEFAULT": str(int(default_rf_min_samples_leaf)),
                 "RF_MAX_FEATURES_DEFAULT": str(default_rf_max_features),
+                "RF_ENABLE_TUNING_DEFAULT": "True" if default_enable_tuning else "False",
+                "RF_TUNING_METHOD_DEFAULT": str(default_tuning_method),
+                "RF_CV_FOLDS_DEFAULT": str(int(default_cv_folds)),
+                "RF_CV_SCORING_DEFAULT": str(default_cv_scoring),
+                "RF_CV_N_ITER_DEFAULT": str(int(default_cv_n_iter)),
+                "RF_CV_N_JOBS_DEFAULT": str(int(default_cv_n_jobs)),
             }
         )
 
@@ -616,7 +649,7 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
 
     if args.library == "xgboost":
         booster = args.booster or "gbtree"
-        device = args.device or "auto"
+        device = args.device or "cpu"
         xgboost_defaults = DEFAULT_XGBOOST_PARAMS_BY_TEMPLATE[("xgboost", family)]
         default_n_estimators = args.default_n_estimators if args.default_n_estimators is not None else xgboost_defaults["n_estimators"]
         default_learning_rate = (
@@ -644,6 +677,12 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             if args.default_xgb_reg_alpha is not None
             else xgboost_defaults["reg_alpha"]
         )
+        default_enable_tuning = args.default_xgb_enable_tuning if args.default_xgb_enable_tuning is not None else xgboost_defaults["enable_tuning"]
+        default_tuning_method = args.default_xgb_tuning_method if args.default_xgb_tuning_method is not None else xgboost_defaults["tuning_method"]
+        default_cv_folds = args.default_xgb_cv_folds if args.default_xgb_cv_folds is not None else xgboost_defaults["cv_folds"]
+        default_cv_scoring = args.default_xgb_cv_scoring if args.default_xgb_cv_scoring is not None else xgboost_defaults["cv_scoring"]
+        default_cv_n_iter = args.default_xgb_cv_n_iter if args.default_xgb_cv_n_iter is not None else xgboost_defaults["cv_n_iter"]
+        default_cv_n_jobs = args.default_xgb_cv_n_jobs if args.default_xgb_cv_n_jobs is not None else xgboost_defaults["cv_n_jobs"]
 
         replacements.update(
             {
@@ -655,6 +694,12 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                 "XGB_MIN_CHILD_WEIGHT_DEFAULT": str(float(default_min_child_weight)),
                 "XGB_REG_LAMBDA_DEFAULT": str(float(default_reg_lambda)),
                 "XGB_REG_ALPHA_DEFAULT": str(float(default_reg_alpha)),
+                "XGB_ENABLE_TUNING_DEFAULT": "True" if default_enable_tuning else "False",
+                "XGB_TUNING_METHOD_DEFAULT": str(default_tuning_method),
+                "XGB_CV_FOLDS_DEFAULT": str(int(default_cv_folds)),
+                "XGB_CV_SCORING_DEFAULT": str(default_cv_scoring),
+                "XGB_CV_N_ITER_DEFAULT": str(int(default_cv_n_iter)),
+                "XGB_CV_N_JOBS_DEFAULT": str(int(default_cv_n_jobs)),
             }
         )
 
@@ -708,6 +753,11 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
             )
 
     if args.library == "tensorflow":
+        tf_defaults = DEFAULT_TENSORFLOW_DENSE_PARAMS_BY_TEMPLATE[("tensorflow", "dense_nn", family)]
+        default_enable_tuning = args.default_tf_enable_tuning if args.default_tf_enable_tuning is not None else tf_defaults["enable_tuning"]
+        default_tuning_method = args.default_tf_tuning_method if args.default_tf_tuning_method is not None else tf_defaults["tuning_method"]
+        default_cv_scoring = args.default_tf_cv_scoring if args.default_tf_cv_scoring is not None else tf_defaults["cv_scoring"]
+        default_cv_n_iter = args.default_tf_cv_n_iter if args.default_tf_cv_n_iter is not None else tf_defaults["cv_n_iter"]
         replacements.update(
             {
                 "OPTIMIZER_CTOR": OPTIMIZER_CLASS_MAP[args.optimizer],
@@ -715,6 +765,10 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                 "LEARNING_RATE": str(args.learning_rate),
                 "EPOCHS": str(args.epochs),
                 "BATCH_SIZE": str(args.batch_size),
+                "TF_ENABLE_TUNING_DEFAULT": "True" if default_enable_tuning else "False",
+                "TF_TUNING_METHOD_DEFAULT": str(default_tuning_method),
+                "TF_CV_SCORING_DEFAULT": str(default_cv_scoring),
+                "TF_CV_N_ITER_DEFAULT": str(int(default_cv_n_iter)),
             }
         )
 
@@ -843,10 +897,40 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Invalid --default-rf-min-samples-leaf. Must be >= 1")
     if args.default_lr_l1_ratio is not None and not (0.0 <= args.default_lr_l1_ratio <= 1.0):
         raise ValueError("Invalid --default-lr-l1-ratio. Allowed range: 0 <= value <= 1")
+    if args.default_lr_alpha is not None and args.default_lr_alpha <= 0:
+        raise ValueError("Invalid --default-lr-alpha. Must be a positive number")
+    if args.default_xgb_min_child_weight is not None and args.default_xgb_min_child_weight <= 0:
+        raise ValueError("Invalid --default-xgb-min-child-weight. Must be a positive number")
+    if args.default_xgb_reg_lambda is not None and args.default_xgb_reg_lambda < 0:
+        raise ValueError("Invalid --default-xgb-reg-lambda. Must be >= 0")
+    if args.default_xgb_reg_alpha is not None and args.default_xgb_reg_alpha < 0:
+        raise ValueError("Invalid --default-xgb-reg-alpha. Must be >= 0")
     if args.default_lr_cv_folds is not None and args.default_lr_cv_folds < 2:
         raise ValueError("Invalid --default-lr-cv-folds. Must be >= 2")
     if args.default_lr_cv_n_iter is not None and args.default_lr_cv_n_iter <= 0:
         raise ValueError("Invalid --default-lr-cv-n-iter. Must be a positive integer")
+    if args.default_lr_cv_n_jobs is not None and args.default_lr_cv_n_jobs == 0:
+        raise ValueError("Invalid --default-lr-cv-n-jobs. Must be != 0 (use -1 for all cores)")
+    if args.default_logistic_cv_folds is not None and args.default_logistic_cv_folds < 2:
+        raise ValueError("Invalid --default-logistic-cv-folds. Must be >= 2")
+    if args.default_logistic_cv_n_iter is not None and args.default_logistic_cv_n_iter <= 0:
+        raise ValueError("Invalid --default-logistic-cv-n-iter. Must be a positive integer")
+    if args.default_logistic_cv_n_jobs is not None and args.default_logistic_cv_n_jobs == 0:
+        raise ValueError("Invalid --default-logistic-cv-n-jobs. Must be != 0 (use -1 for all cores)")
+    if args.default_rf_cv_folds is not None and args.default_rf_cv_folds < 2:
+        raise ValueError("Invalid --default-rf-cv-folds. Must be >= 2")
+    if args.default_rf_cv_n_iter is not None and args.default_rf_cv_n_iter <= 0:
+        raise ValueError("Invalid --default-rf-cv-n-iter. Must be a positive integer")
+    if args.default_rf_cv_n_jobs is not None and args.default_rf_cv_n_jobs == 0:
+        raise ValueError("Invalid --default-rf-cv-n-jobs. Must be != 0 (use -1 for all cores)")
+    if args.default_xgb_cv_folds is not None and args.default_xgb_cv_folds < 2:
+        raise ValueError("Invalid --default-xgb-cv-folds. Must be >= 2")
+    if args.default_xgb_cv_n_iter is not None and args.default_xgb_cv_n_iter <= 0:
+        raise ValueError("Invalid --default-xgb-cv-n-iter. Must be a positive integer")
+    if args.default_xgb_cv_n_jobs is not None and args.default_xgb_cv_n_jobs == 0:
+        raise ValueError("Invalid --default-xgb-cv-n-jobs. Must be != 0 (use -1 for all cores)")
+    if args.default_tf_cv_n_iter is not None and args.default_tf_cv_n_iter <= 0:
+        raise ValueError("Invalid --default-tf-cv-n-iter. Must be a positive integer")
 
     if args.starter_dataset is not None:
         allowed = STARTER_DATASETS_BY_FAMILY[args.task]
@@ -868,6 +952,7 @@ def validate_args(args: argparse.Namespace) -> None:
     max_iter_default_provided = args.default_max_iter is not None
 
     if args.library == "xgboost":
+        family = task_family(args.task)
         if args.model is not None:
             raise ValueError("Invalid flags: xgboost does not use --model. Omit --model entirely.")
         if args.booster is not None and args.booster not in XGBOOST_BOOSTERS:
@@ -914,13 +999,46 @@ def validate_args(args: argparse.Namespace) -> None:
                 "--default-lr-enable-tuning/--default-lr-tuning-method/--default-lr-cv-folds/--default-lr-cv-scoring/"
                 "--default-lr-cv-n-iter/--default-lr-cv-n-jobs are scikit-learn linear_regression-only"
             )
-        if args.default_xgb_min_child_weight is not None or args.default_xgb_reg_lambda is not None or args.default_xgb_reg_alpha is not None:
+        if (
+            args.default_logistic_enable_tuning is not None
+            or args.default_logistic_tuning_method is not None
+            or args.default_logistic_cv_folds is not None
+            or args.default_logistic_cv_scoring is not None
+            or args.default_logistic_cv_n_iter is not None
+            or args.default_logistic_cv_n_jobs is not None
+            or args.default_rf_enable_tuning is not None
+            or args.default_rf_tuning_method is not None
+            or args.default_rf_cv_folds is not None
+            or args.default_rf_cv_scoring is not None
+            or args.default_rf_cv_n_iter is not None
+            or args.default_rf_cv_n_jobs is not None
+        ):
             raise ValueError(
-                "Invalid flags: --default-xgb-min-child-weight/--default-xgb-reg-lambda/--default-xgb-reg-alpha are xgboost-only"
+                "Invalid flags: scikit-learn tuning defaults are not supported for xgboost"
+            )
+        if args.default_xgb_tuning_method is not None and args.default_xgb_tuning_method != "random":
+            raise ValueError("Invalid --default-xgb-tuning-method. Allowed: random")
+        if args.default_xgb_cv_scoring is not None:
+            allowed_scoring = REGRESSION_CV_SCORINGS if family == "regression" else CLASSIFICATION_CV_SCORINGS
+            if args.default_xgb_cv_scoring not in allowed_scoring:
+                allowed = ", ".join(sorted(allowed_scoring))
+                raise ValueError(
+                    f"Invalid --default-xgb-cv-scoring '{args.default_xgb_cv_scoring}' for task '{args.task}'. "
+                    f"Allowed: {allowed}"
+                )
+        if (
+            args.default_tf_enable_tuning is not None
+            or args.default_tf_tuning_method is not None
+            or args.default_tf_cv_scoring is not None
+            or args.default_tf_cv_n_iter is not None
+        ):
+            raise ValueError(
+                "Invalid flags: --default-tf-enable-tuning/--default-tf-tuning-method/--default-tf-cv-scoring/--default-tf-cv-n-iter are tensorflow-only"
             )
         return
 
     if args.library == "scikit-learn":
+        family = task_family(args.task)
         if not args.model:
             raise ValueError("--model is required for scikit-learn")
         if args.model not in SKLEARN_MODELS:
@@ -989,6 +1107,20 @@ def validate_args(args: argparse.Namespace) -> None:
                     "--default-lr-enable-tuning/--default-lr-tuning-method/--default-lr-cv-folds/--default-lr-cv-scoring/"
                     "--default-lr-cv-n-iter/--default-lr-cv-n-jobs are scikit-learn linear_regression-only"
                 )
+            if (
+                args.default_rf_enable_tuning is not None
+                or args.default_rf_tuning_method is not None
+                or args.default_rf_cv_folds is not None
+                or args.default_rf_cv_scoring is not None
+                or args.default_rf_cv_n_iter is not None
+                or args.default_rf_cv_n_jobs is not None
+            ):
+                raise ValueError(
+                    "Invalid flags: --default-rf-enable-tuning/--default-rf-tuning-method/--default-rf-cv-folds/"
+                    "--default-rf-cv-scoring/--default-rf-cv-n-iter/--default-rf-cv-n-jobs are scikit-learn random_forest-only"
+                )
+            if args.default_logistic_tuning_method is not None and args.default_logistic_tuning_method not in {"grid", "random"}:
+                raise ValueError("Invalid --default-logistic-tuning-method. Allowed: grid, random")
         elif args.model == "linear_regression":
             if args.default_c is not None or args.default_solver is not None or args.default_logistic_penalty is not None or args.default_logistic_class_weight is not None:
                 raise ValueError("Invalid flags: --default-c/--default-solver/--default-logistic-penalty/--default-logistic-class-weight are scikit-learn logistic-only")
@@ -1001,6 +1133,30 @@ def validate_args(args: argparse.Namespace) -> None:
                 raise ValueError(
                     "Invalid flags: --default-rf-n-estimators/--default-rf-max-depth/"
                     "--default-rf-min-samples-leaf/--default-rf-max-features are scikit-learn random_forest-only"
+                )
+            if (
+                args.default_logistic_enable_tuning is not None
+                or args.default_logistic_tuning_method is not None
+                or args.default_logistic_cv_folds is not None
+                or args.default_logistic_cv_scoring is not None
+                or args.default_logistic_cv_n_iter is not None
+                or args.default_logistic_cv_n_jobs is not None
+            ):
+                raise ValueError(
+                    "Invalid flags: --default-logistic-enable-tuning/--default-logistic-tuning-method/--default-logistic-cv-folds/"
+                    "--default-logistic-cv-scoring/--default-logistic-cv-n-iter/--default-logistic-cv-n-jobs are scikit-learn logistic-only"
+                )
+            if (
+                args.default_rf_enable_tuning is not None
+                or args.default_rf_tuning_method is not None
+                or args.default_rf_cv_folds is not None
+                or args.default_rf_cv_scoring is not None
+                or args.default_rf_cv_n_iter is not None
+                or args.default_rf_cv_n_jobs is not None
+            ):
+                raise ValueError(
+                    "Invalid flags: --default-rf-enable-tuning/--default-rf-tuning-method/--default-rf-cv-folds/"
+                    "--default-rf-cv-scoring/--default-rf-cv-n-iter/--default-rf-cv-n-jobs are scikit-learn random_forest-only"
                 )
             if args.default_lr_tuning_method is not None and args.default_lr_tuning_method not in {"grid", "random"}:
                 raise ValueError("Invalid --default-lr-tuning-method. Allowed: grid, random")
@@ -1026,10 +1182,47 @@ def validate_args(args: argparse.Namespace) -> None:
                     "--default-lr-enable-tuning/--default-lr-tuning-method/--default-lr-cv-folds/--default-lr-cv-scoring/"
                     "--default-lr-cv-n-iter/--default-lr-cv-n-jobs are scikit-learn linear_regression-only"
                 )
+            if (
+                args.default_logistic_enable_tuning is not None
+                or args.default_logistic_tuning_method is not None
+                or args.default_logistic_cv_folds is not None
+                or args.default_logistic_cv_scoring is not None
+                or args.default_logistic_cv_n_iter is not None
+                or args.default_logistic_cv_n_jobs is not None
+            ):
+                raise ValueError(
+                    "Invalid flags: --default-logistic-enable-tuning/--default-logistic-tuning-method/--default-logistic-cv-folds/"
+                    "--default-logistic-cv-scoring/--default-logistic-cv-n-iter/--default-logistic-cv-n-jobs are scikit-learn logistic-only"
+                )
+            if args.default_rf_tuning_method is not None and args.default_rf_tuning_method not in {"grid", "random"}:
+                raise ValueError("Invalid --default-rf-tuning-method. Allowed: grid, random")
+            if args.default_rf_cv_scoring is not None:
+                allowed_scoring = REGRESSION_CV_SCORINGS if family == "regression" else CLASSIFICATION_CV_SCORINGS
+                if args.default_rf_cv_scoring not in allowed_scoring:
+                    allowed = ", ".join(sorted(allowed_scoring))
+                    raise ValueError(
+                        f"Invalid --default-rf-cv-scoring '{args.default_rf_cv_scoring}' for task '{args.task}'. "
+                        f"Allowed: {allowed}"
+                    )
+
+        if (
+            args.default_xgb_enable_tuning is not None
+            or args.default_xgb_tuning_method is not None
+            or args.default_xgb_cv_folds is not None
+            or args.default_xgb_cv_scoring is not None
+            or args.default_xgb_cv_n_iter is not None
+            or args.default_xgb_cv_n_jobs is not None
+            or args.default_tf_enable_tuning is not None
+            or args.default_tf_tuning_method is not None
+            or args.default_tf_cv_scoring is not None
+            or args.default_tf_cv_n_iter is not None
+        ):
+            raise ValueError("Invalid flags: xgboost/tensorflow tuning defaults are not supported for scikit-learn")
 
         return
 
     if args.library == "tensorflow":
+        family = task_family(args.task)
         if not args.model:
             raise ValueError("--model is required for tensorflow")
         if args.model not in TENSORFLOW_MODELS:
@@ -1082,10 +1275,36 @@ def validate_args(args: argparse.Namespace) -> None:
             or args.default_lr_alpha is not None
             or args.default_lr_fit_intercept is not None
             or args.default_lr_l1_ratio is not None
+            or args.default_logistic_enable_tuning is not None
+            or args.default_logistic_tuning_method is not None
+            or args.default_logistic_cv_folds is not None
+            or args.default_logistic_cv_scoring is not None
+            or args.default_logistic_cv_n_iter is not None
+            or args.default_logistic_cv_n_jobs is not None
+            or args.default_rf_enable_tuning is not None
+            or args.default_rf_tuning_method is not None
+            or args.default_rf_cv_folds is not None
+            or args.default_rf_cv_scoring is not None
+            or args.default_rf_cv_n_iter is not None
+            or args.default_rf_cv_n_jobs is not None
+            or args.default_xgb_enable_tuning is not None
+            or args.default_xgb_tuning_method is not None
+            or args.default_xgb_cv_folds is not None
+            or args.default_xgb_cv_scoring is not None
+            or args.default_xgb_cv_n_iter is not None
+            or args.default_xgb_cv_n_jobs is not None
         ):
             raise ValueError(
                 "Invalid flags: xgboost/scikit-learn default hyperparameter flags are not supported for tensorflow"
             )
+        if args.default_tf_cv_scoring is not None:
+            allowed_scoring = {"rmse"} if family == "regression" else {"f1_macro"}
+            if args.default_tf_cv_scoring not in allowed_scoring:
+                allowed = ", ".join(sorted(allowed_scoring))
+                raise ValueError(
+                    f"Invalid --default-tf-cv-scoring '{args.default_tf_cv_scoring}' for task '{args.task}'. "
+                    f"Allowed: {allowed}"
+                )
         return
 
     raise ValueError(f"Unsupported library: {args.library}")
@@ -1288,6 +1507,78 @@ def main():
         help="Default class_weight for logistic regression template",
     )
     parser.add_argument(
+        "--default-logistic-enable-tuning",
+        type=_parse_bool,
+        required=False,
+        help="Default enable_tuning for logistic regression template",
+    )
+    parser.add_argument(
+        "--default-logistic-tuning-method",
+        required=False,
+        choices=["grid", "random"],
+        help="Default tuning method for logistic regression template",
+    )
+    parser.add_argument(
+        "--default-logistic-cv-folds",
+        type=int,
+        required=False,
+        help="Default CV folds for logistic regression template",
+    )
+    parser.add_argument(
+        "--default-logistic-cv-scoring",
+        required=False,
+        choices=["f1_macro", "accuracy", "roc_auc_ovr"],
+        help="Default CV scoring for logistic regression template",
+    )
+    parser.add_argument(
+        "--default-logistic-cv-n-iter",
+        type=int,
+        required=False,
+        help="Default random-search iterations for logistic regression template",
+    )
+    parser.add_argument(
+        "--default-logistic-cv-n-jobs",
+        type=int,
+        required=False,
+        help="Default n_jobs for logistic regression tuning CV",
+    )
+    parser.add_argument(
+        "--default-rf-enable-tuning",
+        type=_parse_bool,
+        required=False,
+        help="Default enable_tuning for random forest templates",
+    )
+    parser.add_argument(
+        "--default-rf-tuning-method",
+        required=False,
+        choices=["grid", "random"],
+        help="Default tuning method for random forest templates",
+    )
+    parser.add_argument(
+        "--default-rf-cv-folds",
+        type=int,
+        required=False,
+        help="Default CV folds for random forest templates",
+    )
+    parser.add_argument(
+        "--default-rf-cv-scoring",
+        required=False,
+        choices=["f1_macro", "accuracy", "roc_auc_ovr", "rmse", "mae", "r2"],
+        help="Default CV scoring for random forest templates",
+    )
+    parser.add_argument(
+        "--default-rf-cv-n-iter",
+        type=int,
+        required=False,
+        help="Default random-search iterations for random forest templates",
+    )
+    parser.add_argument(
+        "--default-rf-cv-n-jobs",
+        type=int,
+        required=False,
+        help="Default n_jobs for random forest tuning CV",
+    )
+    parser.add_argument(
         "--default-xgb-min-child-weight",
         type=float,
         required=False,
@@ -1304,6 +1595,66 @@ def main():
         type=float,
         required=False,
         help="Default reg_alpha (L1) for xgboost template",
+    )
+    parser.add_argument(
+        "--default-xgb-enable-tuning",
+        type=_parse_bool,
+        required=False,
+        help="Default enable_tuning for xgboost templates",
+    )
+    parser.add_argument(
+        "--default-xgb-tuning-method",
+        required=False,
+        choices=["random"],
+        help="Default tuning method for xgboost templates",
+    )
+    parser.add_argument(
+        "--default-xgb-cv-folds",
+        type=int,
+        required=False,
+        help="Default CV folds for xgboost templates",
+    )
+    parser.add_argument(
+        "--default-xgb-cv-scoring",
+        required=False,
+        choices=["f1_macro", "accuracy", "roc_auc_ovr", "rmse", "mae", "r2"],
+        help="Default CV scoring for xgboost templates",
+    )
+    parser.add_argument(
+        "--default-xgb-cv-n-iter",
+        type=int,
+        required=False,
+        help="Default random-search iterations for xgboost templates",
+    )
+    parser.add_argument(
+        "--default-xgb-cv-n-jobs",
+        type=int,
+        required=False,
+        help="Default n_jobs for xgboost tuning CV",
+    )
+    parser.add_argument(
+        "--default-tf-enable-tuning",
+        type=_parse_bool,
+        required=False,
+        help="Default enable_tuning for tensorflow dense templates",
+    )
+    parser.add_argument(
+        "--default-tf-tuning-method",
+        required=False,
+        choices=["random"],
+        help="Default tuning method for tensorflow dense templates",
+    )
+    parser.add_argument(
+        "--default-tf-cv-scoring",
+        required=False,
+        choices=["f1_macro", "rmse"],
+        help="Default tuning scoring for tensorflow dense templates",
+    )
+    parser.add_argument(
+        "--default-tf-cv-n-iter",
+        type=int,
+        required=False,
+        help="Default random-search iterations for tensorflow dense templates",
     )
     parser.add_argument(
         "--optimizer",

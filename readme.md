@@ -23,3 +23,6 @@ Model runs now write schema artifacts under `artifacts/models/<model>/<run>/data
 - Artifact maps in each run's `run.json` now reference schema files via:
 	- `input_schema`
 	- `target_mapping_schema`
+- Generated files under `models/` are snapshots at generation time.
+	- Template/generator updates do not retroactively change existing generated model files.
+	- Re-run `tools/generate_model.py` (or `model_init.py`) to regenerate models after framework/template updates.

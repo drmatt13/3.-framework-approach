@@ -11,15 +11,30 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import sklearn
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import max_error, mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+	ConfusionMatrixDisplay,
+	accuracy_score,
+	average_precision_score,
+	balanced_accuracy_score,
+	brier_score_loss,
+	confusion_matrix,
+	f1_score,
+	log_loss,
+	precision_score,
+	precision_recall_fscore_support,
+	recall_score,
+	roc_auc_score,
+	roc_curve,
+)
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 
 # Ensure project root is importable so generated templates can load shared helpers.
 _current_file = Path(__file__).resolve()
@@ -41,38 +56,28 @@ from libraries.model_template_helpers import (
 	write_model_schemas as _write_model_schemas,
 )
 
-
-def _parse_optional_int(value: str | int | None) -> int | None:
-	if value is None:
-		return None
-	if isinstance(value, int):
-		return value
-	text = str(value).strip().lower()
-	if text in {"none", "null", ""}:
-		return None
-	return int(text)
-
 # =============================================================
 # =============== CONFIGURATION / CLI FLAGS ===================
 # =============================================================
 
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
-#   --task regression
+#   --task binary_classification|multiclass_classification
 #   --name <model_name>
 #   --save-model true|false
 #   --random-state <int>
 #   --test-size <float>
-#   --n-estimators <int>
-#   --max-depth <int|none>
-#   --min-samples-leaf <int>
-#   --max-features auto|sqrt|log2|float|none
+#   --max-iter <int>
+#   --penalty none|l1|l2|elasticnet
+#   --c <float>
+#   --solver lbfgs|liblinear|newton-cg|newton-cholesky|sag|saga
+#   --class-weight none|balanced
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
 #   --enable-tuning true|false
 #   --tuning-method grid|random
 #   --cv-folds <int>
-#   --cv-scoring rmse|mae|r2
+#   --cv-scoring accuracy|f1|f1_macro|roc_auc
 #   --cv-n-iter <int>
 #   --cv-n-jobs <int>
 # ---------------------------------------------------------------------
@@ -80,86 +85,128 @@ def _parse_optional_int(value: str | int | None) -> int | None:
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
-DEFAULT_N_ESTIMATORS = int("{{RF_N_ESTIMATORS_DEFAULT}}")
-DEFAULT_MAX_DEPTH = _parse_optional_int("{{RF_MAX_DEPTH_DEFAULT}}")
-DEFAULT_MIN_SAMPLES_LEAF = int("{{RF_MIN_SAMPLES_LEAF_DEFAULT}}")
-DEFAULT_MAX_FEATURES = "{{RF_MAX_FEATURES_DEFAULT}}"
+DEFAULT_MAX_ITER = int("500")
+DEFAULT_C = float("1.0")
+DEFAULT_SOLVER = "lbfgs"
+DEFAULT_PENALTY = "l2"
+DEFAULT_CLASS_WEIGHT = "none"
+LOGISTIC_SOLVERS = ["lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"]
+LOGISTIC_PENALTIES = ["none", "l1", "l2", "elasticnet"]
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
-DEFAULT_ENABLE_TUNING = "{{RF_ENABLE_TUNING_DEFAULT}}" == "True"
-DEFAULT_TUNING_METHOD = "{{RF_TUNING_METHOD_DEFAULT}}"
-DEFAULT_CV_FOLDS = int("{{RF_CV_FOLDS_DEFAULT}}")
-DEFAULT_CV_SCORING = "{{RF_CV_SCORING_DEFAULT}}"
-DEFAULT_CV_N_ITER = int("{{RF_CV_N_ITER_DEFAULT}}")
-DEFAULT_CV_N_JOBS = int("{{RF_CV_N_JOBS_DEFAULT}}")
+DEFAULT_ENABLE_TUNING = "False" == "True"
+DEFAULT_TUNING_METHOD = "grid"
+DEFAULT_CV_FOLDS = int("5")
+DEFAULT_CV_SCORING = "f1_macro"
+DEFAULT_CV_N_ITER = int("20")
+DEFAULT_CV_N_JOBS = int("-1")
 
-
-def _parse_max_features(value: str) -> str | float | None:
-	"""Parse --max-features into a value accepted by RandomForestRegressor."""
-	text = str(value).strip().lower()
-	if text in {"none", "null", ""}:
+# Helper function: resolve n_iter_ for iterative classifiers, handling different formats.
+def _resolved_n_iter(model_step) -> int | None:
+	n_iter_value = getattr(model_step, "n_iter_", None)
+	if n_iter_value is None:
 		return None
-	if text in {"auto", "sqrt", "log2"}:
-		return text
-	try:
-		fval = float(text)
-		if 0.0 < fval <= 1.0:
-			return fval
-		return text  # let sklearn validate
-	except ValueError:
-		return text
-
+	if hasattr(n_iter_value, "tolist"):
+		n_iter_value = n_iter_value.tolist()
+	if isinstance(n_iter_value, (list, tuple)):
+		if not n_iter_value:
+			return None
+		return int(max(n_iter_value))
+	return int(n_iter_value)
 
 # Command-line argument parsing.
-parser = argparse.ArgumentParser(description="Random Forest Regressor baseline")
-parser.add_argument("--task", choices=["regression"], default="regression")
+parser = argparse.ArgumentParser(description="Logistic Regression baseline")
+parser.add_argument("--task", choices=["binary_classification"], default="binary_classification")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
-parser.add_argument("--n-estimators", type=int, default=DEFAULT_N_ESTIMATORS)
-parser.add_argument("--max-depth", type=_parse_optional_int, default=DEFAULT_MAX_DEPTH)
-parser.add_argument("--min-samples-leaf", type=int, default=DEFAULT_MIN_SAMPLES_LEAF)
-parser.add_argument("--max-features", type=_parse_max_features, default=DEFAULT_MAX_FEATURES)
+parser.add_argument("--max-iter", type=int, default=DEFAULT_MAX_ITER)
+parser.add_argument("--c", type=float, default=DEFAULT_C)
+parser.add_argument("--solver", choices=LOGISTIC_SOLVERS, default=DEFAULT_SOLVER)
+parser.add_argument("--penalty", choices=LOGISTIC_PENALTIES, default=DEFAULT_PENALTY)
+parser.add_argument("--class-weight", choices=["none", "balanced"], default=DEFAULT_CLASS_WEIGHT)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 parser.add_argument("--enable-tuning", type=_parse_bool, default=DEFAULT_ENABLE_TUNING)
 parser.add_argument("--tuning-method", choices=["grid", "random"], default=DEFAULT_TUNING_METHOD)
 parser.add_argument("--cv-folds", type=int, default=DEFAULT_CV_FOLDS)
-parser.add_argument("--cv-scoring", choices=["rmse", "mae", "r2"], default=DEFAULT_CV_SCORING)
+parser.add_argument("--cv-scoring", choices=["f1_macro", "accuracy", "roc_auc_ovr"], default=DEFAULT_CV_SCORING)
 parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
 parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
 args = parser.parse_args()
-SAVE_MODEL = args.save_model
-training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
-METRIC_DECIMALS = int(args.metric_decimals)
-_round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
+
+# Solver/penalty compatibility validation.
+_SOLVER_PENALTY_COMPAT = {
+	"lbfgs": {"l2", "none"},
+	"liblinear": {"l1", "l2"},
+	"newton-cg": {"l2", "none"},
+	"newton-cholesky": {"l2", "none"},
+	"sag": {"l2", "none"},
+	"saga": {"l1", "l2", "elasticnet", "none"},
+}
+if args.penalty not in _SOLVER_PENALTY_COMPAT.get(args.solver, set()):
+	valid_penalties = sorted(_SOLVER_PENALTY_COMPAT[args.solver])
+	raise ValueError(
+		f"Solver '{args.solver}' does not support penalty='{args.penalty}'. "
+		f"Valid penalties for {args.solver}: {valid_penalties}"
+	)
 
 
 def _cv_scoring_name(name: str) -> str:
 	mapping = {
-		"rmse": "neg_root_mean_squared_error",
-		"mae": "neg_mean_absolute_error",
-		"r2": "r2",
+		"f1_macro": "f1_macro",
+		"accuracy": "accuracy",
+		"roc_auc_ovr": "roc_auc_ovr",
 	}
 	if name not in mapping:
-		raise ValueError(f"Unsupported --cv-scoring '{name}'. Choose from: rmse, mae, r2")
+		raise ValueError(f"Unsupported --cv-scoring '{name}'. Choose from: f1_macro, accuracy, roc_auc_ovr")
 	return mapping[name]
 
 
-def _build_search_space() -> dict[str, list]:
-	return {
-		"regressor__n_estimators": [100, 200, 300, 500],
-		"regressor__max_depth": [None, 8, 16, 32],
-		"regressor__min_samples_leaf": [1, 2, 4],
-		"regressor__max_features": ["sqrt", "log2", 1.0],
-	}
+def _build_search_space(random_state: int) -> list[dict[str, list]]:
+	common_c = [0.01, 0.1, 1.0, 10.0]
+	common_max_iter = [500, 1000, 2000]
+	return [
+		{
+			"classifier__solver": ["lbfgs", "newton-cg", "sag", "newton-cholesky"],
+			"classifier__penalty": [None, "l2"],
+			"classifier__C": common_c,
+			"classifier__class_weight": [None, "balanced"],
+			"classifier__max_iter": common_max_iter,
+		},
+		{
+			"classifier__solver": ["liblinear"],
+			"classifier__penalty": ["l1", "l2"],
+			"classifier__C": common_c,
+			"classifier__class_weight": [None, "balanced"],
+			"classifier__max_iter": common_max_iter,
+		},
+		{
+			"classifier__solver": ["saga"],
+			"classifier__penalty": ["l1", "l2", None],
+			"classifier__C": common_c,
+			"classifier__class_weight": [None, "balanced"],
+			"classifier__max_iter": common_max_iter,
+		},
+		{
+			"classifier__solver": ["saga"],
+			"classifier__penalty": ["elasticnet"],
+			"classifier__l1_ratio": [0.2, 0.5, 0.8],
+			"classifier__C": common_c,
+			"classifier__class_weight": [None, "balanced"],
+			"classifier__max_iter": common_max_iter,
+		},
+	]
 
 
-def _search_space_size(search_space: dict[str, list]) -> int:
-	lengths = [len(values) for values in search_space.values() if isinstance(values, list)]
-	return int(np.prod(lengths)) if lengths else 0
+def _search_space_size(search_space: list[dict[str, list]]) -> int:
+	total = 0
+	for space in search_space:
+		lengths = [len(values) for values in space.values() if isinstance(values, list)]
+		total += int(np.prod(lengths)) if lengths else 0
+	return total
 
 
 def _json_safe_param_value(value):
@@ -190,39 +237,10 @@ def _json_safe_param_value(value):
 def _json_safe_best_params(params: dict[str, object]) -> dict[str, object]:
 	return {str(key): _json_safe_param_value(value) for key, value in params.items()}
 
-
-def _build_preprocessor(frame: pd.DataFrame) -> ColumnTransformer:
-	# Define column groups from the provided frame.
-	# Include "str" explicitly for pandas 3 compatibility.
-	categorical_cols = frame.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-	numerical_cols = frame.select_dtypes(include=["number"]).columns.tolist()
-
-	# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
-	try:
-		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-	except TypeError:
-		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-	numeric_transformer = Pipeline(
-		steps=[
-			("imputer", SimpleImputer(strategy="median")),
-			("scaler", StandardScaler()),
-		]
-	)
-	categorical_transformer = Pipeline(
-		steps=[
-			("imputer", SimpleImputer(strategy="most_frequent")),
-			("onehot", one_hot_encoder),
-		]
-	)
-
-	return ColumnTransformer(
-		transformers=[
-			("num", numeric_transformer, numerical_cols),
-			("cat", categorical_transformer, categorical_cols),
-		],
-		remainder="drop",
-	)
+SAVE_MODEL = args.save_model
+training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
+METRIC_DECIMALS = int(args.metric_decimals)
+_round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -254,9 +272,9 @@ def _build_preprocessor(frame: pd.DataFrame) -> ColumnTransformer:
 # Template injection points:
 #   - DATA_TASK_DIR / DATA_FILE
 #   - READ_CSV_STATEMENT / POST_READ_DATASET_SETUP
-data_path = _project_root() / "data" / "template_data" / "{{DATA_TASK_DIR}}" / "{{DATA_FILE}}"
-{{READ_CSV_STATEMENT}}
-{{POST_READ_DATASET_SETUP}}
+data_path = _project_root() / "data" / "template_data" / "binary_classification" / "adult_income.csv"
+df = pd.read_csv(data_path)
+
 
 # Drop common CSV index artifacts (e.g., "Unnamed: 0") so they never leak into features.
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
@@ -284,8 +302,8 @@ df = df.replace({pd.NA: np.nan})
 #   - TARGET_COLUMN
 #   - FEATURE_DROP_COLUMNS
 #   - TARGET_PREPROCESS
-TARGET_COLUMN = "{{TARGET_COLUMN}}"
-FEATURE_DROP_COLUMNS = {{FEATURE_DROP_COLUMNS}}
+TARGET_COLUMN = "income"
+FEATURE_DROP_COLUMNS = ["income"]
 
 if TARGET_COLUMN not in df.columns:
 	raise ValueError(f"Target column '{TARGET_COLUMN}' not found in dataset.")
@@ -293,7 +311,7 @@ if TARGET_COLUMN not in df.columns:
 # y is the supervised target; X is the feature space (minus optional drops).
 y = df[TARGET_COLUMN]
 y_original = y.copy()
-{{TARGET_PREPROCESS}} # type: ignore
+y = y.astype("str").str.strip().str.replace(".", "", regex=False).map({"<=50K": 0, ">50K": 1}).astype("int64") # type: ignore
 X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 
 # ---------------------------------------------------------
@@ -330,43 +348,79 @@ _validate_etl_outputs(
 # =============================================================
 
 # Split BEFORE fitting transformers to avoid data leakage.
+# For classification tasks, stratify to preserve class distribution.
 X_train, X_test, y_train, y_test = train_test_split(
 	X,
 	y,
 	test_size=args.test_size,
 	random_state=args.random_state,
+	stratify=y,
 )
 
+# Define column groups from training data only.
+# Include "str" explicitly for pandas 3 compatibility.
+categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
+numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
+
+# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
+try:
+	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+except TypeError:
+	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
+
 # Preprocess: impute missing values, then scale numeric and one-hot encode categorical features.
-preprocessor = _build_preprocessor(X_train)
+numeric_transformer = Pipeline(
+	steps=[
+		("imputer", SimpleImputer(strategy="median")),
+		("scaler", StandardScaler()),
+	]
+)
+categorical_transformer = Pipeline(
+	steps=[
+		("imputer", SimpleImputer(strategy="most_frequent")),
+		("onehot", one_hot_encoder),
+	]
+)
+
+preprocessor = ColumnTransformer(
+	transformers=[
+		("num", numeric_transformer, numerical_cols),
+		("cat", categorical_transformer, categorical_cols),
+	],
+	remainder="drop",
+)
 
 # =============================================================
 # ================= BUILD MODEL PIPELINE ======================
 # =============================================================
 
 # Bundle preprocessing + model into one inference-ready pipeline.
+# Input to inference should be raw feature columns.
+penalty_value = None if args.penalty == "none" else args.penalty
+class_weight_value = None if args.class_weight == "none" else args.class_weight
+l1_ratio_value = 0.5 if penalty_value == "elasticnet" else None
+classifier = LogisticRegression(
+	penalty=penalty_value,
+	C=float(args.c),
+	solver=args.solver,
+	class_weight=class_weight_value,
+	max_iter=args.max_iter,
+	l1_ratio=l1_ratio_value,
+	random_state=args.random_state,
+	verbose=training_verbose,
+)
+classifier_name = f"LogisticRegression(penalty={penalty_value}, C={float(args.c):.6g}, solver={args.solver}, class_weight={class_weight_value})"
+
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
-		(
-			"regressor",
-			RandomForestRegressor(
-				random_state=args.random_state,
-				n_estimators=int(args.n_estimators),
-				max_depth=args.max_depth,
-				min_samples_leaf=int(args.min_samples_leaf),
-				max_features=args.max_features,
-				verbose=training_verbose,
-			),
-		),
+		("classifier", classifier),
 	]
 )
-fit_time_seconds = 0.0
 
 # =============================================================
 # ===================== TRAIN MODEL ===========================
 # =============================================================
-
 selected_cv_scoring = _cv_scoring_name(args.cv_scoring)
 tuning_summary = {
 	"enabled": False,
@@ -382,8 +436,17 @@ tuning_summary = {
 }
 
 fit_started_at = time.perf_counter()
+if training_verbose > 0:
+	if args.enable_tuning:
+		print(
+			f"Training started with tuning: method={args.tuning_method}, "
+			f"cv={args.cv_folds}, scoring={args.cv_scoring}"
+		)
+	else:
+		print(f"Training started: {classifier_name}")
+
 if args.enable_tuning:
-	search_space = _build_search_space()
+	search_space = _build_search_space(int(args.random_state))
 	if args.tuning_method == "grid":
 		search = GridSearchCV(
 			estimator=model,
@@ -408,19 +471,17 @@ if args.enable_tuning:
 			refit=False,
 			random_state=int(args.random_state),
 		)
+
 	search.fit(X_train, y_train)
 	best_params = dict(search.best_params_)
 	best_params_for_artifacts = _json_safe_best_params(best_params)
 	model.set_params(**best_params)
 	model.fit(X_train, y_train)
+
 	best_score = float(search.best_score_)
-	if args.cv_scoring in ("rmse", "mae"):
-		best_score = -best_score
 	best_std = None
 	if hasattr(search, "cv_results_") and "std_test_score" in search.cv_results_:
 		best_std = float(search.cv_results_["std_test_score"][search.best_index_])
-		if args.cv_scoring in ("rmse", "mae"):
-			best_std = abs(best_std)
 	n_candidates = int(len(search.cv_results_["params"])) if hasattr(search, "cv_results_") else None
 	tuning_summary = {
 		"enabled": True,
@@ -438,18 +499,20 @@ else:
 	model.fit(X_train, y_train)
 
 fit_time_seconds = float(time.perf_counter() - fit_started_at)
+classifier_step = model.named_steps["classifier"]
+resolved_n_iter = _resolved_n_iter(classifier_step)
 if training_verbose > 0:
-	print(f"Training completed in {fit_time_seconds:.3f}s: RandomForestRegressor")
+	print(f"Training completed in {fit_time_seconds:.3f}s: {type(classifier_step).__name__}")
 
 training_control = {
 	"enabled": bool(tuning_summary["enabled"]),
 	"type": f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
-	"max_steps_configured": tuning_summary["n_candidates"] if args.tuning_method == "grid" else (int(tuning_summary["n_iter"]) if tuning_summary["enabled"] and tuning_summary["n_iter"] is not None else None),
-	"steps_completed": int(args.cv_folds) * int(tuning_summary["n_candidates"]) if tuning_summary["enabled"] and tuning_summary["n_candidates"] is not None else None,
+	"max_steps_configured": tuning_summary["n_candidates"] if args.tuning_method == "grid" else (int(tuning_summary["n_iter"]) if tuning_summary["enabled"] and tuning_summary["n_iter"] is not None else int(args.max_iter)),
+	"steps_completed": int(args.cv_folds) * int(tuning_summary["n_candidates"]) if tuning_summary["enabled"] and tuning_summary["n_candidates"] is not None else (int(resolved_n_iter) if resolved_n_iter is not None else None),
 	"patience": None,
 	"monitor_metric": f"cv_{args.cv_scoring}" if tuning_summary["enabled"] else None,
 	"monitor_split": "cv" if tuning_summary["enabled"] else None,
-	"monitor_direction": ("min" if args.cv_scoring in ("rmse", "mae") else "max") if tuning_summary["enabled"] else None,
+	"monitor_direction": "max" if tuning_summary["enabled"] else None,
 	"best_step": None,
 	"best_score": tuning_summary["best_score"],
 	"stopped_early": False,
@@ -464,48 +527,102 @@ predict_started_at = time.perf_counter()
 train_predictions = model.predict(X_train)
 predictions = model.predict(X_test)
 predict_time_seconds = float(time.perf_counter() - predict_started_at)
-train_mse = mean_squared_error(y_train, train_predictions)
-train_mae = mean_absolute_error(y_train, train_predictions)
-train_rmse = root_mean_squared_error(y_train, train_predictions)
-train_r2 = r2_score(y_train, train_predictions)
-train_max_error = max_error(y_train, train_predictions)
-train_residuals = y_train - train_predictions
-train_residual_mean = float(train_residuals.mean())
-train_residual_std = float(train_residuals.std())
+classifier_classes = model.named_steps["classifier"].classes_
+train_accuracy = accuracy_score(y_train, train_predictions)
+train_f1_macro = f1_score(y_train, train_predictions, average="macro", zero_division=0)
+test_accuracy = accuracy_score(y_test, predictions)
+test_balanced_accuracy = balanced_accuracy_score(y_test, predictions)
+test_precision_macro = precision_score(y_test, predictions, average="macro", zero_division=0)
+test_recall_macro = recall_score(y_test, predictions, average="macro", zero_division=0)
+test_f1_macro = f1_score(y_test, predictions, average="macro", zero_division=0)
+test_confusion_matrix = confusion_matrix(y_test, predictions)
+_, _, _, support_values = precision_recall_fscore_support(
+	y_test,
+	predictions,
+	labels=classifier_classes,
+	zero_division=0,
+)
+support_by_class = {str(label): int(count) for label, count in zip(classifier_classes, support_values)}
+support_total = int(len(y_test))
 
-# Test metrics
-test_mse = mean_squared_error(y_test, predictions)
-test_mae = mean_absolute_error(y_test, predictions)
-test_rmse = root_mean_squared_error(y_test, predictions)
-test_r2 = r2_score(y_test, predictions)
-test_max_error = max_error(y_test, predictions)
+# Calculate probability-based metrics when predict_proba is available.
+train_logloss_value = None
+test_roc_auc_macro_ovr = None
+test_pr_auc_macro_ovr = None
+test_logloss_value = None
+brier_score = None
+roc_curve_points = None
+y_test_binarized = None
+
+if hasattr(model, "predict_proba"):
+	train_probabilities = model.predict_proba(X_train)
+	probabilities = model.predict_proba(X_test)
+	train_logloss_value = float(log_loss(y_train, train_probabilities, labels=classifier_classes))
+	test_logloss_value = float(log_loss(y_test, probabilities, labels=classifier_classes))
+	is_binary_problem = len(classifier_classes) == 2
+	if is_binary_problem:
+		positive_class = classifier_classes[-1]
+		positive_probabilities = probabilities[:, -1]
+		y_true_binary = (y_test == positive_class).astype(int)
+		test_roc_auc_macro_ovr = float(roc_auc_score(y_test, positive_probabilities))
+		test_pr_auc_macro_ovr = float(average_precision_score(y_true_binary, positive_probabilities))
+		brier_score = float(brier_score_loss(y_true_binary, positive_probabilities))
+		fpr, tpr, thresholds = roc_curve(y_test, positive_probabilities, pos_label=positive_class)
+		roc_curve_points = pd.DataFrame(
+			{
+				"fpr": fpr,
+				"tpr": tpr,
+				"threshold": thresholds,
+			}
+		)
+		# ROC curve points are saved for binary classification in this template.
+	else:
+		y_test_binarized = label_binarize(y_test, classes=classifier_classes)
+		test_roc_auc_macro_ovr = float(roc_auc_score(y_test_binarized, probabilities, multi_class="ovr", average="macro"))
+		test_pr_auc_macro_ovr = float(average_precision_score(y_test_binarized, probabilities, average="macro"))
+		brier_score = float(((probabilities - y_test_binarized) ** 2).sum(axis=1).mean())
+
+is_binary_problem = len(classifier_classes) == 2
 
 # =============================================================
 # ============== MODEL METRICS / LOGGING ======================
 # =============================================================
 
 # ---- Train Metrics (model fit on data it learned from) ----
-print("Train MSE:", _round_metric(train_mse))  # Mean Squared Error on training set (average squared residuals)
-print("Train MAE:", _round_metric(train_mae))  # Mean Absolute Error on training set (average absolute prediction error)
-print("Train RMSE:", _round_metric(train_rmse))  # Root Mean Squared Error on training set (error in original target units)
-print("Train R2:", _round_metric(train_r2))  # R² on training set (variance explained by model)
-print("Train Max Error:", _round_metric(train_max_error))  # Largest absolute prediction error on training data
-print("Train Residual Mean:", _round_metric(train_residual_mean))  # Mean of residuals (should be near 0 if unbiased)
-print("Train Residual Std:", _round_metric(train_residual_std))  # Standard deviation of residuals (spread of errors)
+print("Train Accuracy:", _round_metric(train_accuracy))  # Proportion of correct predictions on training data
+print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged F1 on training set (equal weight per class)
+
+# ---- Optional Probability-Based Train Metrics ----
+
+if train_logloss_value is not None:
+	print("Train Log Loss:", _round_metric(train_logloss_value))  # Cross-entropy loss on training set (probability quality)
 
 # ---- Test Metrics (model performance on unseen data) ----
-print("Test MSE:", _round_metric(test_mse))  # Mean Squared Error on test set (average squared prediction errors)
-print("Test MAE:", _round_metric(test_mae))  # Mean Absolute Error on test set (average absolute difference from true values)
-print("Test RMSE:", _round_metric(test_rmse))  # Root Mean Squared Error on test set (interpretable error magnitude)
-print("Test R2:", _round_metric(test_r2))  # R² on test set (generalization performance)
-print("Test Max Error:", _round_metric(test_max_error))  # Worst-case absolute prediction error on test set
+print("Test Accuracy:", _round_metric(test_accuracy))  # Overall correctness on test set
+print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Mean recall across classes (robust to imbalance)
+print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision (mean of per-class precision)
+print("Test Recall Macro:", _round_metric(test_recall_macro))  # Macro-averaged recall (mean of per-class recall)
+print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 (harmonic mean of precision & recall per class)
+print("Test Support Total:", support_total)  # Total number of true samples in test set
+print("Test Support By Class:", support_by_class)  # True sample count per class (class distribution)
 
-# ---- Dataset Context (distribution reference) ----
-print("Target Mean:", _round_metric(y.mean()))  # Overall target mean (prefer y_train.mean() in production to avoid leakage)
-print("Target Std:", _round_metric(y.std()))  # Overall target standard deviation (prefer y_train.std() for clean separation)
+# ---- Optional Ranking Metrics (require predict_proba / decision scores) ----
+if test_roc_auc_macro_ovr is not None:
+	print("Test ROC AUC Macro OVR:", _round_metric(test_roc_auc_macro_ovr))  # One-vs-Rest macro ROC-AUC (ranking quality across classes)
+
+if test_pr_auc_macro_ovr is not None:
+	print("Test PR AUC Macro OVR:", _round_metric(test_pr_auc_macro_ovr))  # One-vs-Rest macro PR-AUC (precision-recall tradeoff)
+
+# ---- Optional Probability Calibration Metrics ----
+if test_logloss_value is not None:
+	print("Test Log Loss:", _round_metric(test_logloss_value))  # Cross-entropy loss on test set (penalizes confident wrong predictions)
+
+if brier_score is not None:
+	print("Test Brier Score:", _round_metric(brier_score))  # Mean squared error of predicted probabilities (calibration metric)
 
 # ---- Sanity Checks ----
-print("First 5 predictions:", predictions[:5])  # Quick sanity check of predicted values
+print("Classifier:", classifier_name)  # Model identifier for experiment tracking
+print("First 5 predictions:", predictions[:5])  # Quick sanity check of output classes
 print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true values for sanity check
 
 # =============================================================
@@ -537,63 +654,125 @@ if SAVE_MODEL:
 		directory.mkdir(parents=True, exist_ok=True)
 
 	with (model_dir / "model.pkl").open("wb") as model_file:
+		# Saves full inference-ready pipeline: preprocess + classifier.
 		pickle.dump(model, model_file)
 
 	with (preprocess_dir / "preprocessor.pkl").open("wb") as preprocess_file:
 		pickle.dump(model.named_steps["preprocess"], preprocess_file)
 
+	n_val_metrics = 0
+	n_train_effective_metrics = int(len(X_train))
 	metrics = {
 		"train": {
-			"mse": _round_metric(train_mse),
-			"mae": _round_metric(train_mae),
-			"rmse": _round_metric(train_rmse),
-			"r2": _round_metric(train_r2),
-			"max_error": _round_metric(train_max_error),
-			"residual_mean": _round_metric(train_residual_mean),
-			"residual_std": _round_metric(train_residual_std),
+			"accuracy": _round_metric(train_accuracy),
+			"f1_macro": _round_metric(train_f1_macro),
+			"log_loss": _round_metric(train_logloss_value),
 		},
 		"test": {
-			"mse": _round_metric(test_mse),
-			"mae": _round_metric(test_mae),
-			"rmse": _round_metric(test_rmse),
-			"r2": _round_metric(test_r2),
-			"max_error": _round_metric(test_max_error),
-		},
-		"target_summary": {
-			"split": "train",
-			"mean": _round_metric(y_train.mean()),
-			"std": _round_metric(y_train.std()),
+			"accuracy": _round_metric(test_accuracy),
+			"balanced_accuracy": _round_metric(test_balanced_accuracy),
+			"precision_macro": _round_metric(test_precision_macro),
+			"recall_macro": _round_metric(test_recall_macro),
+			"f1_macro": _round_metric(test_f1_macro),
+			"roc_auc": {
+				"average": "macro",
+				"multi_class": "ovr",
+				"value": _round_metric(test_roc_auc_macro_ovr),
+			},
+			"pr_auc": {
+				"average": "macro",
+				"multi_class": "ovr",
+				"value": _round_metric(test_pr_auc_macro_ovr),
+			},
+			"log_loss": _round_metric(test_logloss_value),
+			"brier_score": _round_metric(brier_score),
+			"support_total": support_total,
+			"support_by_class": support_by_class,
 		},
 		"data_sizes": {
-			"n_train": int(len(X_train)),
-			"n_val": 0,
+			"n_train": n_train_effective_metrics,
+			"n_val": n_val_metrics,
 			"n_test": int(len(X_test)),
 		},
 		"primary_metric": {
-			"name": "rmse",
+			"name": "roc_auc" if is_binary_problem else "f1_macro",
 			"split": "test",
-			"direction": "min",
-			"value": _round_metric(test_rmse),
+			"direction": "max",
+			"value": _round_metric(test_roc_auc_macro_ovr) if is_binary_problem else _round_metric(test_f1_macro),
 		},
+		"probabilities": {
+			"source": "predict_proba" if hasattr(model, "predict_proba") else None,
+			"calibrated": False if hasattr(model, "predict_proba") else None,
+			"calibration_method": None,
+		},
+		"training_control": training_control,
 		"tuning": tuning_summary,
 	}
-	metrics["training_control"] = training_control
 	metrics["selection"] = training_control
-	metrics["calibration"] = {"source": None, "calibrated": None, "calibration_method": None}
+	metrics["calibration"] = metrics.get("probabilities")
 	metrics["timing"] = {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
 		json.dump(metrics, metrics_file, indent=2)
 
+	confusion_matrix_df = pd.DataFrame(
+		test_confusion_matrix,
+		index=model.named_steps["classifier"].classes_,
+		columns=model.named_steps["classifier"].classes_,
+	)
+	confusion_matrix_df.to_csv(eval_dir / "confusion_matrix.csv", index=True)
+
+	cm_figure, cm_axis = plt.subplots(figsize=(6, 5))
+	cm_display = ConfusionMatrixDisplay(
+		confusion_matrix=test_confusion_matrix,
+		display_labels=model.named_steps["classifier"].classes_,
+	)
+	cm_display.plot(ax=cm_axis, cmap="Blues", colorbar=False)
+	cm_axis.set_title("Confusion Matrix")
+	cm_figure.tight_layout()
+	cm_figure.savefig(eval_dir / "confusion_matrix.png", dpi=150)
+	plt.close(cm_figure)
+
+	if roc_curve_points is not None:
+		roc_curve_points.to_csv(eval_dir / "roc_curve.csv", index=False)
+
+	if test_roc_auc_macro_ovr is not None:
+		roc_figure, roc_axis = plt.subplots(figsize=(6, 5))
+		if is_binary_problem and roc_curve_points is not None:
+			roc_axis.plot(
+				roc_curve_points["fpr"],
+				roc_curve_points["tpr"],
+				label=f"ROC AUC = {test_roc_auc_macro_ovr:.4f}",
+			)
+		else:
+			for class_index, class_label in enumerate(classifier_classes):
+				class_fpr, class_tpr, _ = roc_curve(y_test_binarized[:, class_index], probabilities[:, class_index])
+				roc_axis.plot(class_fpr, class_tpr, label=f"Class {class_label}")
+			roc_axis.text(0.6, 0.1, f"Macro OVR AUC = {test_roc_auc_macro_ovr:.4f}")
+
+		roc_axis.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
+		roc_axis.set_xlim(0.0, 1.0)
+		roc_axis.set_ylim(0.0, 1.05)
+		roc_axis.set_xlabel("False Positive Rate")
+		roc_axis.set_ylabel("True Positive Rate")
+		roc_axis.set_title("ROC Curve")
+		roc_axis.legend(loc="lower right")
+		roc_figure.tight_layout()
+		roc_figure.savefig(eval_dir / "roc_curve.png", dpi=150)
+		plt.close(roc_figure)
+
 	predictions_preview = pd.DataFrame(
 		{
 			"y_true": y_test.iloc[:50].tolist(),
-			"y_pred": predictions[:50].tolist(),
+			"y_pred": pd.Series(predictions[:50]).tolist(),
 		}
 	)
 	predictions_preview.to_csv(eval_dir / "predictions_preview.csv", index=False)
 
+	# Example inference rows are kept in raw feature format on purpose.
+	# Do NOT pre-one-hot-encode these rows; model.pkl handles preprocessing.
 	inference_rows = X_test.iloc[:5].to_dict(orient="records")
 	expected_values = y_test.iloc[:5].tolist()
+	class_labels = [str(label) for label in classifier_classes.tolist()]
 	sample_rows_literal = json.dumps(inference_rows, indent=2)
 	sample_rows_literal = sample_rows_literal.replace(": NaN", ": np.nan")
 	sample_rows_literal = sample_rows_literal.replace(": Infinity", ": np.inf")
@@ -608,17 +787,22 @@ MODEL_PATH = Path(__file__).resolve().parents[1] / "model" / "model.pkl"
 
 sample_rows = {sample_rows_literal}
 expected_y = {json.dumps(expected_values, indent=2)}
+class_labels = {json.dumps(class_labels, indent=2)}
 
 with MODEL_PATH.open("rb") as model_file:
 	model = pickle.load(model_file)
 
 features = pd.DataFrame(sample_rows)
 predictions = model.predict(features)
+probabilities = model.predict_proba(features) if hasattr(model, "predict_proba") else None
 
 print("Inference Example")
 print("Input Rows:", len(features))
 print("Predictions:", predictions.tolist())
 print("Expected:", expected_y)
+if probabilities is not None:
+	print("Class Labels:", class_labels)
+	print("Probabilities:", probabilities.tolist())
 
 results = features.copy()
 results["y_expected"] = expected_y
@@ -641,20 +825,22 @@ print(results)
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
 	n_val = 0
 	n_train_effective = int(len(X_train))
-	regressor_params = model.named_steps["regressor"].get_params()
+	estimator_class = classifier_step.__class__.__name__
+	estimator_params = classifier_step.get_params()
 	estimator_params_compact = _select_estimator_params(
-		regressor_params,
+		estimator_params,
 		[
-			"n_estimators",
-			"criterion",
-			"max_depth",
-			"max_features",
-			"min_samples_split",
-			"min_samples_leaf",
-			"bootstrap",
-			"max_samples",
+			"penalty",
+			"C",
+			"fit_intercept",
+			"solver",
+			"max_iter",
+			"multi_class",
+			"class_weight",
 			"random_state",
 			"n_jobs",
+			"l1_ratio",
+			"tol",
 		],
 	)
 
@@ -664,9 +850,9 @@ print(results)
 		"timestamp": timestamp,
 		"library": "scikit-learn",
 		"task": args.task,
-		"algorithm": "random_forest",
-		"estimator_class": "RandomForestRegressor",
-		"model_id": "sklearn.randomforestregressor",
+		"algorithm": "logistic_regression",
+		"estimator_class": estimator_class,
+		"model_id": "sklearn.logisticregression",
 		"dataset": {
 			"path": str(data_path.relative_to(_project_root())),
 			"sha256": data_hash,
@@ -677,7 +863,7 @@ print(results)
 			"strategy": "train_test_split",
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
-			"stratify": None,
+			"stratify": True,
 			"validation": {
 				"enabled": bool(tuning_summary["enabled"]),
 				"strategy": f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
@@ -709,10 +895,11 @@ print(results)
 			"estimator_params": _compact_metadata(estimator_params_compact),
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
-			"n_estimators": int(args.n_estimators),
-			"max_depth": int(args.max_depth) if args.max_depth is not None else None,
-			"min_samples_leaf": int(args.min_samples_leaf),
-			"max_features": str(args.max_features) if args.max_features is not None else None,
+			"max_iter": int(args.max_iter),
+			"penalty": args.penalty,
+			"c": float(args.c),
+			"solver": args.solver,
+			"class_weight": args.class_weight,
 			"enable_tuning": bool(tuning_summary["enabled"]),
 			"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
 			"cv_folds": int(args.cv_folds) if tuning_summary["enabled"] else None,
@@ -727,17 +914,21 @@ print(results)
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),
 			"random_state_effective": int(args.random_state),
-			"n_jobs": model.named_steps["regressor"].get_params().get("n_jobs"),
+			"n_jobs": estimator_params.get("n_jobs"),
 		},
 		"artifacts": _artifact_map(
-			run_dir,
-			{
+				run_dir,
+				{
 				"model": model_dir / "model.pkl",
 				"preprocess": preprocess_dir / "preprocessor.pkl",
 				"eval_metrics": eval_dir / "metrics.json",
+				"eval_confusion_matrix": eval_dir / "confusion_matrix.csv",
+				"eval_confusion_matrix_plot": eval_dir / "confusion_matrix.png",
 				"eval_predictions_preview": eval_dir / "predictions_preview.csv",
-				**schema_artifacts,
+				"eval_roc_curve": eval_dir / "roc_curve.csv",
+				"eval_roc_curve_plot": eval_dir / "roc_curve.png",
 				"inference_example": inference_dir / "inference_example.py",
+					**schema_artifacts,
 			},
 		),
 		"versions": {
@@ -775,11 +966,20 @@ print(results)
 				"tuning_enabled": bool(tuning_summary["enabled"]),
 				"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
 				"cv_best_score": tuning_summary["best_score"],
-				"mse": _round_metric(test_mse),
-				"mae": _round_metric(test_mae),
-				"rmse": _round_metric(test_rmse),
-				"r2": _round_metric(test_r2),
-				"n_train": int(len(X_train)),
+				"accuracy": _round_metric(test_accuracy),
+				"balanced_accuracy": _round_metric(test_balanced_accuracy),
+				"precision_macro": _round_metric(test_precision_macro),
+				"recall_macro": _round_metric(test_recall_macro),
+				"f1_macro": _round_metric(test_f1_macro),
+				"support": support_total,
+				"roc_auc_macro_ovr": _round_metric(test_roc_auc_macro_ovr) if test_roc_auc_macro_ovr is not None else None,
+				"pr_auc_macro_ovr": _round_metric(test_pr_auc_macro_ovr) if test_pr_auc_macro_ovr is not None else None,
+				"log_loss": _round_metric(test_logloss_value) if test_logloss_value is not None else None,
+				"brier_score": _round_metric(brier_score) if brier_score is not None else None,
+				"train_accuracy": _round_metric(train_accuracy),
+				"train_f1_macro": _round_metric(train_f1_macro),
+				"train_log_loss": _round_metric(train_logloss_value) if train_logloss_value is not None else None,
+				"n_train": n_train_effective,
 				"n_test": int(len(X_test)),
 			}
 		]

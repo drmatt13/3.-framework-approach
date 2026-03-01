@@ -202,7 +202,7 @@ def write_model_schemas(
             column_entry.update(binary_semantics)
         if (
             pd.api.types.is_object_dtype(series)
-            or pd.api.types.is_categorical_dtype(series)
+            or isinstance(series.dtype, pd.CategoricalDtype)
             or pd.api.types.is_string_dtype(series)
         ) and "values" not in column_entry:
             unique_values = series.dropna().astype("string").unique().tolist()

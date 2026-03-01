@@ -33,7 +33,7 @@ from sklearn.metrics import (
 	roc_auc_score,
 	roc_curve,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import RandomizedSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 
@@ -84,6 +84,12 @@ from libraries.model_template_helpers import (
 #   --min-child-weight <float>
 #   --reg-lambda <float>
 #   --reg-alpha <float>
+#   --enable-tuning true|false
+#   --tuning-method grid|random
+#   --cv-folds <int>
+#   --cv-scoring accuracy|f1|f1_macro|roc_auc|logloss
+#   --cv-n-iter <int>
+#   --cv-n-jobs <int>
 # ---------------------------------------------------------------------
 
 # Default values for optional parameters. These can be overridden via CLI.
@@ -104,6 +110,12 @@ DEFAULT_REG_LAMBDA = float("{{XGB_REG_LAMBDA_DEFAULT}}")
 DEFAULT_REG_ALPHA = float("{{XGB_REG_ALPHA_DEFAULT}}")
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
+DEFAULT_ENABLE_TUNING = "{{XGB_ENABLE_TUNING_DEFAULT}}" == "True"
+DEFAULT_TUNING_METHOD = "{{XGB_TUNING_METHOD_DEFAULT}}"
+DEFAULT_CV_FOLDS = int("{{XGB_CV_FOLDS_DEFAULT}}")
+DEFAULT_CV_SCORING = "{{XGB_CV_SCORING_DEFAULT}}"
+DEFAULT_CV_N_ITER = int("{{XGB_CV_N_ITER_DEFAULT}}")
+DEFAULT_CV_N_JOBS = int("{{XGB_CV_N_JOBS_DEFAULT}}")
 
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="XGBoost Classifier baseline")
@@ -128,6 +140,12 @@ parser.add_argument("--reg-lambda", type=float, default=DEFAULT_REG_LAMBDA)
 parser.add_argument("--reg-alpha", type=float, default=DEFAULT_REG_ALPHA)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
+parser.add_argument("--enable-tuning", type=_parse_bool, default=DEFAULT_ENABLE_TUNING)
+parser.add_argument("--tuning-method", choices=["random"], default=DEFAULT_TUNING_METHOD)
+parser.add_argument("--cv-folds", type=int, default=DEFAULT_CV_FOLDS)
+parser.add_argument("--cv-scoring", choices=["f1_macro", "accuracy", "roc_auc_ovr"], default=DEFAULT_CV_SCORING)
+parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
+parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
@@ -137,31 +155,30 @@ METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
 
-def _xgboost_cuda_available() -> bool:
-	try:
-		build_info = xgb.build_info()
-	except Exception:
-		return False
-
-	if not isinstance(build_info, dict):
-		return False
-
-	for key in ("USE_CUDA", "USE_NCCL", "CUDA_VERSION", "USE_RMM"):
-		value = build_info.get(key)
-		if isinstance(value, bool) and value:
-			return True
-		if isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "on"}:
-			return True
-
-	return False
+def _cv_scoring_name(name: str) -> str:
+	mapping = {
+		"f1_macro": "f1_macro",
+		"accuracy": "accuracy",
+		"roc_auc_ovr": "roc_auc_ovr",
+	}
+	if name not in mapping:
+		raise ValueError(f"Unsupported --cv-scoring '{name}'. Choose from: f1_macro, accuracy, roc_auc_ovr")
+	return mapping[name]
 
 
-def _resolve_xgboost_device(device_flag: str) -> str:
-	if device_flag == "cpu":
-		return "cpu"
+def _resolve_xgboost_device(device_flag: str) -> tuple[str, str | None]:
 	if device_flag == "gpu":
-		return "cuda"
-	return "cuda" if _xgboost_cuda_available() else "cpu"
+		message = (
+			"Requested --device=gpu, but this template preprocesses features on CPU via scikit-learn Pipeline. "
+			"Using CPU for XGBoost to avoid repeated device-mismatch fallback warnings during CV and prediction."
+		)
+		return "cpu", message
+	return "cpu", None
+
+
+def _search_space_size(search_space: dict[str, list]) -> int:
+	lengths = [len(values) for values in search_space.values() if isinstance(values, list)]
+	return int(np.prod(lengths)) if lengths else 0
 
 
 def _build_preprocessor(frame: pd.DataFrame) -> ColumnTransformer:
@@ -331,9 +348,12 @@ else:
 
 # Bundle preprocessing + model into one inference-ready pipeline.
 fit_time_seconds = 0.0
-xgb_device = _resolve_xgboost_device(args.device)
+xgb_device_requested = args.device
+xgb_device, xgb_device_warning = _resolve_xgboost_device(xgb_device_requested)
+if xgb_device_warning is not None:
+	print(f"Warning: {xgb_device_warning}")
 if training_verbose > 0:
-	print(f"Resolved XGBoost device: requested={args.device}, effective={xgb_device}")
+	print(f"Resolved XGBoost device: requested={xgb_device_requested}, effective={xgb_device}")
 model_kwargs = {
 	"booster": args.booster,
 	"device": xgb_device,
@@ -373,7 +393,83 @@ model = Pipeline(
 # - Stops when validation metric does not improve for --n-iter-no-change rounds.
 # - When disabled, trains once on full training split.
 # ---------------------------------------------------------------------
-if args.early_stopping:
+tuning_summary = {
+	"enabled": False,
+	"method": None,
+	"cv_folds": None,
+	"scoring": None,
+	"scoring_sklearn": None,
+	"n_iter": None,
+	"n_candidates": None,
+	"best_score": None,
+	"best_score_std": None,
+	"best_params": None,
+}
+n_train_effective = int(len(X_train))
+n_val = 0
+
+if args.enable_tuning:
+	selected_cv_scoring = _cv_scoring_name(args.cv_scoring)
+	search_space = {
+		"classifier__n_estimators": [100, 200, 300, 500],
+		"classifier__learning_rate": [0.01, 0.05, 0.1, 0.2],
+		"classifier__max_depth": [3, 4, 6, 8],
+		"classifier__subsample": [0.7, 0.8, 1.0],
+		"classifier__colsample_bytree": [0.7, 0.8, 1.0],
+		"classifier__min_child_weight": [1.0, 3.0, 5.0],
+		"classifier__reg_lambda": [0.5, 1.0, 2.0],
+		"classifier__reg_alpha": [0.0, 0.1, 0.5],
+	}
+	n_iter = int(args.cv_n_iter)
+	n_candidates_upper = _search_space_size(search_space)
+	if n_candidates_upper > 0:
+		n_iter = min(n_iter, n_candidates_upper)
+	search = RandomizedSearchCV(
+		estimator=model,
+		param_distributions=search_space,
+		n_iter=int(n_iter),
+		scoring=selected_cv_scoring,
+		cv=int(args.cv_folds),
+		n_jobs=int(args.cv_n_jobs),
+		refit=False,
+		random_state=int(args.random_state),
+	)
+	fit_started_at = time.perf_counter()
+	search.fit(X_train, y_train)
+	best_params = dict(search.best_params_)
+	model.set_params(**best_params)
+	model.fit(X_train, y_train)
+	fit_time_seconds = float(time.perf_counter() - fit_started_at)
+	best_std = None
+	if hasattr(search, "cv_results_") and "std_test_score" in search.cv_results_:
+		best_std = float(search.cv_results_["std_test_score"][search.best_index_])
+	n_candidates = int(len(search.cv_results_["params"])) if hasattr(search, "cv_results_") else None
+	tuning_summary = {
+		"enabled": True,
+		"method": "random",
+		"cv_folds": int(args.cv_folds),
+		"scoring": args.cv_scoring,
+		"scoring_sklearn": selected_cv_scoring,
+		"n_iter": int(search.n_iter),
+		"n_candidates": n_candidates,
+		"best_score": _round_metric(float(search.best_score_)),
+		"best_score_std": _round_metric(best_std) if best_std is not None else None,
+		"best_params": _compact_metadata(_json_safe(best_params)),
+	}
+	training_control = {
+		"enabled": True,
+		"type": "search_cv",
+		"max_steps_configured": int(search.n_iter),
+		"steps_completed": int(args.cv_folds) * int(n_candidates) if n_candidates is not None else None,
+		"patience": None,
+		"monitor_metric": f"cv_{args.cv_scoring}",
+		"monitor_split": "cv",
+		"monitor_direction": "max",
+		"best_step": None,
+		"best_score": tuning_summary["best_score"],
+		"stopped_early": False,
+	}
+elif args.early_stopping:
 	X_inner_train, X_valid, y_inner_train, y_valid = train_test_split(
 		X_train,
 		y_train,
@@ -381,6 +477,8 @@ if args.early_stopping:
 		random_state=args.random_state,
 		stratify=y_train,
 	)
+	n_train_effective = int(len(X_inner_train))
+	n_val = int(len(X_valid))
 
 	inner_preprocessor = _build_preprocessor(X_inner_train)
 
@@ -672,8 +770,8 @@ if SAVE_MODEL:
 			"support_by_class": support_by_class,
 		},
 		"data_sizes": {
-			"n_train": int(len(X_train) - len(X_valid)) if training_control["enabled"] else int(len(X_train)),
-			"n_val": int(len(X_valid)) if training_control["enabled"] else 0,
+			"n_train": n_train_effective,
+			"n_val": n_val,
 			"n_test": int(len(X_test)),
 		},
 		"primary_metric": {
@@ -688,6 +786,7 @@ if SAVE_MODEL:
 			"calibration_method": None,
 		},
 		"training_control": training_control,
+		"tuning": tuning_summary,
 	}
 	metrics["selection"] = training_control
 	metrics["calibration"] = metrics.get("probabilities")
@@ -809,8 +908,6 @@ print(results)
 	)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
-	n_val = int(len(X_valid)) if training_control["enabled"] else 0
-	n_train_effective = int(len(X_inner_train)) if training_control["enabled"] else int(len(X_train))
 	classifier_params = _json_safe(model.named_steps["classifier"].get_params())
 	estimator_params_compact = _select_estimator_params(
 		classifier_params,
@@ -857,10 +954,10 @@ print(results)
 			"random_state": int(args.random_state),
 			"stratify": True,
 			"validation": {
-				"enabled": bool(training_control["enabled"]),
-				"strategy": "explicit_split" if training_control["enabled"] else None,
-				"validation_fraction": float(args.validation_fraction) if training_control["enabled"] else None,
-				"random_state": int(args.random_state) if training_control["enabled"] else None,
+				"enabled": bool(tuning_summary["enabled"] or training_control["enabled"]),
+				"strategy": ("random_search_cv" if tuning_summary["enabled"] else ("explicit_split" if training_control["enabled"] else None)),
+				"validation_fraction": float(args.validation_fraction) if (training_control["enabled"] and not tuning_summary["enabled"]) else None,
+				"random_state": int(args.random_state) if (tuning_summary["enabled"] or training_control["enabled"]) else None,
 			},
 			"sizes": {
 				"n_rows": data_rows,
@@ -887,6 +984,9 @@ print(results)
 			"estimator_params": _compact_metadata(estimator_params_compact),
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
+			"device_requested": xgb_device_requested,
+			"device_effective": xgb_device,
+			"device_resolution_warning": xgb_device_warning,
 			"booster": args.booster,
 			"n_estimators": int(args.n_estimators),
 			"learning_rate": float(args.learning_rate),
@@ -899,13 +999,23 @@ print(results)
 			"objective": xgb_objective,
 			"eval_metric": xgb_eval_metric,
 			"num_class": xgb_num_class,
+			"enable_tuning": bool(tuning_summary["enabled"]),
+			"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
+			"cv_folds": int(args.cv_folds) if tuning_summary["enabled"] else None,
+			"cv_scoring": args.cv_scoring if tuning_summary["enabled"] else None,
+			"cv_n_iter_requested": int(args.cv_n_iter) if tuning_summary["enabled"] else None,
+			"cv_n_iter": int(tuning_summary["n_iter"]) if tuning_summary["enabled"] and tuning_summary["n_iter"] is not None else None,
+			"cv_n_jobs": int(args.cv_n_jobs) if tuning_summary["enabled"] else None,
 		},
+		"tuning": tuning_summary,
 		"selection": training_control,
 		"training_control": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),
 			"random_state_effective": int(args.random_state),
+			"device_requested": xgb_device_requested,
+			"device_effective": xgb_device,
 			"n_jobs": classifier_params.get("n_jobs"),
 		},
 		"artifacts": _artifact_map(
@@ -955,10 +1065,15 @@ print(results)
 				"dataset_sha256": data_hash,
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
+				"device_requested": xgb_device_requested,
+				"device_effective": xgb_device,
 				"booster": args.booster,
 				"num_class": int(xgb_num_class) if xgb_num_class is not None else None,
 				"random_state": int(args.random_state),
 				"training_control_enabled": bool(training_control["enabled"]),
+				"tuning_enabled": bool(tuning_summary["enabled"]),
+				"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
+				"cv_best_score": tuning_summary["best_score"],
 				"training_control_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
 				"training_control_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
 				"training_control_steps_completed": int(training_control["steps_completed"]) if training_control["steps_completed"] is not None else None,
@@ -976,7 +1091,8 @@ print(results)
 				"train_accuracy": _round_metric(train_accuracy),
 				"train_f1_macro": _round_metric(train_f1_macro),
 				"train_log_loss": _round_metric(train_logloss_value) if train_logloss_value is not None else None,
-				"n_train": int(len(X_train)),
+				"n_train": int(n_train_effective),
+				"n_val": int(n_val),
 				"n_test": int(len(X_test)),
 			}
 		]

@@ -1,9 +1,10 @@
 import argparse
 import hashlib
 import json
+import math
+import pickle
 from functools import partial
 import numpy as np
-import pickle
 import platform
 import sys
 import time
@@ -14,8 +15,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 import sklearn
+import xgboost as xgb
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
 	ConfusionMatrixDisplay,
@@ -32,7 +33,7 @@ from sklearn.metrics import (
 	roc_auc_score,
 	roc_curve,
 )
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
+from sklearn.model_selection import RandomizedSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 
@@ -48,6 +49,7 @@ from libraries.model_template_helpers import (
 	artifact_map as _artifact_map,
 	compact_metadata as _compact_metadata,
 	find_project_root as _project_root,
+	json_safe as _json_safe,
 	parse_bool_flag as _parse_bool,
 	post_transform_feature_count as _post_transform_feature_count,
 	round_metric as _round_metric_base,
@@ -56,37 +58,36 @@ from libraries.model_template_helpers import (
 	write_model_schemas as _write_model_schemas,
 )
 
-def _parse_optional_int(value: str | int | None) -> int | None:
-	if value is None:
-		return None
-	if isinstance(value, int):
-		return value
-	text = str(value).strip().lower()
-	if text in {"none", "null", ""}:
-		return None
-	return int(text)
-
 # =============================================================
 # =============== CONFIGURATION / CLI FLAGS ===================
 # =============================================================
 
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
-#   --task regression|binary_classification|multiclass_classification
+#   --task binary_classification|multiclass_classification
 #   --name <model_name>
+#   --booster gbtree|gblinear|dart
+#   --device auto|cpu|gpu
 #   --save-model true|false
 #   --random-state <int>
 #   --test-size <float>
-#   --n-estimators <int>
-#   --max-depth <int|none>
-#   --min-samples-leaf <int>
-#   --max-features auto|sqrt|log2|float|none
+#   --early-stopping true|false
+#   --validation-fraction <float>
+#   --n-iter-no-change <int>
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
+#   --n-estimators <int>
+#   --learning-rate <float>
+#   --max-depth <int>
+#   --subsample <float>
+#   --colsample-bytree <float>
+#   --min-child-weight <float>
+#   --reg-lambda <float>
+#   --reg-alpha <float>
 #   --enable-tuning true|false
 #   --tuning-method grid|random
 #   --cv-folds <int>
-#   --cv-scoring rmse|mae|r2|accuracy|f1|f1_macro
+#   --cv-scoring accuracy|f1|f1_macro|roc_auc|logloss
 #   --cv-n-iter <int>
 #   --cv-n-jobs <int>
 # ---------------------------------------------------------------------
@@ -94,52 +95,53 @@ def _parse_optional_int(value: str | int | None) -> int | None:
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
-DEFAULT_N_ESTIMATORS = int("{{RF_N_ESTIMATORS_DEFAULT}}")
-DEFAULT_MAX_DEPTH = _parse_optional_int("{{RF_MAX_DEPTH_DEFAULT}}")
-DEFAULT_MIN_SAMPLES_LEAF = int("{{RF_MIN_SAMPLES_LEAF_DEFAULT}}")
-DEFAULT_MAX_FEATURES = "{{RF_MAX_FEATURES_DEFAULT}}"
+DEFAULT_BOOSTER = "gbtree"
+DEFAULT_DEVICE = "gpu"
+DEFAULT_EARLY_STOPPING = "True" == "True"
+DEFAULT_VALIDATION_FRACTION = float("0.1")
+DEFAULT_N_ITER_NO_CHANGE = int("20")
+DEFAULT_N_ESTIMATORS = int("300")
+DEFAULT_LEARNING_RATE = float("0.1")
+DEFAULT_MAX_DEPTH = int("6")
+DEFAULT_SUBSAMPLE = float("1.0")
+DEFAULT_COLSAMPLE_BYTREE = float("1.0")
+DEFAULT_MIN_CHILD_WEIGHT = float("1.0")
+DEFAULT_REG_LAMBDA = float("1.0")
+DEFAULT_REG_ALPHA = float("0.0")
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
-DEFAULT_ENABLE_TUNING = "{{RF_ENABLE_TUNING_DEFAULT}}" == "True"
-DEFAULT_TUNING_METHOD = "{{RF_TUNING_METHOD_DEFAULT}}"
-DEFAULT_CV_FOLDS = int("{{RF_CV_FOLDS_DEFAULT}}")
-DEFAULT_CV_SCORING = "{{RF_CV_SCORING_DEFAULT}}"
-DEFAULT_CV_N_ITER = int("{{RF_CV_N_ITER_DEFAULT}}")
-DEFAULT_CV_N_JOBS = int("{{RF_CV_N_JOBS_DEFAULT}}")
-
-
-def _parse_max_features(value: str) -> str | float | None:
-	"""Parse --max-features into a value accepted by RandomForestClassifier."""
-	text = str(value).strip().lower()
-	if text in {"none", "null", ""}:
-		return None
-	if text in {"auto", "sqrt", "log2"}:
-		return text
-	try:
-		fval = float(text)
-		if 0.0 < fval <= 1.0:
-			return fval
-		return text  # let sklearn validate
-	except ValueError:
-		return text
-
+DEFAULT_ENABLE_TUNING = "False" == "True"
+DEFAULT_TUNING_METHOD = "random"
+DEFAULT_CV_FOLDS = int("5")
+DEFAULT_CV_SCORING = "f1_macro"
+DEFAULT_CV_N_ITER = int("20")
+DEFAULT_CV_N_JOBS = int("-1")
 
 # Command-line argument parsing.
-parser = argparse.ArgumentParser(description="Random Forest Classifier baseline")
-parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
+parser = argparse.ArgumentParser(description="XGBoost Classifier baseline")
+parser.add_argument("--task", choices=["binary_classification"], default="binary_classification")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
+parser.add_argument("--booster", choices=["gbtree", "gblinear", "dart"], default=DEFAULT_BOOSTER)
+parser.add_argument("--device", choices=["auto", "cpu", "gpu"], default=DEFAULT_DEVICE)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
+parser.add_argument("--early-stopping", type=_parse_bool, default=DEFAULT_EARLY_STOPPING)
+parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
+parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
 parser.add_argument("--n-estimators", type=int, default=DEFAULT_N_ESTIMATORS)
-parser.add_argument("--max-depth", type=_parse_optional_int, default=DEFAULT_MAX_DEPTH)
-parser.add_argument("--min-samples-leaf", type=int, default=DEFAULT_MIN_SAMPLES_LEAF)
-parser.add_argument("--max-features", type=_parse_max_features, default=DEFAULT_MAX_FEATURES)
+parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
+parser.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
+parser.add_argument("--subsample", type=float, default=DEFAULT_SUBSAMPLE)
+parser.add_argument("--colsample-bytree", type=float, default=DEFAULT_COLSAMPLE_BYTREE)
+parser.add_argument("--min-child-weight", type=float, default=DEFAULT_MIN_CHILD_WEIGHT)
+parser.add_argument("--reg-lambda", type=float, default=DEFAULT_REG_LAMBDA)
+parser.add_argument("--reg-alpha", type=float, default=DEFAULT_REG_ALPHA)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 parser.add_argument("--enable-tuning", type=_parse_bool, default=DEFAULT_ENABLE_TUNING)
-parser.add_argument("--tuning-method", choices=["grid", "random"], default=DEFAULT_TUNING_METHOD)
+parser.add_argument("--tuning-method", choices=["random"], default=DEFAULT_TUNING_METHOD)
 parser.add_argument("--cv-folds", type=int, default=DEFAULT_CV_FOLDS)
 parser.add_argument("--cv-scoring", choices=["f1_macro", "accuracy", "roc_auc_ovr"], default=DEFAULT_CV_SCORING)
 parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
@@ -147,6 +149,8 @@ parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
+xgb_model_verbosity = min(3, max(0, int(training_verbose)))
+xgb_fit_verbose = bool(training_verbose > 0)
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
@@ -162,47 +166,19 @@ def _cv_scoring_name(name: str) -> str:
 	return mapping[name]
 
 
-def _build_search_space() -> dict[str, list]:
-	return {
-		"classifier__n_estimators": [100, 200, 300, 500],
-		"classifier__max_depth": [None, 8, 16, 32],
-		"classifier__min_samples_leaf": [1, 2, 4],
-		"classifier__max_features": ["sqrt", "log2", 1.0],
-	}
+def _resolve_xgboost_device(device_flag: str) -> tuple[str, str | None]:
+	if device_flag == "gpu":
+		message = (
+			"Requested --device=gpu, but this template preprocesses features on CPU via scikit-learn Pipeline. "
+			"Using CPU for XGBoost to avoid repeated device-mismatch fallback warnings during CV and prediction."
+		)
+		return "cpu", message
+	return "cpu", None
 
 
 def _search_space_size(search_space: dict[str, list]) -> int:
 	lengths = [len(values) for values in search_space.values() if isinstance(values, list)]
 	return int(np.prod(lengths)) if lengths else 0
-
-
-def _json_safe_param_value(value):
-	if value is None:
-		return None
-	if isinstance(value, (bool, int, float, str)):
-		if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
-			return None
-		return value
-	if isinstance(value, (np.integer,)):
-		return int(value)
-	if isinstance(value, (np.floating,)):
-		numeric = float(value)
-		if np.isnan(numeric) or np.isinf(numeric):
-			return None
-		return numeric
-	if isinstance(value, (np.bool_,)):
-		return bool(value)
-	if isinstance(value, (list, tuple)):
-		return [_json_safe_param_value(item) for item in value]
-	if isinstance(value, dict):
-		return {str(key): _json_safe_param_value(item) for key, item in value.items()}
-	if hasattr(value, "get_params"):
-		return type(value).__name__
-	return str(value)
-
-
-def _json_safe_best_params(params: dict[str, object]) -> dict[str, object]:
-	return {str(key): _json_safe_param_value(value) for key, value in params.items()}
 
 
 def _build_preprocessor(frame: pd.DataFrame) -> ColumnTransformer:
@@ -268,9 +244,9 @@ def _build_preprocessor(frame: pd.DataFrame) -> ColumnTransformer:
 # Template injection points:
 #   - DATA_TASK_DIR / DATA_FILE
 #   - READ_CSV_STATEMENT / POST_READ_DATASET_SETUP
-data_path = _project_root() / "data" / "template_data" / "{{DATA_TASK_DIR}}" / "{{DATA_FILE}}"
-{{READ_CSV_STATEMENT}}
-{{POST_READ_DATASET_SETUP}}
+data_path = _project_root() / "data" / "template_data" / "binary_classification" / "breast_cancer_wisconsin.csv"
+df = pd.read_csv(data_path)
+
 
 # Drop common CSV index artifacts (e.g., "Unnamed: 0") so they never leak into features.
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
@@ -298,8 +274,8 @@ df = df.replace({pd.NA: np.nan})
 #   - TARGET_COLUMN
 #   - FEATURE_DROP_COLUMNS
 #   - TARGET_PREPROCESS
-TARGET_COLUMN = "{{TARGET_COLUMN}}"
-FEATURE_DROP_COLUMNS = {{FEATURE_DROP_COLUMNS}}
+TARGET_COLUMN = "diagnosis"
+FEATURE_DROP_COLUMNS = ["diagnosis", "id"]
 
 if TARGET_COLUMN not in df.columns:
 	raise ValueError(f"Target column '{TARGET_COLUMN}' not found in dataset.")
@@ -307,7 +283,7 @@ if TARGET_COLUMN not in df.columns:
 # y is the supervised target; X is the feature space (minus optional drops).
 y = df[TARGET_COLUMN]
 y_original = y.copy()
-{{TARGET_PREPROCESS}} # type: ignore
+y = y.map({"B": 0, "M": 1}).astype("int64") # type: ignore
 X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 
 # ---------------------------------------------------------
@@ -360,30 +336,63 @@ preprocessor = _build_preprocessor(X_train)
 # ================= BUILD MODEL PIPELINE ======================
 # =============================================================
 
+# Determine XGBoost objective and evaluation metric based on task type.
+if args.task == "binary_classification":
+	xgb_objective = "binary:logistic"
+	xgb_eval_metric = "logloss"
+	xgb_num_class = None
+else:
+	xgb_objective = "multi:softprob"
+	xgb_eval_metric = "mlogloss"
+	xgb_num_class = int(y.nunique())
+
 # Bundle preprocessing + model into one inference-ready pipeline.
+fit_time_seconds = 0.0
+xgb_device_requested = args.device
+xgb_device, xgb_device_warning = _resolve_xgboost_device(xgb_device_requested)
+if xgb_device_warning is not None:
+	print(f"Warning: {xgb_device_warning}")
+if training_verbose > 0:
+	print(f"Resolved XGBoost device: requested={xgb_device_requested}, effective={xgb_device}")
+model_kwargs = {
+	"booster": args.booster,
+	"device": xgb_device,
+	"random_state": args.random_state,
+	"objective": xgb_objective,
+	"eval_metric": xgb_eval_metric,
+	"n_estimators": int(args.n_estimators),
+	"learning_rate": float(args.learning_rate),
+	"max_depth": int(args.max_depth),
+	"subsample": float(args.subsample),
+	"colsample_bytree": float(args.colsample_bytree),
+	"min_child_weight": float(args.min_child_weight),
+	"reg_lambda": float(args.reg_lambda),
+	"reg_alpha": float(args.reg_alpha),
+	"verbosity": xgb_model_verbosity,
+}
+if xgb_num_class is not None:
+	model_kwargs["num_class"] = xgb_num_class
+
 model = Pipeline(
 	steps=[
 		("preprocess", preprocessor),
 		(
 			"classifier",
-			RandomForestClassifier(
-				random_state=args.random_state,
-				n_estimators=int(args.n_estimators),
-				max_depth=args.max_depth,
-				min_samples_leaf=int(args.min_samples_leaf),
-				max_features=args.max_features,
-				verbose=training_verbose,
-			),
+			xgb.XGBClassifier(**model_kwargs),
 		),
 	]
 )
-fit_time_seconds = 0.0
 
 # =============================================================
 # ===================== TRAIN MODEL ===========================
 # =============================================================
-
-selected_cv_scoring = _cv_scoring_name(args.cv_scoring)
+# ---------------------------------------------------------------------
+# EARLY STOPPING (optional)
+# - Enabled with --early-stopping=true.
+# - Uses --validation-fraction as holdout split from training data.
+# - Stops when validation metric does not improve for --n-iter-no-change rounds.
+# - When disabled, trains once on full training split.
+# ---------------------------------------------------------------------
 tuning_summary = {
 	"enabled": False,
 	"method": None,
@@ -396,75 +405,163 @@ tuning_summary = {
 	"best_score_std": None,
 	"best_params": None,
 }
+n_train_effective = int(len(X_train))
+n_val = 0
 
-fit_started_at = time.perf_counter()
 if args.enable_tuning:
-	search_space = _build_search_space()
-	if args.tuning_method == "grid":
-		search = GridSearchCV(
-			estimator=model,
-			param_grid=search_space,
-			scoring=selected_cv_scoring,
-			cv=int(args.cv_folds),
-			n_jobs=int(args.cv_n_jobs),
-			refit=False,
-		)
-	else:
-		n_iter = int(args.cv_n_iter)
-		n_candidates_upper = _search_space_size(search_space)
-		if n_candidates_upper > 0:
-			n_iter = min(n_iter, n_candidates_upper)
-		search = RandomizedSearchCV(
-			estimator=model,
-			param_distributions=search_space,
-			n_iter=int(n_iter),
-			scoring=selected_cv_scoring,
-			cv=int(args.cv_folds),
-			n_jobs=int(args.cv_n_jobs),
-			refit=False,
-			random_state=int(args.random_state),
-		)
+	selected_cv_scoring = _cv_scoring_name(args.cv_scoring)
+	search_space = {
+		"classifier__n_estimators": [100, 200, 300, 500],
+		"classifier__learning_rate": [0.01, 0.05, 0.1, 0.2],
+		"classifier__max_depth": [3, 4, 6, 8],
+		"classifier__subsample": [0.7, 0.8, 1.0],
+		"classifier__colsample_bytree": [0.7, 0.8, 1.0],
+		"classifier__min_child_weight": [1.0, 3.0, 5.0],
+		"classifier__reg_lambda": [0.5, 1.0, 2.0],
+		"classifier__reg_alpha": [0.0, 0.1, 0.5],
+	}
+	n_iter = int(args.cv_n_iter)
+	n_candidates_upper = _search_space_size(search_space)
+	if n_candidates_upper > 0:
+		n_iter = min(n_iter, n_candidates_upper)
+	search = RandomizedSearchCV(
+		estimator=model,
+		param_distributions=search_space,
+		n_iter=int(n_iter),
+		scoring=selected_cv_scoring,
+		cv=int(args.cv_folds),
+		n_jobs=int(args.cv_n_jobs),
+		refit=False,
+		random_state=int(args.random_state),
+	)
+	fit_started_at = time.perf_counter()
 	search.fit(X_train, y_train)
 	best_params = dict(search.best_params_)
-	best_params_for_artifacts = _json_safe_best_params(best_params)
 	model.set_params(**best_params)
 	model.fit(X_train, y_train)
+	fit_time_seconds = float(time.perf_counter() - fit_started_at)
 	best_std = None
 	if hasattr(search, "cv_results_") and "std_test_score" in search.cv_results_:
 		best_std = float(search.cv_results_["std_test_score"][search.best_index_])
 	n_candidates = int(len(search.cv_results_["params"])) if hasattr(search, "cv_results_") else None
 	tuning_summary = {
 		"enabled": True,
-		"method": args.tuning_method,
+		"method": "random",
 		"cv_folds": int(args.cv_folds),
 		"scoring": args.cv_scoring,
 		"scoring_sklearn": selected_cv_scoring,
-			"n_iter": int(search.n_iter) if args.tuning_method == "random" else None,
+		"n_iter": int(search.n_iter),
 		"n_candidates": n_candidates,
 		"best_score": _round_metric(float(search.best_score_)),
 		"best_score_std": _round_metric(best_std) if best_std is not None else None,
-		"best_params": _compact_metadata(best_params_for_artifacts),
+		"best_params": _compact_metadata(_json_safe(best_params)),
+	}
+	training_control = {
+		"enabled": True,
+		"type": "search_cv",
+		"max_steps_configured": int(search.n_iter),
+		"steps_completed": int(args.cv_folds) * int(n_candidates) if n_candidates is not None else None,
+		"patience": None,
+		"monitor_metric": f"cv_{args.cv_scoring}",
+		"monitor_split": "cv",
+		"monitor_direction": "max",
+		"best_step": None,
+		"best_score": tuning_summary["best_score"],
+		"stopped_early": False,
+	}
+elif args.early_stopping:
+	X_inner_train, X_valid, y_inner_train, y_valid = train_test_split(
+		X_train,
+		y_train,
+		test_size=args.validation_fraction,
+		random_state=args.random_state,
+		stratify=y_train,
+	)
+	n_train_effective = int(len(X_inner_train))
+	n_val = int(len(X_valid))
+
+	inner_preprocessor = _build_preprocessor(X_inner_train)
+
+	X_inner_train_processed = inner_preprocessor.fit_transform(X_inner_train)
+	X_valid_processed = inner_preprocessor.transform(X_valid)
+
+	search_model_kwargs = dict(model_kwargs)
+	search_model_kwargs["early_stopping_rounds"] = int(args.n_iter_no_change)
+	search_classifier = xgb.XGBClassifier(**search_model_kwargs)
+	search_classifier.fit(
+		X_inner_train_processed,
+		y_inner_train,
+		eval_set=[(X_valid_processed, y_valid)],
+		verbose=xgb_fit_verbose,
+	)
+
+	search_n_estimators_raw = search_classifier.get_params().get("n_estimators")
+	search_n_estimators = int(search_n_estimators_raw) if search_n_estimators_raw is not None else 100
+
+	best_iteration = getattr(search_classifier, "best_iteration", None)
+	best_score_raw = getattr(search_classifier, "best_score", None)
+	try:
+		best_validation_score = float(best_score_raw) if best_score_raw is not None else None
+	except (TypeError, ValueError):
+		best_validation_score = None
+
+	if best_iteration is not None:
+		selected_n_estimators = int(best_iteration) + 1
+	else:
+		selected_n_estimators = search_n_estimators
+
+	best_step = int(best_iteration) + 1 if best_iteration is not None else None
+
+	model.named_steps["classifier"].set_params(n_estimators=selected_n_estimators)
+
+	# Refit final model on full training split with selected boosting rounds.
+	fit_started_at = time.perf_counter()
+	if training_verbose > 0:
+		print("Training started: XGBClassifier")
+	model.fit(X_train, y_train)
+	fit_time_seconds = float(time.perf_counter() - fit_started_at)
+	if training_verbose > 0:
+		print(f"Training completed in {fit_time_seconds:.3f}s: XGBClassifier")
+
+	training_control = {
+		"enabled": True,
+		"type": "boosting",
+		"max_steps_configured": int(search_n_estimators),
+		"steps_completed": int(selected_n_estimators),
+		"patience": int(args.n_iter_no_change),
+		"monitor_metric": xgb_eval_metric,
+		"monitor_split": "val",
+		"monitor_direction": "min",
+		"best_step": best_step,
+		"best_score": _round_metric(best_validation_score),
+		"stopped_early": bool(best_iteration is not None and (int(best_iteration) + 1) < int(search_n_estimators)),
 	}
 else:
+	# Fit on training data (pipeline fits preprocessors + model).
+	fit_started_at = time.perf_counter()
+	if training_verbose > 0:
+		print("Training started: XGBClassifier")
 	model.fit(X_train, y_train)
+	fit_time_seconds = float(time.perf_counter() - fit_started_at)
+	if training_verbose > 0:
+		print(f"Training completed in {fit_time_seconds:.3f}s: XGBClassifier")
 
-fit_time_seconds = float(time.perf_counter() - fit_started_at)
-if training_verbose > 0:
-	print(f"Training completed in {fit_time_seconds:.3f}s: RandomForestClassifier")
+	configured_n_estimators_raw = model.named_steps["classifier"].get_params().get("n_estimators")
+	configured_n_estimators = int(configured_n_estimators_raw) if configured_n_estimators_raw is not None else 100
 
-training_control = {
-	"enabled": bool(tuning_summary["enabled"]),
-	"type": f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
-	"max_steps_configured": tuning_summary["n_candidates"] if args.tuning_method == "grid" else (int(tuning_summary["n_iter"]) if tuning_summary["enabled"] and tuning_summary["n_iter"] is not None else None),
-	"steps_completed": int(args.cv_folds) * int(tuning_summary["n_candidates"]) if tuning_summary["enabled"] and tuning_summary["n_candidates"] is not None else None,
-	"patience": None,
-	"monitor_metric": f"cv_{args.cv_scoring}" if tuning_summary["enabled"] else None,
-	"monitor_split": "cv" if tuning_summary["enabled"] else None,
-	"monitor_direction": "max" if tuning_summary["enabled"] else None,
-	"best_step": None,
-	"best_score": tuning_summary["best_score"],
-	"stopped_early": False,
-}
+	training_control = {
+		"enabled": False,
+		"type": "boosting",
+		"max_steps_configured": configured_n_estimators,
+		"steps_completed": configured_n_estimators,
+		"patience": int(args.n_iter_no_change),
+		"monitor_metric": None,
+		"monitor_split": None,
+		"monitor_direction": None,
+		"best_step": None,
+		"best_score": None,
+		"stopped_early": False,
+	}
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
@@ -474,6 +571,30 @@ training_control = {
 predict_started_at = time.perf_counter()
 train_predictions = model.predict(X_train)
 predictions = model.predict(X_test)
+
+if isinstance(train_predictions, np.ndarray) and train_predictions.ndim > 1:
+	if train_predictions.shape[1] == 1:
+		train_predictions = train_predictions.ravel()
+	else:
+		train_predictions = np.argmax(train_predictions, axis=1)
+
+if isinstance(predictions, np.ndarray) and predictions.ndim > 1:
+	if predictions.shape[1] == 1:
+		predictions = predictions.ravel()
+	else:
+		predictions = np.argmax(predictions, axis=1)
+
+train_predictions = np.asarray(train_predictions).ravel()
+predictions = np.asarray(predictions).ravel()
+
+if not np.issubdtype(train_predictions.dtype, np.integer):
+	if len(model.named_steps["classifier"].classes_) == 2:
+		train_predictions = (train_predictions >= 0.5).astype(int)
+		predictions = (predictions >= 0.5).astype(int)
+	else:
+		train_predictions = np.rint(train_predictions).astype(int)
+		predictions = np.rint(predictions).astype(int)
+
 predict_time_seconds = float(time.perf_counter() - predict_started_at)
 classifier_classes = model.named_steps["classifier"].classes_
 train_accuracy = accuracy_score(y_train, train_predictions)
@@ -494,6 +615,7 @@ support_by_class = {str(label): int(count) for label, count in zip(classifier_cl
 support_total = int(len(y_test))
 
 # Calculate probability-based metrics when predict_proba is available.
+probabilities = None
 train_logloss_value = None
 test_roc_auc_macro_ovr = None
 test_pr_auc_macro_ovr = None
@@ -502,8 +624,18 @@ brier_score = None
 roc_curve_points = None
 y_test_binarized = None
 if hasattr(model, "predict_proba"):
-	train_probabilities = model.predict_proba(X_train)
-	probabilities = model.predict_proba(X_test)
+	train_probabilities = np.asarray(model.predict_proba(X_train))
+	probabilities = np.asarray(model.predict_proba(X_test))
+	if train_probabilities.ndim == 1:
+		train_probabilities = np.column_stack([1.0 - train_probabilities, train_probabilities])
+	if probabilities.ndim == 1:
+		probabilities = np.column_stack([1.0 - probabilities, probabilities])
+	if train_probabilities.ndim == 2 and train_probabilities.shape[1] == 1 and len(classifier_classes) == 2:
+		positive_train = train_probabilities[:, 0]
+		train_probabilities = np.column_stack([1.0 - positive_train, positive_train])
+	if probabilities.ndim == 2 and probabilities.shape[1] == 1 and len(classifier_classes) == 2:
+		positive_test = probabilities[:, 0]
+		probabilities = np.column_stack([1.0 - positive_test, positive_test])
 	train_logloss_value = float(log_loss(y_train, train_probabilities, labels=classifier_classes))
 	test_logloss_value = float(log_loss(y_test, probabilities, labels=classifier_classes))
 	is_binary_problem = len(classifier_classes) == 2
@@ -536,38 +668,45 @@ is_binary_problem = len(classifier_classes) == 2
 
 # ---- Train Metrics (model fit on data it learned from) ----
 print("Train Accuracy:", _round_metric(train_accuracy))  # Proportion of correct predictions on training data
-print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged F1 on training set (equal weight per class)
+print("Train F1 Macro:", _round_metric(train_f1_macro))  # Macro-averaged F1 score on training set
 
 # ---- Optional Probability-Based Train Metrics ----
+
 if train_logloss_value is not None:
-	print("Train Log Loss:", _round_metric(train_logloss_value))  # Cross-entropy loss on training set (probability confidence quality)
+	print("Train Log Loss:", _round_metric(train_logloss_value))  # Cross-entropy loss on training set
 
 # ---- Test Metrics (model performance on unseen data) ----
-print("Test Accuracy:", _round_metric(test_accuracy))  # Overall proportion of correct predictions on unseen test data
-print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Average recall across classes (handles class imbalance)
-print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision (mean per-class precision)
-print("Test Recall Macro:", _round_metric(test_recall_macro))  # Macro-averaged recall (mean per-class recall)
-print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 score (harmonic mean of precision and recall per class)
-print("Test Support Total:", support_total)  # Total number of true test samples used for evaluation
+print("Test Accuracy:", _round_metric(test_accuracy))  # Overall proportion of correct predictions on test data
+print("Test Balanced Accuracy:", _round_metric(test_balanced_accuracy))  # Average recall across classes (robust to imbalance)
+print("Test Precision Macro:", _round_metric(test_precision_macro))  # Macro-averaged precision across classes
+print("Test Recall Macro:", _round_metric(test_recall_macro))  # Macro-averaged recall across classes
+print("Test F1 Macro:", _round_metric(test_f1_macro))  # Macro-averaged F1 score (balanced precision/recall)
+print("Test Support Total:", support_total)  # Total number of true samples in test set
 print("Test Support By Class:", support_by_class)  # True sample count per class (class distribution insight)
 
-# ---- Optional Ranking Metrics (require probability or decision scores) ----
+# ---- Optional Ranking Metrics (require probability outputs) ----
 if test_roc_auc_macro_ovr is not None:
-	print("Test ROC AUC Macro OVR:", _round_metric(test_roc_auc_macro_ovr))  # One-vs-Rest macro ROC-AUC (probability ranking quality)
+	print("Test ROC AUC Macro OVR:", _round_metric(test_roc_auc_macro_ovr))  # One-vs-rest macro ROC-AUC score
 
 if test_pr_auc_macro_ovr is not None:
-	print("Test PR AUC Macro OVR:", _round_metric(test_pr_auc_macro_ovr))  # One-vs-Rest macro Precision-Recall AUC (imbalance-sensitive metric)
+	print("Test PR AUC Macro OVR:", _round_metric(test_pr_auc_macro_ovr))  # One-vs-rest macro Precision-Recall AUC
 
 # ---- Optional Probability / Calibration Metrics ----
 if test_logloss_value is not None:
-	print("Test Log Loss:", _round_metric(test_logloss_value))  # Cross-entropy loss on test set (penalizes confident wrong predictions)
+	print("Test Log Loss:", _round_metric(test_logloss_value))  # Cross-entropy loss on test probabilities
 
 if brier_score is not None:
-	print("Test Brier Score:", _round_metric(brier_score))  # Mean squared error of predicted probabilities (calibration metric)
+	print("Test Brier Score:", _round_metric(brier_score))  # Probability calibration metric (lower is better)
+
+# ---- Training Control (early stopping / step tracking) ----
+if training_control["enabled"]:
+	print("Training Control Best Step:", training_control["best_step"])  # Iteration/epoch with best validation score
+	print("Training Control Steps Completed:", training_control["steps_completed"])  # Total training iterations completed
+	print("Training Control Best Score:", training_control["best_score"])  # Best validation score achieved
 
 # ---- Sanity Checks ----
-print("First 5 predictions:", predictions[:5])  # Quick sanity check of output classes
-print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true values for sanity check
+print("First 5 predictions:", predictions[:5])  # Sample predictions for quick sanity check
+print("First 5 true labels:", y_test.iloc[:5].values)  # Corresponding true labels for sanity check
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY =================
@@ -631,8 +770,8 @@ if SAVE_MODEL:
 			"support_by_class": support_by_class,
 		},
 		"data_sizes": {
-			"n_train": int(len(X_train)),
-			"n_val": 0,
+			"n_train": n_train_effective,
+			"n_val": n_val,
 			"n_test": int(len(X_test)),
 		},
 		"primary_metric": {
@@ -657,15 +796,15 @@ if SAVE_MODEL:
 
 	confusion_matrix_df = pd.DataFrame(
 		test_confusion_matrix,
-		index=model.named_steps["classifier"].classes_,
-		columns=model.named_steps["classifier"].classes_,
+		index=classifier_classes,
+		columns=classifier_classes,
 	)
 	confusion_matrix_df.to_csv(eval_dir / "confusion_matrix.csv", index=True)
 
 	cm_figure, cm_axis = plt.subplots(figsize=(6, 5))
 	cm_display = ConfusionMatrixDisplay(
 		confusion_matrix=test_confusion_matrix,
-		display_labels=model.named_steps["classifier"].classes_,
+		display_labels=classifier_classes,
 	)
 	cm_display.plot(ax=cm_axis, cmap="Blues", colorbar=False)
 	cm_axis.set_title("Confusion Matrix")
@@ -735,13 +874,20 @@ features = pd.DataFrame(sample_rows)
 predictions = model.predict(features)
 probabilities = model.predict_proba(features) if hasattr(model, "predict_proba") else None
 
+if isinstance(predictions, np.ndarray) and predictions.ndim > 1:
+	if predictions.shape[1] == 1:
+		predictions = predictions.ravel()
+	else:
+		predictions = np.argmax(predictions, axis=1)
+predictions = np.asarray(predictions).ravel()
+
 print("Inference Example")
 print("Input Rows:", len(features))
 print("Predictions:", predictions.tolist())
 print("Expected:", expected_y)
 if probabilities is not None:
 	print("Class Labels:", class_labels)
-	print("Probabilities:", probabilities.tolist())
+	print("Probabilities:", np.asarray(probabilities).tolist())
 
 results = features.copy()
 results["y_expected"] = expected_y
@@ -762,23 +908,28 @@ print(results)
 	)
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
-	n_val = 0
-	n_train_effective = int(len(X_train))
-	classifier_params = model.named_steps["classifier"].get_params()
+	classifier_params = _json_safe(model.named_steps["classifier"].get_params())
 	estimator_params_compact = _select_estimator_params(
 		classifier_params,
 		[
+			"objective",
+			"booster",
+			"eval_metric",
 			"n_estimators",
-			"criterion",
 			"max_depth",
-			"max_features",
-			"min_samples_split",
-			"min_samples_leaf",
-			"class_weight",
-			"bootstrap",
-			"max_samples",
+			"learning_rate",
+			"subsample",
+			"colsample_bytree",
+			"gamma",
+			"min_child_weight",
+			"reg_alpha",
+			"reg_lambda",
 			"random_state",
 			"n_jobs",
+			"tree_method",
+			"device",
+			"num_class",
+			"enable_categorical",
 		],
 	)
 
@@ -786,11 +937,11 @@ print(results)
 		"run_id": run_id,
 		"name": model_name,
 		"timestamp": timestamp,
-		"library": "scikit-learn",
+		"library": "xgboost",
 		"task": args.task,
-		"algorithm": "random_forest",
-		"estimator_class": "RandomForestClassifier",
-		"model_id": "sklearn.randomforestclassifier",
+		"algorithm": "gradient_boosting",
+		"estimator_class": "XGBClassifier",
+		"model_id": "xgboost.xgbclassifier",
 		"dataset": {
 			"path": str(data_path.relative_to(_project_root())),
 			"sha256": data_hash,
@@ -803,10 +954,10 @@ print(results)
 			"random_state": int(args.random_state),
 			"stratify": True,
 			"validation": {
-				"enabled": bool(tuning_summary["enabled"]),
-				"strategy": f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
-				"validation_fraction": None,
-				"random_state": int(args.random_state) if tuning_summary["enabled"] else None,
+				"enabled": bool(tuning_summary["enabled"] or training_control["enabled"]),
+				"strategy": ("random_search_cv" if tuning_summary["enabled"] else ("explicit_split" if training_control["enabled"] else None)),
+				"validation_fraction": float(args.validation_fraction) if (training_control["enabled"] and not tuning_summary["enabled"]) else None,
+				"random_state": int(args.random_state) if (tuning_summary["enabled"] or training_control["enabled"]) else None,
 			},
 			"sizes": {
 				"n_rows": data_rows,
@@ -833,15 +984,27 @@ print(results)
 			"estimator_params": _compact_metadata(estimator_params_compact),
 			"test_size": float(args.test_size),
 			"random_state": int(args.random_state),
+			"device_requested": xgb_device_requested,
+			"device_effective": xgb_device,
+			"device_resolution_warning": xgb_device_warning,
+			"booster": args.booster,
 			"n_estimators": int(args.n_estimators),
-			"max_depth": int(args.max_depth) if args.max_depth is not None else None,
-			"min_samples_leaf": int(args.min_samples_leaf),
-			"max_features": str(args.max_features) if args.max_features is not None else None,
+			"learning_rate": float(args.learning_rate),
+			"max_depth": int(args.max_depth),
+			"subsample": float(args.subsample),
+			"colsample_bytree": float(args.colsample_bytree),
+			"min_child_weight": float(args.min_child_weight),
+			"reg_lambda": float(args.reg_lambda),
+			"reg_alpha": float(args.reg_alpha),
+			"objective": xgb_objective,
+			"eval_metric": xgb_eval_metric,
+			"num_class": xgb_num_class,
 			"enable_tuning": bool(tuning_summary["enabled"]),
 			"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
 			"cv_folds": int(args.cv_folds) if tuning_summary["enabled"] else None,
 			"cv_scoring": args.cv_scoring if tuning_summary["enabled"] else None,
-			"cv_n_iter": int(args.cv_n_iter) if tuning_summary["enabled"] and args.tuning_method == "random" else None,
+			"cv_n_iter_requested": int(args.cv_n_iter) if tuning_summary["enabled"] else None,
+			"cv_n_iter": int(tuning_summary["n_iter"]) if tuning_summary["enabled"] and tuning_summary["n_iter"] is not None else None,
 			"cv_n_jobs": int(args.cv_n_jobs) if tuning_summary["enabled"] else None,
 		},
 		"tuning": tuning_summary,
@@ -851,6 +1014,8 @@ print(results)
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),
 			"random_state_effective": int(args.random_state),
+			"device_requested": xgb_device_requested,
+			"device_effective": xgb_device,
 			"n_jobs": classifier_params.get("n_jobs"),
 		},
 		"artifacts": _artifact_map(
@@ -872,11 +1037,12 @@ print(results)
 			"python": platform.python_version(),
 			"pandas": pd.__version__,
 			"scikit-learn": sklearn.__version__,
+			"xgboost": xgb.__version__,
 		},
 	}
-	run_metadata = _compact_metadata(run_metadata)
+	run_metadata = _compact_metadata(_json_safe(run_metadata))
 	with (run_dir / "run.json").open("w", encoding="utf-8") as run_file:
-		json.dump(run_metadata, run_file, indent=2)
+		json.dump(run_metadata, run_file, indent=2, allow_nan=False)
 
 	registry_path = model_root_dir / "model_registry.csv"
 	if registry_path.exists():
@@ -899,10 +1065,19 @@ print(results)
 				"dataset_sha256": data_hash,
 				"dataset_rows": data_rows,
 				"dataset_columns": data_columns,
+				"device_requested": xgb_device_requested,
+				"device_effective": xgb_device,
+				"booster": args.booster,
+				"num_class": int(xgb_num_class) if xgb_num_class is not None else None,
 				"random_state": int(args.random_state),
+				"training_control_enabled": bool(training_control["enabled"]),
 				"tuning_enabled": bool(tuning_summary["enabled"]),
 				"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
 				"cv_best_score": tuning_summary["best_score"],
+				"training_control_best_score": float(training_control["best_score"]) if training_control["best_score"] is not None else None,
+				"training_control_best_step": int(training_control["best_step"]) if training_control["best_step"] is not None else None,
+				"training_control_steps_completed": int(training_control["steps_completed"]) if training_control["steps_completed"] is not None else None,
+				"training_control_stopped_early": bool(training_control["stopped_early"]),
 				"accuracy": _round_metric(test_accuracy),
 				"balanced_accuracy": _round_metric(test_balanced_accuracy),
 				"precision_macro": _round_metric(test_precision_macro),
@@ -916,7 +1091,8 @@ print(results)
 				"train_accuracy": _round_metric(train_accuracy),
 				"train_f1_macro": _round_metric(train_f1_macro),
 				"train_log_loss": _round_metric(train_logloss_value) if train_logloss_value is not None else None,
-				"n_train": int(len(X_train)),
+				"n_train": int(n_train_effective),
+				"n_val": int(n_val),
 				"n_test": int(len(X_test)),
 			}
 		]

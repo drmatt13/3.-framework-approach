@@ -420,10 +420,14 @@ if args.enable_tuning:
 			refit=False,
 		)
 	else:
+		n_iter = int(args.cv_n_iter)
+		n_candidates_upper = _grid_size(search_space)
+		if n_candidates_upper > 0:
+			n_iter = min(n_iter, n_candidates_upper)
 		search = RandomizedSearchCV(
 			estimator=model,
 			param_distributions=search_space,
-			n_iter=int(args.cv_n_iter),
+			n_iter=int(n_iter),
 			scoring=selected_cv_scoring,
 			cv=int(args.cv_folds),
 			n_jobs=int(args.cv_n_jobs),
@@ -453,7 +457,7 @@ if args.enable_tuning:
 		"cv_folds": int(args.cv_folds),
 		"scoring": args.cv_scoring,
 		"scoring_sklearn": selected_cv_scoring,
-		"n_iter": int(args.cv_n_iter) if args.tuning_method == "random" else None,
+			"n_iter": int(search.n_iter) if args.tuning_method == "random" else None,
 		"n_candidates": n_candidates,
 		"best_score": _round_metric(best_score),
 		"best_score_std": _round_metric(best_std) if best_std is not None else None,
@@ -469,18 +473,17 @@ if training_verbose > 0:
 
 training_control = {
 	"enabled": bool(tuning_summary["enabled"]),
-	"strategy": f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
-	"monitor_name": f"cv_{args.cv_scoring}" if tuning_summary["enabled"] else None,
-	"monitor_mode": "min" if args.cv_scoring in ("rmse", "mae") else "max",
-	"max_steps_configured": tuning_summary["n_candidates"] if args.tuning_method == "grid" else (int(args.cv_n_iter) if tuning_summary["enabled"] else None),
+	"type": f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
+	"max_steps_configured": tuning_summary["n_candidates"] if args.tuning_method == "grid" else (int(tuning_summary["n_iter"]) if tuning_summary["enabled"] and tuning_summary["n_iter"] is not None else None),
 	"steps_completed": int(args.cv_folds) * int(tuning_summary["n_candidates"]) if tuning_summary["enabled"] and tuning_summary["n_candidates"] is not None else None,
+	"patience": None,
+	"monitor_metric": f"cv_{args.cv_scoring}" if tuning_summary["enabled"] else None,
+	"monitor_split": "cv" if tuning_summary["enabled"] else None,
+	"monitor_direction": ("min" if args.cv_scoring in ("rmse", "mae") else "max") if tuning_summary["enabled"] else None,
 	"best_step": None,
 	"best_score": tuning_summary["best_score"],
-	"n_iter_no_change": None,
-	"validation_fraction": None,
+	"stopped_early": False,
 }
-if not tuning_summary["enabled"]:
-	training_control["monitor_mode"] = None
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
