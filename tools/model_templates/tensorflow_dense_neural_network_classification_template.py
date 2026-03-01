@@ -15,8 +15,6 @@ import numpy as np
 import pandas as pd
 import sklearn
 import tensorflow as tf
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
 	ConfusionMatrixDisplay,
 	accuracy_score,
@@ -33,12 +31,11 @@ from sklearn.metrics import (
 	roc_curve,
 )
 from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
+from sklearn.preprocessing import label_binarize
 
 _current_file = Path(__file__).resolve()
 for _candidate in [_current_file.parent, *_current_file.parents]:
-	if (_candidate / "libraries" / "__init__.py").exists():
+	if (_candidate / "libraries").is_dir():
 		if str(_candidate) not in sys.path:
 			sys.path.insert(0, str(_candidate))
 		break
@@ -54,6 +51,12 @@ from libraries.model_template_helpers import (
 	to_dense_float32 as _to_dense_float32,
 	validate_etl_outputs as _validate_etl_outputs,
 	write_model_schemas as _write_model_schemas,
+)
+from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
+from libraries.tensorflow_template_utils import (
+	build_dense_classifier as _build_dense_classifier,
+	classification_score as _classification_score,
+	predict_class_probabilities as _predict_class_probabilities,
 )
 
 # =============================================================
@@ -121,51 +124,12 @@ parser.add_argument("--cv-scoring", choices=["f1_macro"], default=DEFAULT_CV_SCO
 parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
-training_verbose = "auto" if args.verbose == "auto" else int(args.verbose)
+training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
+phase_logs_enabled = training_verbose > 0
+keras_fit_verbose = 1 if training_verbose >= 2 else 0
+trial_fit_verbose = 1 if training_verbose >= 2 else 0
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
-
-
-def _build_dense_classifier(input_dim: int, output_units: int, output_activation: str, optimizer_name: str, learning_rate: float, hidden_layers: list[int], dropout: float, is_binary: bool) -> tf.keras.Sequential:
-	optimizer_ctor = {
-		"adam": tf.keras.optimizers.Adam,
-		"sgd": tf.keras.optimizers.SGD,
-		"rmsprop": tf.keras.optimizers.RMSprop,
-		"adagrad": tf.keras.optimizers.Adagrad,
-		"adamw": tf.keras.optimizers.AdamW,
-	}[optimizer_name]
-	optimizer = optimizer_ctor(learning_rate=float(learning_rate))
-	layers: list[tf.keras.layers.Layer] = [tf.keras.layers.Input(shape=(int(input_dim),))]
-	for width in hidden_layers:
-		layers.append(tf.keras.layers.Dense(int(width), activation="relu"))
-	if float(dropout) > 0:
-		layers.append(tf.keras.layers.Dropout(float(dropout)))
-	layers.append(tf.keras.layers.Dense(output_units, activation=output_activation))
-	model = tf.keras.Sequential(layers)
-	model.compile(
-		optimizer=optimizer,
-		loss="binary_crossentropy" if is_binary else "sparse_categorical_crossentropy",
-		metrics=[tf.keras.metrics.BinaryAccuracy(name="accuracy")] if is_binary else [tf.keras.metrics.SparseCategoricalAccuracy(name="accuracy")],
-	)
-	return model
-
-
-def _predict_class_probabilities(model: tf.keras.Sequential, features: np.ndarray, is_binary: bool) -> np.ndarray:
-	raw = np.asarray(model.predict(features, verbose=0))
-	if is_binary:
-		pos = raw.reshape(-1)
-		return np.column_stack([1.0 - pos, pos])
-	return raw
-
-
-def _classification_score(y_true: np.ndarray, probabilities: np.ndarray, is_binary: bool, scoring: str) -> float:
-	if is_binary:
-		preds = (probabilities[:, -1] >= 0.5).astype(int)
-	else:
-		preds = np.argmax(probabilities, axis=1).astype(int)
-	if scoring == "f1_macro":
-		return float(f1_score(y_true, preds, average="macro", zero_division=0))
-	raise ValueError(f"Unsupported --cv-scoring '{scoring}'")
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -211,12 +175,7 @@ df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 #   - trim whitespace in string-like columns
 #   - convert empty strings to NaN
 #   - normalize pd.NA -> np.nan for consistent downstream behavior
-for column in df.select_dtypes(include=["object", "string"]).columns:
-	series = df[column].astype("string").str.strip()
-	series = series.replace("", np.nan)
-	df[column] = series.astype("object")
-
-df = df.replace({pd.NA: np.nan})
+df = _normalize_string_columns(df)
 
 # ---------------------------------------------------------
 # Define target + features (semantic boundary)
@@ -295,25 +254,7 @@ X_train, X_test, y_train, y_test = train_test_split(
 	stratify=y,
 )
 
-# Define column groups from training data only.
-# Include "str" explicitly for pandas 3 compatibility.
-categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
-
-# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
-try:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-except TypeError:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-# Preprocess: impute missing values, then scale numeric and one-hot encode categorical features.
-preprocessor = ColumnTransformer(
-	transformers=[
-		("num", Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]), numerical_cols),
-		("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", one_hot_encoder)]), categorical_cols),
-	],
-	remainder="drop",
-)
+preprocessor = _build_preprocessor(X_train)
 
 # Transform features to dense float32 arrays for TensorFlow compatibility.
 y_train_array = np.asarray(y_train, dtype=np.int64)
@@ -403,6 +344,11 @@ tuning_summary = {
 }
 
 if args.enable_tuning:
+	if phase_logs_enabled:
+		print(
+			f"Training started with tuning: method=random, "
+			f"scoring={args.cv_scoring}, n_iter={args.cv_n_iter}"
+		)
 	rng = np.random.default_rng(int(args.random_state))
 	X_tune_train, X_tune_val, y_tune_train, y_tune_val = train_test_split(
 		X_train_processed,
@@ -422,8 +368,10 @@ if args.enable_tuning:
 	sampled_indices = rng.choice(len(candidates), size=min(int(args.cv_n_iter), len(candidates)), replace=False)
 	best_candidate = None
 	best_candidate_score = -np.inf
-	for index in sampled_indices.tolist():
+	for trial_index, index in enumerate(sampled_indices.tolist(), start=1):
 		candidate = candidates[int(index)]
+		if training_verbose >= 2:
+			print(f"Tuning trial {trial_index}/{len(sampled_indices)}: {candidate}")
 		tf.keras.backend.clear_session()
 		trial_model = _build_dense_classifier(
 			input_dim=int(X_train_processed.shape[1]),
@@ -450,7 +398,7 @@ if args.enable_tuning:
 			batch_size=int(candidate["batch_size"]),
 			validation_data=(X_tune_val, y_tune_val),
 			callbacks=trial_callbacks,
-			verbose=0,
+			verbose=trial_fit_verbose,
 		)
 		trial_probabilities = _predict_class_probabilities(trial_model, X_tune_val, is_binary)
 		score = _classification_score(y_tune_val, trial_probabilities, is_binary, args.cv_scoring)
@@ -510,6 +458,8 @@ if args.early_stopping:
 	validation_data = (X_valid_processed, y_valid_array)
 
 fit_started_at = time.perf_counter()
+if phase_logs_enabled and not args.enable_tuning:
+	print("Training started: TensorFlow Dense Classifier")
 history = keras_model.fit(
 	fit_features,
 	fit_targets,
@@ -517,9 +467,11 @@ history = keras_model.fit(
 	batch_size=int(args.batch_size),
 	callbacks=callbacks,
 	validation_data=validation_data,
-	verbose=training_verbose,
+	verbose=keras_fit_verbose,
 )
 fit_time_seconds = float(time.perf_counter() - fit_started_at)
+if phase_logs_enabled:
+	print(f"Training completed in {fit_time_seconds:.3f}s: TensorFlow Dense Classifier")
 
 history_epochs = int(len(history.history.get("loss", [])))
 if history_epochs <= 0:
@@ -570,8 +522,8 @@ else:
 # Evaluate model on train/test splits.
 # Predict on train/test splits and measure inference time.
 predict_started_at = time.perf_counter()
-train_raw = np.asarray(keras_model.predict(X_train_processed, verbose=training_verbose))
-test_raw = np.asarray(keras_model.predict(X_test_processed, verbose=training_verbose))
+train_raw = np.asarray(keras_model(X_train_processed, training=False).numpy())
+test_raw = np.asarray(keras_model(X_test_processed, training=False).numpy())
 predict_time_seconds = float(time.perf_counter() - predict_started_at)
 
 # Convert model outputs to probabilities and class predictions.
@@ -770,7 +722,7 @@ if SAVE_MODEL:
 	class_labels = [str(label) for label in classes.tolist()]
 	sample_rows_literal = json.dumps(inference_rows, indent=2)
 	sample_rows_literal = sample_rows_literal.replace(": NaN", ": np.nan").replace(": Infinity", ": np.inf").replace(": -Infinity", ": -np.inf")
-	inference_verbose_literal = '"auto"' if args.verbose == "auto" else str(int(args.verbose))
+	inference_verbose_literal = str(1 if training_verbose >= 2 else 0)
 	inference_script = f'''import pickle
 from pathlib import Path
 import numpy as np
@@ -791,7 +743,7 @@ X = preprocessor.transform(features)
 if hasattr(X, "toarray"):
 	X = X.toarray()
 X = np.asarray(X, dtype=np.float32)
-raw = np.asarray(model.predict(X, verbose={inference_verbose_literal}))
+raw = np.asarray(model(X, training=False).numpy())
 if raw.ndim == 1 or (raw.ndim == 2 and raw.shape[1] == 1):
 	pos = raw.reshape(-1)
 	probabilities = np.column_stack([1.0 - pos, pos])

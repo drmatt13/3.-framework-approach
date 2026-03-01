@@ -8,7 +8,14 @@ from libraries.cli_helpers import parse_bool_flag
 
 
 def round_metric(value, decimals: int = 4):
-    return None if value is None else round(float(value), decimals)
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    rounded = round(float(value), decimals)
+    if rounded.is_integer():
+        return int(rounded)
+    return rounded
 
 
 def to_dense_float32(values):

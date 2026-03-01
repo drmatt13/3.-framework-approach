@@ -52,6 +52,20 @@ CUSTOM_STYLE = Style.from_dict(
     }
 )
 
+# Keep defaulted select prompts visually consistent with regular selects.
+# questionary.select with `default=...` uses the `selected` token for the
+# preselected item; using a non-blue style here avoids sticky blue highlights.
+DEFAULT_SELECT_STYLE = Style.from_dict(
+    {
+        "qmark": "fg:#f8b808 bold",  # Question mark
+        "question": "bold",  # Question text
+        "answer": "fg:#3fb0f0 bold",  # Selected answer after choice
+        "pointer": "fg:#f8b808 bold",  # Arrow pointer (>)
+        "highlighted": "fg:#ffffff bg:#222222 bold",  # Highlighted option in menu
+        "selected": "fg:#8ab4f8 bold",  # Selected checkbox item (if used)
+    }
+)
+
 
 def _ask_text(prompt: str, *, validate_fn, default: str | None = None) -> str | None:
     """
@@ -69,6 +83,18 @@ def _ask_text(prompt: str, *, validate_fn, default: str | None = None) -> str | 
     return questionary.text(prompt, **kwargs).ask()
 
 
+def _ask_select(prompt: str, *, choices, default: str | None = None):
+    """Wrapper to apply consistent style + behavior to select prompts."""
+    kwargs = {
+        "choices": choices,
+        "use_shortcuts": True,
+        "style": DEFAULT_SELECT_STYLE if default is not None else CUSTOM_STYLE,
+    }
+    if default is not None:
+        kwargs["default"] = default
+    return questionary.select(prompt, **kwargs).ask()
+
+
 def _is_float(s: str) -> bool:
     try:
         float(s)
@@ -83,6 +109,64 @@ def _is_int(s: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _stringify_setting(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _is_truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _should_omit_resolved_key(key: str, values_by_key: dict[str, object]) -> bool:
+    tuning_dependencies: dict[str, tuple[str, ...]] = {
+        "default_xgb_enable_tuning": (
+            "default_xgb_tuning_method",
+            "default_xgb_cv_folds",
+            "default_xgb_cv_scoring",
+            "default_xgb_cv_n_iter",
+            "default_xgb_cv_n_jobs",
+        ),
+        "default_logistic_enable_tuning": (
+            "default_logistic_tuning_method",
+            "default_logistic_cv_folds",
+            "default_logistic_cv_scoring",
+            "default_logistic_cv_n_iter",
+            "default_logistic_cv_n_jobs",
+        ),
+        "default_rf_enable_tuning": (
+            "default_rf_tuning_method",
+            "default_rf_cv_folds",
+            "default_rf_cv_scoring",
+            "default_rf_cv_n_iter",
+            "default_rf_cv_n_jobs",
+        ),
+        "default_lr_enable_tuning": (
+            "default_lr_tuning_method",
+            "default_lr_cv_folds",
+            "default_lr_cv_scoring",
+            "default_lr_cv_n_iter",
+            "default_lr_cv_n_jobs",
+        ),
+        "default_tf_enable_tuning": (
+            "default_tf_tuning_method",
+            "default_tf_cv_scoring",
+            "default_tf_cv_n_iter",
+        ),
+    }
+
+    for enable_key, dependent_keys in tuning_dependencies.items():
+        if key in dependent_keys and enable_key in values_by_key:
+            return not _is_truthy(values_by_key[enable_key])
+
+    return False
 
 
 def _supports_early_stopping_defaults(library: str, model: str | None, task: str) -> bool:
@@ -427,12 +511,10 @@ def main() -> int:
         print(f"Could not find generator script at: {generator_path}", file=sys.stderr)
         return 1
 
-    library = questionary.select(
+    library = _ask_select(
         "Select library:",
         choices=["scikit-learn", "xgboost", "tensorflow"],
-        use_shortcuts=True,
-        style=CUSTOM_STYLE,
-    ).ask()
+    )
 
     if library is None:
         print("Cancelled.")
@@ -440,23 +522,19 @@ def main() -> int:
 
     model = None
     if library == "scikit-learn":
-        model = questionary.select(
+        model = _ask_select(
             "Select scikit-learn model:",
             choices=SKLEARN_MODELS,
-            use_shortcuts=True,
-            style=CUSTOM_STYLE,
-        ).ask()
+        )
         if model is None:
             print("Cancelled.")
             return 0
 
     if library == "tensorflow":
-        model = questionary.select(
+        model = _ask_select(
             "Select tensorflow model:",
             choices=TENSORFLOW_MODELS,
-            use_shortcuts=True,
-            style=CUSTOM_STYLE,
-        ).ask()
+        )
         if model is None:
             print("Cancelled.")
             return 0
@@ -471,12 +549,10 @@ def main() -> int:
         task = task_choices[0]
         print(f"Task auto-selected: {task}")
     else:
-        task = questionary.select(
+        task = _ask_select(
             "Select task:",
             choices=task_choices,
-            use_shortcuts=True,
-            style=CUSTOM_STYLE,
-        ).ask()
+        )
 
         if task is None:
             print("Cancelled.")
@@ -486,23 +562,19 @@ def main() -> int:
     booster = None
     device = None
     if library == "xgboost":
-        booster = questionary.select(
+        booster = _ask_select(
             "Default xgboost booster:",
             choices=XGBOOST_BOOSTERS,
-            use_shortcuts=True,
-            style=CUSTOM_STYLE,
-        ).ask()
+        )
 
         if booster is None:
             print("Cancelled.")
             return 0
 
-        device = questionary.select(
+        device = _ask_select(
             "Default xgboost device for generated template:",
             choices=XGBOOST_DEVICE_DEFAULTS,
-            use_shortcuts=True,
-            style=CUSTOM_STYLE,
-        ).ask()
+        )
 
         if device is None:
             print("Cancelled.")
@@ -512,12 +584,10 @@ def main() -> int:
     starter_dataset = None
     starter_choices = STARTER_DATASETS_BY_TASK.get(task, [])
     if starter_choices:
-        starter_dataset = questionary.select(
+        starter_dataset = _ask_select(
             "Select starter template dataset:",
             choices=starter_choices,
-            use_shortcuts=True,
-            style=CUSTOM_STYLE,
-        ).ask()
+        )
 
         if starter_dataset is None:
             print("Cancelled.")
@@ -531,7 +601,7 @@ def main() -> int:
     size_bucket = _dataset_size_bucket(starter_dataset)
 
     if library != "tensorflow":
-        profile = questionary.select(
+        profile = _ask_select(
             "Select training profile:",
             choices=[
                 questionary.Choice("Quick", description="Fast iteration, smaller models"),
@@ -539,9 +609,7 @@ def main() -> int:
                 questionary.Choice("Thorough", description="Larger search, more compute"),
                 questionary.Choice("Custom", description="Set every hyperparameter manually"),
             ],
-            use_shortcuts=True,
-            style=CUSTOM_STYLE,
-        ).ask()
+        )
 
         if profile is None:
             print("Cancelled.")
@@ -557,12 +625,10 @@ def main() -> int:
     batch_size = None
 
     if library == "tensorflow":
-        optimizer = questionary.select(
+        optimizer = _ask_select(
             "Select optimizer:",
             choices=TENSORFLOW_OPTIMIZERS,
-            use_shortcuts=True,
-            style=CUSTOM_STYLE,
-        ).ask()
+        )
         if optimizer is None:
             print("Cancelled.")
             return 0
@@ -744,13 +810,10 @@ def main() -> int:
                 if default_xgb_cv_folds is None:
                     print("Cancelled.")
                     return 0
-                default_xgb_cv_scoring = questionary.select(
+                default_xgb_cv_scoring = _ask_select(
                     "Default CV scoring (--cv-scoring):",
                     choices=["rmse", "mae", "r2"] if task == "regression" else ["f1_macro", "accuracy", "roc_auc_ovr"],
-                    default="rmse" if task == "regression" else "f1_macro",
-                    use_shortcuts=True,
-                    style=CUSTOM_STYLE,
-                ).ask()
+                )
                 if default_xgb_cv_scoring is None:
                     print("Cancelled.")
                     return 0
@@ -800,34 +863,26 @@ def main() -> int:
                 print("Cancelled.")
                 return 0
 
-            default_solver = questionary.select(
+            default_solver = _ask_select(
                 "Default solver for template --solver:",
                 choices=SKLEARN_LOGISTIC_SOLVERS,
-                use_shortcuts=True,
-                style=CUSTOM_STYLE,
-            ).ask()
+            )
             if default_solver is None:
                 print("Cancelled.")
                 return 0
 
-            default_logistic_penalty = questionary.select(
+            default_logistic_penalty = _ask_select(
                 "Default penalty for template --penalty:",
                 choices=["none", "l1", "l2", "elasticnet"],
-                default="l2",
-                use_shortcuts=True,
-                style=CUSTOM_STYLE,
-            ).ask()
+            )
             if default_logistic_penalty is None:
                 print("Cancelled.")
                 return 0
 
-            default_logistic_class_weight = questionary.select(
+            default_logistic_class_weight = _ask_select(
                 "Default class_weight for template --class-weight:",
                 choices=["none", "balanced"],
-                default="none",
-                use_shortcuts=True,
-                style=CUSTOM_STYLE,
-            ).ask()
+            )
             if default_logistic_class_weight is None:
                 print("Cancelled.")
                 return 0
@@ -841,13 +896,10 @@ def main() -> int:
                 print("Cancelled.")
                 return 0
             if default_logistic_enable_tuning:
-                default_logistic_tuning_method = questionary.select(
+                default_logistic_tuning_method = _ask_select(
                     "Default tuning method (--tuning-method):",
                     choices=["grid", "random"],
-                    default="grid",
-                    use_shortcuts=True,
-                    style=CUSTOM_STYLE,
-                ).ask()
+                )
                 if default_logistic_tuning_method is None:
                     print("Cancelled.")
                     return 0
@@ -859,13 +911,10 @@ def main() -> int:
                 if default_logistic_cv_folds is None:
                     print("Cancelled.")
                     return 0
-                default_logistic_cv_scoring = questionary.select(
+                default_logistic_cv_scoring = _ask_select(
                     "Default CV scoring (--cv-scoring):",
                     choices=["f1_macro", "accuracy", "roc_auc_ovr"],
-                    default="f1_macro",
-                    use_shortcuts=True,
-                    style=CUSTOM_STYLE,
-                ).ask()
+                )
                 if default_logistic_cv_scoring is None:
                     print("Cancelled.")
                     return 0
@@ -927,13 +976,10 @@ def main() -> int:
                 print("Cancelled.")
                 return 0
 
-            default_rf_max_features = questionary.select(
+            default_rf_max_features = _ask_select(
                 "Default max_features for template --max-features:",
                 choices=["sqrt", "log2", "1.0"],
-                default="sqrt",
-                use_shortcuts=True,
-                style=CUSTOM_STYLE,
-            ).ask()
+            )
             if default_rf_max_features is None:
                 print("Cancelled.")
                 return 0
@@ -947,13 +993,10 @@ def main() -> int:
                 print("Cancelled.")
                 return 0
             if default_rf_enable_tuning:
-                default_rf_tuning_method = questionary.select(
+                default_rf_tuning_method = _ask_select(
                     "Default tuning method (--tuning-method):",
                     choices=["grid", "random"],
-                    default="grid",
-                    use_shortcuts=True,
-                    style=CUSTOM_STYLE,
-                ).ask()
+                )
                 if default_rf_tuning_method is None:
                     print("Cancelled.")
                     return 0
@@ -965,13 +1008,10 @@ def main() -> int:
                 if default_rf_cv_folds is None:
                     print("Cancelled.")
                     return 0
-                default_rf_cv_scoring = questionary.select(
+                default_rf_cv_scoring = _ask_select(
                     "Default CV scoring (--cv-scoring):",
                     choices=["rmse", "mae", "r2"] if task == "regression" else ["f1_macro", "accuracy", "roc_auc_ovr"],
-                    default="rmse" if task == "regression" else "f1_macro",
-                    use_shortcuts=True,
-                    style=CUSTOM_STYLE,
-                ).ask()
+                )
                 if default_rf_cv_scoring is None:
                     print("Cancelled.")
                     return 0
@@ -1018,13 +1058,10 @@ def main() -> int:
             return 0
         if default_tf_enable_tuning:
             default_tf_tuning_method = "random"
-            default_tf_cv_scoring = questionary.select(
+            default_tf_cv_scoring = _ask_select(
                 "Default tuning scoring (--cv-scoring):",
                 choices=["rmse"] if task == "regression" else ["f1_macro"],
-                default="rmse" if task == "regression" else "f1_macro",
-                use_shortcuts=True,
-                style=CUSTOM_STYLE,
-            ).ask()
+            )
             if default_tf_cv_scoring is None:
                 print("Cancelled.")
                 return 0
@@ -1039,12 +1076,10 @@ def main() -> int:
 
     if library == "scikit-learn" and model == "linear_regression":
         if use_custom:
-            default_lr_penalty = questionary.select(
+            default_lr_penalty = _ask_select(
                 "Default penalty for template --penalty:",
                 choices=["none", "l1", "l2", "elasticnet"],
-                use_shortcuts=True,
-                style=CUSTOM_STYLE,
-            ).ask()
+            )
             if default_lr_penalty is None:
                 print("Cancelled.")
                 return 0
@@ -1098,13 +1133,10 @@ def main() -> int:
                         "(primarily fit_intercept)."
                     )
 
-                default_lr_tuning_method = questionary.select(
+                default_lr_tuning_method = _ask_select(
                     "Default tuning method (--tuning-method):",
                     choices=["grid", "random"],
-                    default="grid",
-                    use_shortcuts=True,
-                    style=CUSTOM_STYLE,
-                ).ask()
+                )
                 if default_lr_tuning_method is None:
                     print("Cancelled.")
                     return 0
@@ -1118,13 +1150,10 @@ def main() -> int:
                     print("Cancelled.")
                     return 0
 
-                default_lr_cv_scoring = questionary.select(
+                default_lr_cv_scoring = _ask_select(
                     "Default CV scoring (--cv-scoring):",
                     choices=["rmse", "mae", "r2"],
-                    default="rmse",
-                    use_shortcuts=True,
-                    style=CUSTOM_STYLE,
-                ).ask()
+                )
                 if default_lr_cv_scoring is None:
                     print("Cancelled.")
                     return 0
@@ -1158,21 +1187,6 @@ def main() -> int:
             default_lr_cv_scoring = profile_defaults.get("default_lr_cv_scoring", "rmse")
             default_lr_cv_n_iter = profile_defaults.get("default_lr_cv_n_iter", "20")
             default_lr_cv_n_jobs = profile_defaults.get("default_lr_cv_n_jobs", "-1")
-
-        print("\nResolved linear regression defaults:")
-        print(f"  penalty={default_lr_penalty}, alpha={default_lr_alpha}, fit_intercept={default_lr_fit_intercept}")
-        if default_lr_penalty == "elasticnet":
-            print(f"  l1_ratio={default_lr_l1_ratio}")
-        print(f"  enable_tuning={default_lr_enable_tuning}")
-        if default_lr_enable_tuning:
-            print(
-                f"  tuning_method={default_lr_tuning_method}, cv_folds={default_lr_cv_folds}, "
-                f"cv_scoring={default_lr_cv_scoring}, cv_n_jobs={default_lr_cv_n_jobs}"
-            )
-            if str(default_lr_tuning_method) == "random":
-                print(f"  cv_n_iter={default_lr_cv_n_iter}")
-            if default_lr_penalty == "none":
-                print("  note: penalty=none limits tuning search space (mostly fit_intercept)")
 
     if _supports_default_max_iter(library, model, task):
         if use_custom:
@@ -1246,6 +1260,88 @@ def main() -> int:
             default_early_stopping = profile_defaults.get("default_early_stopping", True)
             default_validation_fraction = profile_defaults.get("default_validation_fraction", 0.1)
             default_n_iter_no_change = profile_defaults.get("default_n_iter_no_change", 5)
+
+    resolved_defaults: list[tuple[str, object]] = [
+        ("library", library),
+        ("model", model if model is not None else "n/a"),
+        ("task", task),
+        ("starter_dataset", starter_dataset if starter_dataset is not None else "n/a"),
+        ("training_profile", profile if profile is not None else "n/a"),
+    ]
+
+    optional_defaults: list[tuple[str, object | None]] = [
+        ("booster", booster),
+        ("device", device),
+        ("optimizer", optimizer),
+        ("learning_rate", learning_rate),
+        ("epochs", epochs),
+        ("batch_size", batch_size),
+        ("default_early_stopping", default_early_stopping),
+        ("default_validation_fraction", default_validation_fraction),
+        ("default_n_iter_no_change", default_n_iter_no_change),
+        ("default_max_iter", default_max_iter),
+        ("default_n_estimators", default_n_estimators),
+        ("default_learning_rate", default_learning_rate),
+        ("default_max_depth", default_max_depth),
+        ("default_subsample", default_subsample),
+        ("default_colsample_bytree", default_colsample_bytree),
+        ("default_xgb_min_child_weight", default_xgb_min_child_weight),
+        ("default_xgb_reg_lambda", default_xgb_reg_lambda),
+        ("default_xgb_reg_alpha", default_xgb_reg_alpha),
+        ("default_xgb_enable_tuning", default_xgb_enable_tuning),
+        ("default_xgb_tuning_method", default_xgb_tuning_method),
+        ("default_xgb_cv_folds", default_xgb_cv_folds),
+        ("default_xgb_cv_scoring", default_xgb_cv_scoring),
+        ("default_xgb_cv_n_iter", default_xgb_cv_n_iter),
+        ("default_xgb_cv_n_jobs", default_xgb_cv_n_jobs),
+        ("default_c", default_c),
+        ("default_solver", default_solver),
+        ("default_logistic_penalty", default_logistic_penalty),
+        ("default_logistic_class_weight", default_logistic_class_weight),
+        ("default_logistic_enable_tuning", default_logistic_enable_tuning),
+        ("default_logistic_tuning_method", default_logistic_tuning_method),
+        ("default_logistic_cv_folds", default_logistic_cv_folds),
+        ("default_logistic_cv_scoring", default_logistic_cv_scoring),
+        ("default_logistic_cv_n_iter", default_logistic_cv_n_iter),
+        ("default_logistic_cv_n_jobs", default_logistic_cv_n_jobs),
+        ("default_rf_n_estimators", default_rf_n_estimators),
+        ("default_rf_max_depth", default_rf_max_depth),
+        ("default_rf_min_samples_leaf", default_rf_min_samples_leaf),
+        ("default_rf_max_features", default_rf_max_features),
+        ("default_rf_enable_tuning", default_rf_enable_tuning),
+        ("default_rf_tuning_method", default_rf_tuning_method),
+        ("default_rf_cv_folds", default_rf_cv_folds),
+        ("default_rf_cv_scoring", default_rf_cv_scoring),
+        ("default_rf_cv_n_iter", default_rf_cv_n_iter),
+        ("default_rf_cv_n_jobs", default_rf_cv_n_jobs),
+        ("default_lr_penalty", default_lr_penalty),
+        ("default_lr_alpha", default_lr_alpha),
+        ("default_lr_fit_intercept", default_lr_fit_intercept),
+        ("default_lr_l1_ratio", default_lr_l1_ratio),
+        ("default_lr_enable_tuning", default_lr_enable_tuning),
+        ("default_lr_tuning_method", default_lr_tuning_method),
+        ("default_lr_cv_folds", default_lr_cv_folds),
+        ("default_lr_cv_scoring", default_lr_cv_scoring),
+        ("default_lr_cv_n_iter", default_lr_cv_n_iter),
+        ("default_lr_cv_n_jobs", default_lr_cv_n_jobs),
+        ("default_tf_enable_tuning", default_tf_enable_tuning),
+        ("default_tf_tuning_method", default_tf_tuning_method),
+        ("default_tf_cv_scoring", default_tf_cv_scoring),
+        ("default_tf_cv_n_iter", default_tf_cv_n_iter),
+    ]
+
+    optional_values_by_key = {key: value for key, value in optional_defaults if value is not None}
+
+    for key, value in optional_defaults:
+        if value is None:
+            continue
+        if _should_omit_resolved_key(key, optional_values_by_key):
+            continue
+        resolved_defaults.append((key, value))
+
+    print("\nResolved defaults:")
+    for key, value in resolved_defaults:
+        print(f"  {key}={_stringify_setting(value)}")
 
     models_dir = script_dir / "models"
     models_dir.mkdir(parents=True, exist_ok=True)

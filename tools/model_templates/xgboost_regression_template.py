@@ -15,17 +15,14 @@ from pathlib import Path
 import pandas as pd
 import sklearn
 import xgboost as xgb
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
 from sklearn.metrics import max_error, mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import RandomizedSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 # Ensure project root is importable so generated templates can load shared helpers.
 _current_file = Path(__file__).resolve()
 for _candidate in [_current_file.parent, *_current_file.parents]:
-	if (_candidate / "libraries" / "__init__.py").exists():
+	if (_candidate / "libraries").is_dir():
 		if str(_candidate) not in sys.path:
 			sys.path.insert(0, str(_candidate))
 		break
@@ -42,6 +39,9 @@ from libraries.model_template_helpers import (
 	validate_etl_outputs as _validate_etl_outputs,
 	write_model_schemas as _write_model_schemas,
 )
+from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
+from libraries.search_utils import cv_scoring_name as _cv_scoring_name, search_space_size as _search_space_size
+from libraries.xgboost_template_utils import resolve_xgboost_device as _resolve_xgboost_device
 
 # =============================================================
 # =============== CONFIGURATION / CLI FLAGS ===================
@@ -136,68 +136,9 @@ SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
 xgb_model_verbosity = min(3, max(0, int(training_verbose)))
 xgb_fit_verbose = bool(training_verbose > 0)
+cv_verbose = 0 if training_verbose <= 1 else 2
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
-
-
-def _cv_scoring_name(name: str) -> str:
-	mapping = {
-		"rmse": "neg_root_mean_squared_error",
-		"mae": "neg_mean_absolute_error",
-		"r2": "r2",
-	}
-	if name not in mapping:
-		raise ValueError(f"Unsupported --cv-scoring '{name}'. Choose from: rmse, mae, r2")
-	return mapping[name]
-
-
-def _resolve_xgboost_device(device_flag: str) -> tuple[str, str | None]:
-	if device_flag == "gpu":
-		message = (
-			"Requested --device=gpu, but this template preprocesses features on CPU via scikit-learn Pipeline. "
-			"Using CPU for XGBoost to avoid repeated device-mismatch fallback warnings during CV and prediction."
-		)
-		return "cpu", message
-	return "cpu", None
-
-
-def _search_space_size(search_space: dict[str, list]) -> int:
-	lengths = [len(values) for values in search_space.values() if isinstance(values, list)]
-	return int(np.prod(lengths)) if lengths else 0
-
-
-def _build_preprocessor(frame: pd.DataFrame) -> ColumnTransformer:
-	# Define column groups from the provided frame.
-	# Include "str" explicitly for pandas 3 compatibility.
-	categorical_cols = frame.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-	numerical_cols = frame.select_dtypes(include=["number"]).columns.tolist()
-
-	# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
-	try:
-		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-	except TypeError:
-		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-	numeric_transformer = Pipeline(
-		steps=[
-			("imputer", SimpleImputer(strategy="median")),
-			("scaler", StandardScaler()),
-		]
-	)
-	categorical_transformer = Pipeline(
-		steps=[
-			("imputer", SimpleImputer(strategy="most_frequent")),
-			("onehot", one_hot_encoder),
-		]
-	)
-
-	return ColumnTransformer(
-		transformers=[
-			("num", numeric_transformer, numerical_cols),
-			("cat", categorical_transformer, categorical_cols),
-		],
-		remainder="drop",
-	)
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -244,12 +185,7 @@ df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 #   - trim whitespace in string-like columns
 #   - convert empty strings to NaN
 #   - normalize pd.NA -> np.nan for consistent downstream behavior
-for column in df.select_dtypes(include=["object", "string"]).columns:
-	series = df[column].astype("string").str.strip()
-	series = series.replace("", np.nan)
-	df[column] = series.astype("object")
-
-df = df.replace({pd.NA: np.nan})
+df = _normalize_string_columns(df)
 
 # ---------------------------------------------------------
 # Define target + features (semantic boundary)
@@ -381,7 +317,15 @@ tuning_summary = {
 }
 
 if args.enable_tuning:
-	selected_cv_scoring = _cv_scoring_name(args.cv_scoring)
+	if training_verbose > 0:
+		print(
+			f"Training started with tuning: method=random, "
+			f"cv={args.cv_folds}, scoring={args.cv_scoring}"
+		)
+	selected_cv_scoring = _cv_scoring_name(
+		args.cv_scoring,
+		{"rmse": "neg_root_mean_squared_error", "mae": "neg_mean_absolute_error", "r2": "r2"},
+	)
 	search_space = {
 		"regressor__n_estimators": [100, 200, 300, 500],
 		"regressor__learning_rate": [0.01, 0.05, 0.1, 0.2],
@@ -403,6 +347,7 @@ if args.enable_tuning:
 		scoring=selected_cv_scoring,
 		cv=int(args.cv_folds),
 		n_jobs=int(args.cv_n_jobs),
+		verbose=cv_verbose,
 		refit=False,
 		random_state=int(args.random_state),
 	)

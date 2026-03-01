@@ -4,7 +4,7 @@ import sys
 
 _current_file = Path(__file__).resolve()
 for _candidate in [_current_file.parent, *_current_file.parents]:
-    if (_candidate / "libraries" / "__init__.py").exists():
+    if (_candidate / "libraries").is_dir():
         if str(_candidate) not in sys.path:
             sys.path.insert(0, str(_candidate))
         break
@@ -360,6 +360,25 @@ STARTER_DATASET_CONFIG = {
 # ---------------------------------------------------------
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "model_templates"
+
+
+def validate_shared_helper_modules() -> None:
+    required_modules = [
+        "preprocessing_utils.py",
+        "search_utils.py",
+        "serialization_utils.py",
+        "sklearn_template_utils.py",
+        "xgboost_template_utils.py",
+        "tensorflow_template_utils.py",
+    ]
+    libraries_dir = Path(__file__).resolve().parent.parent / "libraries"
+    missing = [name for name in required_modules if not (libraries_dir / name).exists()]
+    if missing:
+        missing_list = ", ".join(missing)
+        raise ValueError(
+            "Required shared helper module(s) are missing in libraries/: "
+            f"{missing_list}. Restore these files before generating models."
+        )
 
 
 def task_family(task: str) -> str:
@@ -1702,6 +1721,7 @@ def main():
     args = parser.parse_args()
 
     try:
+        validate_shared_helper_modules()
         validate_args(args)
 
         template_name = template_filename(args)

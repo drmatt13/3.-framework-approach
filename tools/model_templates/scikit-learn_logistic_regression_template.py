@@ -14,8 +14,6 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 import sklearn
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
 	ConfusionMatrixDisplay,
@@ -34,12 +32,12 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
+from sklearn.preprocessing import label_binarize
 
 # Ensure project root is importable so generated templates can load shared helpers.
 _current_file = Path(__file__).resolve()
 for _candidate in [_current_file.parent, *_current_file.parents]:
-	if (_candidate / "libraries" / "__init__.py").exists():
+	if (_candidate / "libraries").is_dir():
 		if str(_candidate) not in sys.path:
 			sys.path.insert(0, str(_candidate))
 		break
@@ -55,6 +53,10 @@ from libraries.model_template_helpers import (
 	validate_etl_outputs as _validate_etl_outputs,
 	write_model_schemas as _write_model_schemas,
 )
+from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
+from libraries.search_utils import cv_scoring_name as _cv_scoring_name, search_space_size as _search_space_size
+from libraries.serialization_utils import json_safe_best_params as _json_safe_best_params
+from libraries.sklearn_template_utils import resolved_n_iter as _resolved_n_iter
 
 # =============================================================
 # =============== CONFIGURATION / CLI FLAGS ===================
@@ -101,19 +103,6 @@ DEFAULT_CV_SCORING = "{{LOGISTIC_CV_SCORING_DEFAULT}}"
 DEFAULT_CV_N_ITER = int("{{LOGISTIC_CV_N_ITER_DEFAULT}}")
 DEFAULT_CV_N_JOBS = int("{{LOGISTIC_CV_N_JOBS_DEFAULT}}")
 
-# Helper function: resolve n_iter_ for iterative classifiers, handling different formats.
-def _resolved_n_iter(model_step) -> int | None:
-	n_iter_value = getattr(model_step, "n_iter_", None)
-	if n_iter_value is None:
-		return None
-	if hasattr(n_iter_value, "tolist"):
-		n_iter_value = n_iter_value.tolist()
-	if isinstance(n_iter_value, (list, tuple)):
-		if not n_iter_value:
-			return None
-		return int(max(n_iter_value))
-	return int(n_iter_value)
-
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Logistic Regression baseline")
 parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
@@ -153,25 +142,13 @@ if args.penalty not in _SOLVER_PENALTY_COMPAT.get(args.solver, set()):
 		f"Valid penalties for {args.solver}: {valid_penalties}"
 	)
 
-
-def _cv_scoring_name(name: str) -> str:
-	mapping = {
-		"f1_macro": "f1_macro",
-		"accuracy": "accuracy",
-		"roc_auc_ovr": "roc_auc_ovr",
-	}
-	if name not in mapping:
-		raise ValueError(f"Unsupported --cv-scoring '{name}'. Choose from: f1_macro, accuracy, roc_auc_ovr")
-	return mapping[name]
-
-
 def _build_search_space(random_state: int) -> list[dict[str, list]]:
 	common_c = [0.01, 0.1, 1.0, 10.0]
 	common_max_iter = [500, 1000, 2000]
 	return [
 		{
 			"classifier__solver": ["lbfgs", "newton-cg", "sag", "newton-cholesky"],
-			"classifier__penalty": [None, "l2"],
+			"classifier__penalty": ["none", "l2"],
 			"classifier__C": common_c,
 			"classifier__class_weight": [None, "balanced"],
 			"classifier__max_iter": common_max_iter,
@@ -185,7 +162,7 @@ def _build_search_space(random_state: int) -> list[dict[str, list]]:
 		},
 		{
 			"classifier__solver": ["saga"],
-			"classifier__penalty": ["l1", "l2", None],
+			"classifier__penalty": ["l1", "l2", "none"],
 			"classifier__C": common_c,
 			"classifier__class_weight": [None, "balanced"],
 			"classifier__max_iter": common_max_iter,
@@ -200,45 +177,9 @@ def _build_search_space(random_state: int) -> list[dict[str, list]]:
 		},
 	]
 
-
-def _search_space_size(search_space: list[dict[str, list]]) -> int:
-	total = 0
-	for space in search_space:
-		lengths = [len(values) for values in space.values() if isinstance(values, list)]
-		total += int(np.prod(lengths)) if lengths else 0
-	return total
-
-
-def _json_safe_param_value(value):
-	if value is None:
-		return None
-	if isinstance(value, (bool, int, float, str)):
-		if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
-			return None
-		return value
-	if isinstance(value, (np.integer,)):
-		return int(value)
-	if isinstance(value, (np.floating,)):
-		numeric = float(value)
-		if np.isnan(numeric) or np.isinf(numeric):
-			return None
-		return numeric
-	if isinstance(value, (np.bool_,)):
-		return bool(value)
-	if isinstance(value, (list, tuple)):
-		return [_json_safe_param_value(item) for item in value]
-	if isinstance(value, dict):
-		return {str(key): _json_safe_param_value(item) for key, item in value.items()}
-	if hasattr(value, "get_params"):
-		return type(value).__name__
-	return str(value)
-
-
-def _json_safe_best_params(params: dict[str, object]) -> dict[str, object]:
-	return {str(key): _json_safe_param_value(value) for key, value in params.items()}
-
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
+cv_verbose = 0 if training_verbose <= 1 else 2
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
@@ -287,12 +228,7 @@ df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 #   - trim whitespace in string-like columns
 #   - convert empty strings to NaN
 #   - normalize pd.NA -> np.nan for consistent downstream behavior
-for column in df.select_dtypes(include=["object", "string"]).columns:
-	series = df[column].astype("string").str.strip()
-	series = series.replace("", np.nan)
-	df[column] = series.astype("object")
-
-df = df.replace({pd.NA: np.nan})
+df = _normalize_string_columns(df)
 
 # ---------------------------------------------------------
 # Define target + features (semantic boundary)
@@ -357,38 +293,7 @@ X_train, X_test, y_train, y_test = train_test_split(
 	stratify=y,
 )
 
-# Define column groups from training data only.
-# Include "str" explicitly for pandas 3 compatibility.
-categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
-
-# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
-try:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-except TypeError:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-# Preprocess: impute missing values, then scale numeric and one-hot encode categorical features.
-numeric_transformer = Pipeline(
-	steps=[
-		("imputer", SimpleImputer(strategy="median")),
-		("scaler", StandardScaler()),
-	]
-)
-categorical_transformer = Pipeline(
-	steps=[
-		("imputer", SimpleImputer(strategy="most_frequent")),
-		("onehot", one_hot_encoder),
-	]
-)
-
-preprocessor = ColumnTransformer(
-	transformers=[
-		("num", numeric_transformer, numerical_cols),
-		("cat", categorical_transformer, categorical_cols),
-	],
-	remainder="drop",
-)
+preprocessor = _build_preprocessor(X_train)
 
 # =============================================================
 # ================= BUILD MODEL PIPELINE ======================
@@ -396,19 +301,20 @@ preprocessor = ColumnTransformer(
 
 # Bundle preprocessing + model into one inference-ready pipeline.
 # Input to inference should be raw feature columns.
-penalty_value = None if args.penalty == "none" else args.penalty
+penalty_value = "none" if args.penalty == "none" else args.penalty
 class_weight_value = None if args.class_weight == "none" else args.class_weight
-l1_ratio_value = 0.5 if penalty_value == "elasticnet" else None
-classifier = LogisticRegression(
-	penalty=penalty_value,
-	C=float(args.c),
-	solver=args.solver,
-	class_weight=class_weight_value,
-	max_iter=args.max_iter,
-	l1_ratio=l1_ratio_value,
-	random_state=args.random_state,
-	verbose=training_verbose,
-)
+classifier_kwargs = {
+	"penalty": penalty_value,
+	"C": float(args.c),
+	"solver": args.solver,
+	"class_weight": class_weight_value,
+	"max_iter": int(args.max_iter),
+	"random_state": int(args.random_state),
+	"verbose": int(training_verbose),
+}
+if penalty_value == "elasticnet":
+	classifier_kwargs["l1_ratio"] = 0.5
+classifier = LogisticRegression(**classifier_kwargs)
 classifier_name = f"LogisticRegression(penalty={penalty_value}, C={float(args.c):.6g}, solver={args.solver}, class_weight={class_weight_value})"
 
 model = Pipeline(
@@ -421,7 +327,10 @@ model = Pipeline(
 # =============================================================
 # ===================== TRAIN MODEL ===========================
 # =============================================================
-selected_cv_scoring = _cv_scoring_name(args.cv_scoring)
+selected_cv_scoring = _cv_scoring_name(
+	args.cv_scoring,
+	{"f1_macro": "f1_macro", "accuracy": "accuracy", "roc_auc_ovr": "roc_auc_ovr"},
+)
 tuning_summary = {
 	"enabled": False,
 	"method": None,
@@ -454,6 +363,7 @@ if args.enable_tuning:
 			scoring=selected_cv_scoring,
 			cv=int(args.cv_folds),
 			n_jobs=int(args.cv_n_jobs),
+			verbose=cv_verbose,
 			refit=False,
 		)
 	else:
@@ -468,6 +378,7 @@ if args.enable_tuning:
 			scoring=selected_cv_scoring,
 			cv=int(args.cv_folds),
 			n_jobs=int(args.cv_n_jobs),
+			verbose=cv_verbose,
 			refit=False,
 			random_state=int(args.random_state),
 		)

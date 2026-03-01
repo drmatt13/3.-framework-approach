@@ -14,9 +14,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 import sklearn
-from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
 	ConfusionMatrixDisplay,
 	accuracy_score,
@@ -34,12 +32,12 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
+from sklearn.preprocessing import label_binarize
 
 # Ensure project root is importable so generated templates can load shared helpers.
 _current_file = Path(__file__).resolve()
 for _candidate in [_current_file.parent, *_current_file.parents]:
-	if (_candidate / "libraries" / "__init__.py").exists():
+	if (_candidate / "libraries").is_dir():
 		if str(_candidate) not in sys.path:
 			sys.path.insert(0, str(_candidate))
 		break
@@ -55,16 +53,10 @@ from libraries.model_template_helpers import (
 	validate_etl_outputs as _validate_etl_outputs,
 	write_model_schemas as _write_model_schemas,
 )
-
-def _parse_optional_int(value: str | int | None) -> int | None:
-	if value is None:
-		return None
-	if isinstance(value, int):
-		return value
-	text = str(value).strip().lower()
-	if text in {"none", "null", ""}:
-		return None
-	return int(text)
+from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
+from libraries.search_utils import cv_scoring_name as _cv_scoring_name, search_space_size as _search_space_size
+from libraries.serialization_utils import json_safe_best_params as _json_safe_best_params
+from libraries.sklearn_template_utils import parse_max_features as _parse_max_features, parse_optional_int as _parse_optional_int
 
 # =============================================================
 # =============== CONFIGURATION / CLI FLAGS ===================
@@ -107,23 +99,6 @@ DEFAULT_CV_SCORING = "{{RF_CV_SCORING_DEFAULT}}"
 DEFAULT_CV_N_ITER = int("{{RF_CV_N_ITER_DEFAULT}}")
 DEFAULT_CV_N_JOBS = int("{{RF_CV_N_JOBS_DEFAULT}}")
 
-
-def _parse_max_features(value: str) -> str | float | None:
-	"""Parse --max-features into a value accepted by RandomForestClassifier."""
-	text = str(value).strip().lower()
-	if text in {"none", "null", ""}:
-		return None
-	if text in {"auto", "sqrt", "log2"}:
-		return text
-	try:
-		fval = float(text)
-		if 0.0 < fval <= 1.0:
-			return fval
-		return text  # let sklearn validate
-	except ValueError:
-		return text
-
-
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Random Forest Classifier baseline")
 parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
@@ -147,20 +122,9 @@ parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
+cv_verbose = 0 if training_verbose <= 1 else 2
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
-
-
-def _cv_scoring_name(name: str) -> str:
-	mapping = {
-		"f1_macro": "f1_macro",
-		"accuracy": "accuracy",
-		"roc_auc_ovr": "roc_auc_ovr",
-	}
-	if name not in mapping:
-		raise ValueError(f"Unsupported --cv-scoring '{name}'. Choose from: f1_macro, accuracy, roc_auc_ovr")
-	return mapping[name]
-
 
 def _build_search_space() -> dict[str, list]:
 	return {
@@ -169,74 +133,6 @@ def _build_search_space() -> dict[str, list]:
 		"classifier__min_samples_leaf": [1, 2, 4],
 		"classifier__max_features": ["sqrt", "log2", 1.0],
 	}
-
-
-def _search_space_size(search_space: dict[str, list]) -> int:
-	lengths = [len(values) for values in search_space.values() if isinstance(values, list)]
-	return int(np.prod(lengths)) if lengths else 0
-
-
-def _json_safe_param_value(value):
-	if value is None:
-		return None
-	if isinstance(value, (bool, int, float, str)):
-		if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
-			return None
-		return value
-	if isinstance(value, (np.integer,)):
-		return int(value)
-	if isinstance(value, (np.floating,)):
-		numeric = float(value)
-		if np.isnan(numeric) or np.isinf(numeric):
-			return None
-		return numeric
-	if isinstance(value, (np.bool_,)):
-		return bool(value)
-	if isinstance(value, (list, tuple)):
-		return [_json_safe_param_value(item) for item in value]
-	if isinstance(value, dict):
-		return {str(key): _json_safe_param_value(item) for key, item in value.items()}
-	if hasattr(value, "get_params"):
-		return type(value).__name__
-	return str(value)
-
-
-def _json_safe_best_params(params: dict[str, object]) -> dict[str, object]:
-	return {str(key): _json_safe_param_value(value) for key, value in params.items()}
-
-
-def _build_preprocessor(frame: pd.DataFrame) -> ColumnTransformer:
-	# Define column groups from the provided frame.
-	# Include "str" explicitly for pandas 3 compatibility.
-	categorical_cols = frame.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-	numerical_cols = frame.select_dtypes(include=["number"]).columns.tolist()
-
-	# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
-	try:
-		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-	except TypeError:
-		one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-	numeric_transformer = Pipeline(
-		steps=[
-			("imputer", SimpleImputer(strategy="median")),
-			("scaler", StandardScaler()),
-		]
-	)
-	categorical_transformer = Pipeline(
-		steps=[
-			("imputer", SimpleImputer(strategy="most_frequent")),
-			("onehot", one_hot_encoder),
-		]
-	)
-
-	return ColumnTransformer(
-		transformers=[
-			("num", numeric_transformer, numerical_cols),
-			("cat", categorical_transformer, categorical_cols),
-		],
-		remainder="drop",
-	)
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -283,12 +179,7 @@ df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 #   - trim whitespace in string-like columns
 #   - convert empty strings to NaN
 #   - normalize pd.NA -> np.nan for consistent downstream behavior
-for column in df.select_dtypes(include=["object", "string"]).columns:
-	series = df[column].astype("string").str.strip()
-	series = series.replace("", np.nan)
-	df[column] = series.astype("object")
-
-df = df.replace({pd.NA: np.nan})
+df = _normalize_string_columns(df)
 
 # ---------------------------------------------------------
 # Define target + features (semantic boundary)
@@ -383,7 +274,10 @@ fit_time_seconds = 0.0
 # ===================== TRAIN MODEL ===========================
 # =============================================================
 
-selected_cv_scoring = _cv_scoring_name(args.cv_scoring)
+selected_cv_scoring = _cv_scoring_name(
+	args.cv_scoring,
+	{"f1_macro": "f1_macro", "accuracy": "accuracy", "roc_auc_ovr": "roc_auc_ovr"},
+)
 tuning_summary = {
 	"enabled": False,
 	"method": None,
@@ -398,6 +292,14 @@ tuning_summary = {
 }
 
 fit_started_at = time.perf_counter()
+if training_verbose > 0:
+	if args.enable_tuning:
+		print(
+			f"Training started with tuning: method={args.tuning_method}, "
+			f"cv={args.cv_folds}, scoring={args.cv_scoring}"
+		)
+	else:
+		print("Training started: RandomForestClassifier")
 if args.enable_tuning:
 	search_space = _build_search_space()
 	if args.tuning_method == "grid":
@@ -407,6 +309,7 @@ if args.enable_tuning:
 			scoring=selected_cv_scoring,
 			cv=int(args.cv_folds),
 			n_jobs=int(args.cv_n_jobs),
+			verbose=cv_verbose,
 			refit=False,
 		)
 	else:
@@ -421,6 +324,7 @@ if args.enable_tuning:
 			scoring=selected_cv_scoring,
 			cv=int(args.cv_folds),
 			n_jobs=int(args.cv_n_jobs),
+			verbose=cv_verbose,
 			refit=False,
 			random_state=int(args.random_state),
 		)

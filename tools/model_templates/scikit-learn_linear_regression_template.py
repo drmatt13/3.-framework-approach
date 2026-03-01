@@ -13,18 +13,15 @@ from pathlib import Path
 
 import pandas as pd
 import sklearn
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, Ridge
 from sklearn.metrics import max_error, mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 # Ensure project root is importable so generated templates can load shared helpers.
 _current_file = Path(__file__).resolve()
 for _candidate in [_current_file.parent, *_current_file.parents]:
-	if (_candidate / "libraries" / "__init__.py").exists():
+	if (_candidate / "libraries").is_dir():
 		if str(_candidate) not in sys.path:
 			sys.path.insert(0, str(_candidate))
 		break
@@ -40,6 +37,9 @@ from libraries.model_template_helpers import (
 	validate_etl_outputs as _validate_etl_outputs,
 	write_model_schemas as _write_model_schemas,
 )
+from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
+from libraries.search_utils import cv_scoring_name as _cv_scoring_name, search_space_size as _search_space_size
+from libraries.serialization_utils import json_safe_best_params as _json_safe_best_params
 
 # =============================================================
 # =============== CONFIGURATION / CLI FLAGS ===================
@@ -103,6 +103,7 @@ parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
+cv_verbose = 0 if training_verbose <= 1 else 2
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
@@ -151,12 +152,7 @@ df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
 #   - trim whitespace in string-like columns
 #   - convert empty strings to NaN
 #   - normalize pd.NA -> np.nan for consistent downstream behavior
-for column in df.select_dtypes(include=["object", "string"]).columns:
-	series = df[column].astype("string").str.strip()
-	series = series.replace("", np.nan)
-	df[column] = series.astype("object")
-
-df = df.replace({pd.NA: np.nan})
+df = _normalize_string_columns(df)
 
 # ---------------------------------------------------------
 # Define target + features (semantic boundary)
@@ -224,38 +220,7 @@ X_train, X_test, y_train, y_test = train_test_split(
 	random_state=args.random_state,
 )
 
-# Define column groups from training data only.
-# Include "str" explicitly for pandas 3 compatibility.
-categorical_cols = X_train.select_dtypes(include=["object", "category", "bool", "str"]).columns.tolist()
-numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
-
-# OneHotEncoder compatibility: sparse_output (new) vs sparse (old).
-try:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-except TypeError:
-	one_hot_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-# Preprocess: impute missing values, then scale numeric and one-hot encode categorical features.
-numeric_transformer = Pipeline(
-	steps=[
-		("imputer", SimpleImputer(strategy="median")),
-		("scaler", StandardScaler()),
-	]
-)
-categorical_transformer = Pipeline(
-	steps=[
-		("imputer", SimpleImputer(strategy="most_frequent")),
-		("onehot", one_hot_encoder),
-	]
-)
-
-preprocessor = ColumnTransformer(
-	transformers=[
-		("num", numeric_transformer, numerical_cols),
-		("cat", categorical_transformer, categorical_cols),
-	],
-	remainder="drop",
-)
+preprocessor = _build_preprocessor(X_train)
 
 # =============================================================
 # ================= BUILD MODEL PIPELINE ======================
@@ -283,17 +248,6 @@ def _base_regressor_from_flags() -> LinearRegression | Ridge | Lasso | ElasticNe
 			max_iter=10_000,
 		)
 	raise ValueError(f"Unsupported --penalty '{args.penalty}'. Choose from: none, l1, l2, elasticnet")
-
-
-def _cv_scoring_name(name: str) -> str:
-	mapping = {
-		"rmse": "neg_root_mean_squared_error",
-		"mae": "neg_mean_absolute_error",
-		"r2": "r2",
-	}
-	if name not in mapping:
-		raise ValueError(f"Unsupported --cv-scoring '{name}'. Choose from: rmse, mae, r2")
-	return mapping[name]
 
 
 def _build_search_space(penalty: str, random_state: int) -> list[dict[str, list]]:
@@ -333,44 +287,6 @@ def _build_search_space(penalty: str, random_state: int) -> list[dict[str, list]
 		]
 	raise ValueError(f"Unsupported penalty '{penalty}'")
 
-
-def _grid_size(search_space: list[dict[str, list]]) -> int:
-	total = 0
-	for space in search_space:
-		lengths = [len(values) for values in space.values() if isinstance(values, list)]
-		total += int(np.prod(lengths)) if lengths else 0
-	return total
-
-
-def _json_safe_param_value(value):
-	if value is None:
-		return None
-	if isinstance(value, (bool, int, float, str)):
-		if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
-			return None
-		return value
-	if isinstance(value, (np.integer,)):
-		return int(value)
-	if isinstance(value, (np.floating,)):
-		numeric = float(value)
-		if np.isnan(numeric) or np.isinf(numeric):
-			return None
-		return numeric
-	if isinstance(value, (np.bool_,)):
-		return bool(value)
-	if isinstance(value, (list, tuple)):
-		return [_json_safe_param_value(item) for item in value]
-	if isinstance(value, dict):
-		return {str(key): _json_safe_param_value(item) for key, item in value.items()}
-	if hasattr(value, "get_params"):
-		return type(value).__name__
-	return str(value)
-
-
-def _json_safe_best_params(params: dict[str, object]) -> dict[str, object]:
-	return {str(key): _json_safe_param_value(value) for key, value in params.items()}
-
-
 # Bundle preprocessing + model into one inference-ready pipeline.
 model = Pipeline(
 	steps=[
@@ -383,7 +299,10 @@ model = Pipeline(
 # ===================== TRAIN MODEL ===========================
 # =============================================================
 
-selected_cv_scoring = _cv_scoring_name(args.cv_scoring)
+selected_cv_scoring = _cv_scoring_name(
+	args.cv_scoring,
+	{"rmse": "neg_root_mean_squared_error", "mae": "neg_mean_absolute_error", "r2": "r2"},
+)
 tuning_summary = {
 	"enabled": False,
 	"method": None,
@@ -417,11 +336,12 @@ if args.enable_tuning:
 			scoring=selected_cv_scoring,
 			cv=int(args.cv_folds),
 			n_jobs=int(args.cv_n_jobs),
+			verbose=cv_verbose,
 			refit=False,
 		)
 	else:
 		n_iter = int(args.cv_n_iter)
-		n_candidates_upper = _grid_size(search_space)
+		n_candidates_upper = _search_space_size(search_space)
 		if n_candidates_upper > 0:
 			n_iter = min(n_iter, n_candidates_upper)
 		search = RandomizedSearchCV(
@@ -431,6 +351,7 @@ if args.enable_tuning:
 			scoring=selected_cv_scoring,
 			cv=int(args.cv_folds),
 			n_jobs=int(args.cv_n_jobs),
+			verbose=cv_verbose,
 			refit=False,
 			random_state=int(args.random_state),
 		)
@@ -536,8 +457,8 @@ print("Target Std (Train):", _round_metric(target_std_train))  # Train-split tar
 print("Training Control Enabled:", training_control["enabled"])  # Whether iterative training control / early stopping was used
 
 # ---- Sanity Checks ----
-print("First 5 predictions:", predictions[:5])  # Sample predictions for quick sanity check
-print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true values for sanity check
+print("First 5 predictions:", [_round_metric(x, decimals=4) for x in predictions[:5].tolist()])  # Sample predictions for quick sanity check
+print("First 5 true values:", [_round_metric(x, decimals=4) for x in y_test.iloc[:5].tolist()])  # Corresponding true values for sanity check
 
 # =============================================================
 # ========= EXPORT ARTIFACTS & MODEL REGISTRY ================
