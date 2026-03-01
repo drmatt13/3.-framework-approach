@@ -41,32 +41,6 @@ STARTER_DATASETS_BY_TASK = {
     ],
 }
 
-CUSTOM_STYLE = Style.from_dict(
-    {
-        "qmark": "fg:#f8b808 bold",  # Question mark
-        "question": "bold",  # Question text
-        "answer": "fg:#3fb0f0 bold",  # Selected answer after choice
-        "pointer": "fg:#f8b808 bold",  # Arrow pointer (>)
-        "highlighted": "fg:#ffffff bg:#222222 bold",  # Highlighted option in menu
-        "selected": "fg:#8ab4f8 bold",  # Selected checkbox item (if used)
-    }
-)
-
-# Keep defaulted select prompts visually consistent with regular selects.
-# questionary.select with `default=...` uses the `selected` token for the
-# preselected item; using a non-blue style here avoids sticky blue highlights.
-DEFAULT_SELECT_STYLE = Style.from_dict(
-    {
-        "qmark": "fg:#f8b808 bold",  # Question mark
-        "question": "bold",  # Question text
-        "answer": "fg:#3fb0f0 bold",  # Selected answer after choice
-        "pointer": "fg:#f8b808 bold",  # Arrow pointer (>)
-        "highlighted": "fg:#ffffff bg:#222222 bold",  # Highlighted option in menu
-        "selected": "fg:#8ab4f8 bold",  # Selected checkbox item (if used)
-    }
-)
-
-
 def _ask_text(prompt: str, *, validate_fn, default: str | None = None) -> str | None:
     """
     Wrapper to apply consistent style + validation to text prompts.
@@ -88,7 +62,16 @@ def _ask_select(prompt: str, *, choices, default: str | None = None):
     kwargs = {
         "choices": choices,
         "use_shortcuts": True,
-        "style": DEFAULT_SELECT_STYLE if default is not None else CUSTOM_STYLE,
+        "style": Style.from_dict(
+            {
+                "qmark": "fg:#f8b808 bold",  # Question mark
+                "question": "bold",  # Question text
+                "answer": "fg:#3fb0f0 bold",  # Selected answer after choice
+                "pointer": "fg:#f8b808 bold",  # Arrow pointer (>)
+                "highlighted": "fg:#ffffff bg:#222222 bold",  # Highlighted option in menu
+                "selected": "fg:#8ab4f8 bold",  # Selected checkbox item (if used)
+            }
+        ),
     }
     if default is not None:
         kwargs["default"] = default
