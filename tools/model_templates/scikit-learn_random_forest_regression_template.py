@@ -110,14 +110,6 @@ cv_verbose = 0 if training_verbose <= 1 else 2
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
-def _build_search_space() -> dict[str, list]:
-	return {
-		"regressor__n_estimators": [100, 200, 300, 500],
-		"regressor__max_depth": [None, 8, 16, 32],
-		"regressor__min_samples_leaf": [1, 2, 4],
-		"regressor__max_features": ["sqrt", "log2", 1.0],
-	}
-
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
 # =============================================================
@@ -282,8 +274,14 @@ if training_verbose > 0:
 		)
 	else:
 		print("Training started: RandomForestRegressor")
+
 if args.enable_tuning:
-	search_space = _build_search_space()
+	search_space = {
+		"regressor__n_estimators": [100, 200, 300, 500],
+		"regressor__max_depth": [None, 8, 16, 32],
+		"regressor__min_samples_leaf": [1, 2, 4],
+		"regressor__max_features": ["sqrt", "log2", 1.0],
+	}
 	if args.tuning_method == "grid":
 		search = GridSearchCV(
 			estimator=model,

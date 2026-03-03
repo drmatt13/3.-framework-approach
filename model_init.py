@@ -41,6 +41,17 @@ STARTER_DATASETS_BY_TASK = {
     ],
 }
 
+CUSTOM_STYLE = Style.from_dict(
+    {
+        "qmark": "fg:#f8b808 bold",  # Question mark
+        "question": "bold",  # Question text
+        "answer": "fg:#3fb0f0 bold",  # Selected answer after choice
+        "pointer": "fg:#f8b808 bold",  # Arrow pointer (>)
+        "highlighted": "fg:#ffffff bg:#222222 bold",  # Highlighted option in menu
+        "selected": "fg:#8ab4f8 bold",  # Selected checkbox item (if used)
+    }
+)
+
 def _ask_text(prompt: str, *, validate_fn, default: str | None = None) -> str | None:
     """
     Wrapper to apply consistent style + validation to text prompts.
@@ -62,16 +73,7 @@ def _ask_select(prompt: str, *, choices, default: str | None = None):
     kwargs = {
         "choices": choices,
         "use_shortcuts": True,
-        "style": Style.from_dict(
-            {
-                "qmark": "fg:#f8b808 bold",  # Question mark
-                "question": "bold",  # Question text
-                "answer": "fg:#3fb0f0 bold",  # Selected answer after choice
-                "pointer": "fg:#f8b808 bold",  # Arrow pointer (>)
-                "highlighted": "fg:#ffffff bg:#222222 bold",  # Highlighted option in menu
-                "selected": "fg:#8ab4f8 bold",  # Selected checkbox item (if used)
-            }
-        ),
+        "style": CUSTOM_STYLE,
     }
     if default is not None:
         kwargs["default"] = default
@@ -110,38 +112,38 @@ def _is_truthy(value) -> bool:
 
 def _should_omit_resolved_key(key: str, values_by_key: dict[str, object]) -> bool:
     tuning_dependencies: dict[str, tuple[str, ...]] = {
-        "default_xgb_enable_tuning": (
-            "default_xgb_tuning_method",
-            "default_xgb_cv_folds",
-            "default_xgb_cv_scoring",
-            "default_xgb_cv_n_iter",
-            "default_xgb_cv_n_jobs",
+        "xgb_enable_tuning": (
+            "xgb_tuning_method",
+            "xgb_cv_folds",
+            "xgb_cv_scoring",
+            "xgb_cv_n_iter",
+            "xgb_cv_n_jobs",
         ),
-        "default_logistic_enable_tuning": (
-            "default_logistic_tuning_method",
-            "default_logistic_cv_folds",
-            "default_logistic_cv_scoring",
-            "default_logistic_cv_n_iter",
-            "default_logistic_cv_n_jobs",
+        "logistic_enable_tuning": (
+            "logistic_tuning_method",
+            "logistic_cv_folds",
+            "logistic_cv_scoring",
+            "logistic_cv_n_iter",
+            "logistic_cv_n_jobs",
         ),
-        "default_rf_enable_tuning": (
-            "default_rf_tuning_method",
-            "default_rf_cv_folds",
-            "default_rf_cv_scoring",
-            "default_rf_cv_n_iter",
-            "default_rf_cv_n_jobs",
+        "rf_enable_tuning": (
+            "rf_tuning_method",
+            "rf_cv_folds",
+            "rf_cv_scoring",
+            "rf_cv_n_iter",
+            "rf_cv_n_jobs",
         ),
-        "default_lr_enable_tuning": (
-            "default_lr_tuning_method",
-            "default_lr_cv_folds",
-            "default_lr_cv_scoring",
-            "default_lr_cv_n_iter",
-            "default_lr_cv_n_jobs",
+        "lr_enable_tuning": (
+            "lr_tuning_method",
+            "lr_cv_folds",
+            "lr_cv_scoring",
+            "lr_cv_n_iter",
+            "lr_cv_n_jobs",
         ),
-        "default_tf_enable_tuning": (
-            "default_tf_tuning_method",
-            "default_tf_cv_scoring",
-            "default_tf_cv_n_iter",
+        "tf_enable_tuning": (
+            "tf_tuning_method",
+            "tf_cv_scoring",
+            "tf_cv_n_iter",
         ),
     }
 
@@ -149,7 +151,88 @@ def _should_omit_resolved_key(key: str, values_by_key: dict[str, object]) -> boo
         if key in dependent_keys and enable_key in values_by_key:
             return not _is_truthy(values_by_key[enable_key])
 
+    # Hide random-search iteration settings when method is grid.
+    n_iter_by_method: tuple[tuple[str, str], ...] = (
+        ("xgb_cv_n_iter", "xgb_tuning_method"),
+        ("logistic_cv_n_iter", "logistic_tuning_method"),
+        ("rf_cv_n_iter", "rf_tuning_method"),
+        ("lr_cv_n_iter", "lr_tuning_method"),
+        ("tf_cv_n_iter", "tf_tuning_method"),
+    )
+    for n_iter_key, method_key in n_iter_by_method:
+        if key == n_iter_key and method_key in values_by_key:
+            return str(values_by_key[method_key]).strip().lower() == "grid"
+
+    # When tuning is enabled, omit direct estimator defaults to simplify summary.
+    direct_defaults_by_enable: dict[str, tuple[str, ...]] = {
+        "xgb_enable_tuning": (
+            "n_estimators",
+            "learning_rate",
+            "max_depth",
+            "subsample",
+            "colsample_bytree",
+            "xgb_min_child_weight",
+            "xgb_reg_lambda",
+            "xgb_reg_alpha",
+        ),
+        "logistic_enable_tuning": (
+            "c",
+            "solver",
+            "logistic_penalty",
+            "logistic_class_weight",
+        ),
+        "rf_enable_tuning": (
+            "rf_n_estimators",
+            "rf_max_depth",
+            "rf_min_samples_leaf",
+            "rf_max_features",
+        ),
+        "lr_enable_tuning": (
+            "lr_alpha",
+            "lr_fit_intercept",
+            "lr_l1_ratio",
+        ),
+    }
+    for enable_key, direct_keys in direct_defaults_by_enable.items():
+        if key in direct_keys and enable_key in values_by_key:
+            return _is_truthy(values_by_key[enable_key])
+
     return False
+
+
+def _resolved_display_key(key: str) -> str:
+    explicit_map = {
+        "xgb_min_child_weight": "min_child_weight",
+        "xgb_reg_lambda": "reg_lambda",
+        "xgb_reg_alpha": "reg_alpha",
+        "logistic_penalty": "penalty",
+        "logistic_class_weight": "class_weight",
+        "rf_n_estimators": "n_estimators",
+        "rf_max_depth": "max_depth",
+        "rf_min_samples_leaf": "min_samples_leaf",
+        "rf_max_features": "max_features",
+        "lr_penalty": "penalty",
+        "lr_alpha": "alpha",
+        "lr_fit_intercept": "fit_intercept",
+        "lr_l1_ratio": "l1_ratio",
+        "tf_learning_rate": "learning_rate",
+    }
+    if key in explicit_map:
+        return explicit_map[key]
+
+    suffix_groups = (
+        "enable_tuning",
+        "tuning_method",
+        "cv_folds",
+        "cv_scoring",
+        "cv_n_iter",
+        "cv_n_jobs",
+    )
+    for suffix in suffix_groups:
+        if key.endswith(f"_{suffix}"):
+            return suffix
+
+    return key
 
 
 def _supports_early_stopping_defaults(library: str, model: str | None, task: str) -> bool:
@@ -160,7 +243,7 @@ def _supports_early_stopping_defaults(library: str, model: str | None, task: str
     return False
 
 
-def _supports_default_max_iter(library: str, model: str | None, task: str) -> bool:
+def _supports_max_iter(library: str, model: str | None, task: str) -> bool:
     return library == "scikit-learn" and model == "logistic_regression" and task in {
         "binary_classification",
         "multiclass_classification",
@@ -295,23 +378,23 @@ def _get_profile_defaults(
 
         p = presets.get(profile, presets["Balanced"])
         defaults = {
-            "default_n_estimators": str(p["n_est"]),
-            "default_learning_rate": str(p["lr"]),
-            "default_max_depth": str(p["depth"]),
-            "default_subsample": str(p["sub"]),
-            "default_colsample_bytree": str(p["col"]),
-            "default_xgb_min_child_weight": str(p["mcw"]),
-            "default_xgb_reg_lambda": str(p["rl"]),
-            "default_xgb_reg_alpha": str(p["ra"]),
-            "default_early_stopping": p["es"],
-            "default_validation_fraction": p["vf"],
-            "default_n_iter_no_change": p["nic"],
-            "default_xgb_enable_tuning": p["enable_tuning"],
-            "default_xgb_tuning_method": p["tuning_method"],
-            "default_xgb_cv_folds": str(p["cv_folds"]),
-            "default_xgb_cv_scoring": p["cv_scoring"],
-            "default_xgb_cv_n_iter": str(p["cv_n_iter"]),
-            "default_xgb_cv_n_jobs": str(p["cv_n_jobs"]),
+            "n_estimators": str(p["n_est"]),
+            "learning_rate": str(p["lr"]),
+            "max_depth": str(p["depth"]),
+            "subsample": str(p["sub"]),
+            "colsample_bytree": str(p["col"]),
+            "xgb_min_child_weight": str(p["mcw"]),
+            "xgb_reg_lambda": str(p["rl"]),
+            "xgb_reg_alpha": str(p["ra"]),
+            "early_stopping": p["es"],
+            "validation_fraction": p["vf"],
+            "n_iter_no_change": p["nic"],
+            "xgb_enable_tuning": p["enable_tuning"],
+            "xgb_tuning_method": p["tuning_method"],
+            "xgb_cv_folds": str(p["cv_folds"]),
+            "xgb_cv_scoring": p["cv_scoring"],
+            "xgb_cv_n_iter": str(p["cv_n_iter"]),
+            "xgb_cv_n_jobs": str(p["cv_n_jobs"]),
         }
 
     elif library == "scikit-learn" and model == "random_forest":
@@ -361,16 +444,16 @@ def _get_profile_defaults(
 
         p = presets.get(profile, presets["Balanced"])
         defaults = {
-            "default_rf_n_estimators": str(p["n_est"]),
-            "default_rf_max_depth": str(p["depth"]),
-            "default_rf_min_samples_leaf": str(p["msl"]),
-            "default_rf_max_features": str(p["mf"]),
-            "default_rf_enable_tuning": p["enable_tuning"],
-            "default_rf_tuning_method": p["tuning_method"],
-            "default_rf_cv_folds": str(p["cv_folds"]),
-            "default_rf_cv_scoring": p["cv_scoring"],
-            "default_rf_cv_n_iter": str(p["cv_n_iter"]),
-            "default_rf_cv_n_jobs": str(p["cv_n_jobs"]),
+            "rf_n_estimators": str(p["n_est"]),
+            "rf_max_depth": str(p["depth"]),
+            "rf_min_samples_leaf": str(p["msl"]),
+            "rf_max_features": str(p["mf"]),
+            "rf_enable_tuning": p["enable_tuning"],
+            "rf_tuning_method": p["tuning_method"],
+            "rf_cv_folds": str(p["cv_folds"]),
+            "rf_cv_scoring": p["cv_scoring"],
+            "rf_cv_n_iter": str(p["cv_n_iter"]),
+            "rf_cv_n_jobs": str(p["cv_n_jobs"]),
         }
 
     elif library == "scikit-learn" and model == "logistic_regression":
@@ -417,17 +500,17 @@ def _get_profile_defaults(
         }
         p = presets.get(profile, presets["Balanced"])
         defaults = {
-            "default_c": str(p["c"]),
-            "default_solver": p["solver"],
-            "default_max_iter": p["max_iter"],
-            "default_logistic_penalty": p["penalty"],
-            "default_logistic_class_weight": p["class_weight"],
-            "default_logistic_enable_tuning": p["enable_tuning"],
-            "default_logistic_tuning_method": p["tuning_method"],
-            "default_logistic_cv_folds": str(p["cv_folds"]),
-            "default_logistic_cv_scoring": p["cv_scoring"],
-            "default_logistic_cv_n_iter": str(p["cv_n_iter"]),
-            "default_logistic_cv_n_jobs": str(p["cv_n_jobs"]),
+            "c": str(p["c"]),
+            "solver": p["solver"],
+            "max_iter": p["max_iter"],
+            "logistic_penalty": p["penalty"],
+            "logistic_class_weight": p["class_weight"],
+            "logistic_enable_tuning": p["enable_tuning"],
+            "logistic_tuning_method": p["tuning_method"],
+            "logistic_cv_folds": str(p["cv_folds"]),
+            "logistic_cv_scoring": p["cv_scoring"],
+            "logistic_cv_n_iter": str(p["cv_n_iter"]),
+            "logistic_cv_n_jobs": str(p["cv_n_jobs"]),
         }
 
     elif library == "scikit-learn" and model == "linear_regression":
@@ -471,16 +554,16 @@ def _get_profile_defaults(
         }
         p = presets.get(profile, presets["Balanced"])
         defaults = {
-            "default_lr_penalty": p["penalty"],
-            "default_lr_alpha": str(p["alpha"]),
-            "default_lr_fit_intercept": p["fit_intercept"],
-            "default_lr_l1_ratio": str(p["l1_ratio"]),
-            "default_lr_enable_tuning": p["enable_tuning"],
-            "default_lr_tuning_method": p["tuning_method"],
-            "default_lr_cv_folds": str(p["cv_folds"]),
-            "default_lr_cv_scoring": p["cv_scoring"],
-            "default_lr_cv_n_iter": str(p["cv_n_iter"]),
-            "default_lr_cv_n_jobs": str(p["cv_n_jobs"]),
+            "lr_penalty": p["penalty"],
+            "lr_alpha": str(p["alpha"]),
+            "lr_fit_intercept": p["fit_intercept"],
+            "lr_l1_ratio": str(p["l1_ratio"]),
+            "lr_enable_tuning": p["enable_tuning"],
+            "lr_tuning_method": p["tuning_method"],
+            "lr_cv_folds": str(p["cv_folds"]),
+            "lr_cv_scoring": p["cv_scoring"],
+            "lr_cv_n_iter": str(p["cv_n_iter"]),
+            "lr_cv_n_jobs": str(p["cv_n_jobs"]),
         }
 
     return defaults
@@ -603,7 +686,7 @@ def main() -> int:
 
     # TensorFlow training knobs (ONLY where necessary)
     optimizer = None
-    learning_rate = None
+    tf_learning_rate = None
     epochs = None
     batch_size = None
 
@@ -616,14 +699,14 @@ def main() -> int:
             print("Cancelled.")
             return 0
 
-        learning_rate = _ask_text(
+        tf_learning_rate = _ask_text(
             "Enter learning rate (e.g., 0.001):",
             default="0.001",
             validate_fn=lambda s: True
             if (_is_float(s) and float(s) > 0)
             else "Must be a positive number",
         )
-        if learning_rate is None:
+        if tf_learning_rate is None:
             print("Cancelled.")
             return 0
 
@@ -645,545 +728,555 @@ def main() -> int:
             print("Cancelled.")
             return 0
 
-    default_early_stopping = None
-    default_validation_fraction = None
-    default_n_iter_no_change = None
-    default_max_iter = None
-    default_n_estimators = None
-    default_learning_rate = None
-    default_max_depth = None
-    default_subsample = None
-    default_colsample_bytree = None
-    default_c = None
-    default_solver = None
-    default_rf_n_estimators = None
-    default_rf_max_depth = None
-    default_rf_min_samples_leaf = None
-    default_rf_max_features = None
-    default_logistic_penalty = None
-    default_logistic_class_weight = None
-    default_logistic_enable_tuning = None
-    default_logistic_tuning_method = None
-    default_logistic_cv_folds = None
-    default_logistic_cv_scoring = None
-    default_logistic_cv_n_iter = None
-    default_logistic_cv_n_jobs = None
-    default_rf_enable_tuning = None
-    default_rf_tuning_method = None
-    default_rf_cv_folds = None
-    default_rf_cv_scoring = None
-    default_rf_cv_n_iter = None
-    default_rf_cv_n_jobs = None
-    default_lr_penalty = None
-    default_lr_alpha = None
-    default_lr_fit_intercept = None
-    default_lr_l1_ratio = None
-    default_lr_enable_tuning = None
-    default_lr_tuning_method = None
-    default_lr_cv_folds = None
-    default_lr_cv_scoring = None
-    default_lr_cv_n_iter = None
-    default_lr_cv_n_jobs = None
-    default_xgb_min_child_weight = None
-    default_xgb_reg_lambda = None
-    default_xgb_reg_alpha = None
-    default_xgb_enable_tuning = None
-    default_xgb_tuning_method = None
-    default_xgb_cv_folds = None
-    default_xgb_cv_scoring = None
-    default_xgb_cv_n_iter = None
-    default_xgb_cv_n_jobs = None
-    default_tf_enable_tuning = None
-    default_tf_tuning_method = None
-    default_tf_cv_scoring = None
-    default_tf_cv_n_iter = None
+    early_stopping = None
+    validation_fraction = None
+    n_iter_no_change = None
+    max_iter = None
+    n_estimators = None
+    learning_rate = None
+    max_depth = None
+    subsample = None
+    colsample_bytree = None
+    c = None
+    solver = None
+    rf_n_estimators = None
+    rf_max_depth = None
+    rf_min_samples_leaf = None
+    rf_max_features = None
+    logistic_penalty = None
+    logistic_class_weight = None
+    logistic_enable_tuning = None
+    logistic_tuning_method = None
+    logistic_cv_folds = None
+    logistic_cv_scoring = None
+    logistic_cv_n_iter = None
+    logistic_cv_n_jobs = None
+    rf_enable_tuning = None
+    rf_tuning_method = None
+    rf_cv_folds = None
+    rf_cv_scoring = None
+    rf_cv_n_iter = None
+    rf_cv_n_jobs = None
+    lr_penalty = None
+    lr_alpha = None
+    lr_fit_intercept = None
+    lr_l1_ratio = None
+    lr_enable_tuning = None
+    lr_tuning_method = None
+    lr_cv_folds = None
+    lr_cv_scoring = None
+    lr_cv_n_iter = None
+    lr_cv_n_jobs = None
+    xgb_min_child_weight = None
+    xgb_reg_lambda = None
+    xgb_reg_alpha = None
+    xgb_enable_tuning = None
+    xgb_tuning_method = None
+    xgb_cv_folds = None
+    xgb_cv_scoring = None
+    xgb_cv_n_iter = None
+    xgb_cv_n_jobs = None
+    tf_enable_tuning = None
+    tf_tuning_method = None
+    tf_cv_scoring = None
+    tf_cv_n_iter = None
 
     # When a profile provides defaults, use them and skip prompts.
     use_custom = profile == "Custom" or library == "tensorflow"
 
     if library == "xgboost":
         if use_custom:
-            default_n_estimators = _ask_text(
-                "Default n_estimators for template --n-estimators:",
-                default="300",
-                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-            )
-            if default_n_estimators is None:
-                print("Cancelled.")
-                return 0
-
-            default_learning_rate = _ask_text(
-                "Default learning rate for template --learning-rate:",
-                default="0.1",
-                validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
-            )
-            if default_learning_rate is None:
-                print("Cancelled.")
-                return 0
-
-            default_max_depth = _ask_text(
-                "Default max depth for template --max-depth:",
-                default="6",
-                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-            )
-            if default_max_depth is None:
-                print("Cancelled.")
-                return 0
-
-            default_subsample = _ask_text(
-                "Default subsample for template --subsample (0 < value <= 1):",
-                default="1.0",
-                validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
-            )
-            if default_subsample is None:
-                print("Cancelled.")
-                return 0
-
-            default_colsample_bytree = _ask_text(
-                "Default colsample_bytree for template --colsample-bytree (0 < value <= 1):",
-                default="1.0",
-                validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
-            )
-            if default_colsample_bytree is None:
-                print("Cancelled.")
-                return 0
-
-            default_xgb_min_child_weight = _ask_text(
-                "Default min_child_weight for template --min-child-weight:",
-                default="1.0",
-                validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0) else "Must be a non-negative number",
-            )
-            if default_xgb_min_child_weight is None:
-                print("Cancelled.")
-                return 0
-
-            default_xgb_reg_lambda = _ask_text(
-                "Default reg_lambda (L2) for template --reg-lambda:",
-                default="1.0",
-                validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0) else "Must be a non-negative number",
-            )
-            if default_xgb_reg_lambda is None:
-                print("Cancelled.")
-                return 0
-
-            default_xgb_reg_alpha = _ask_text(
-                "Default reg_alpha (L1) for template --reg-alpha:",
-                default="0.0",
-                validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0) else "Must be a non-negative number",
-            )
-            if default_xgb_reg_alpha is None:
-                print("Cancelled.")
-                return 0
-
-            default_xgb_enable_tuning = questionary.confirm(
+            xgb_enable_tuning = questionary.confirm(
                 "Enable hyperparameter tuning by default? (--enable-tuning)",
                 default=False,
                 style=CUSTOM_STYLE,
             ).ask()
-            if default_xgb_enable_tuning is None:
+            if xgb_enable_tuning is None:
                 print("Cancelled.")
                 return 0
-            if default_xgb_enable_tuning:
-                default_xgb_tuning_method = "random"
-                default_xgb_cv_folds = _ask_text(
+
+            if xgb_enable_tuning:
+                xgb_tuning_method = "random"
+                xgb_cv_folds = _ask_text(
                     "Default CV folds (--cv-folds, >=2):",
                     default="5",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
                 )
-                if default_xgb_cv_folds is None:
+                if xgb_cv_folds is None:
                     print("Cancelled.")
                     return 0
-                default_xgb_cv_scoring = _ask_select(
+                xgb_cv_scoring = _ask_select(
                     "Default CV scoring (--cv-scoring):",
                     choices=["rmse", "mae", "r2"] if task == "regression" else ["f1_macro", "accuracy", "roc_auc_ovr"],
                 )
-                if default_xgb_cv_scoring is None:
+                if xgb_cv_scoring is None:
                     print("Cancelled.")
                     return 0
-                default_xgb_cv_n_iter = _ask_text(
+                xgb_cv_n_iter = _ask_text(
                     "Default random-search iterations (--cv-n-iter, >0):",
                     default="20",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                 )
-                if default_xgb_cv_n_iter is None:
+                if xgb_cv_n_iter is None:
                     print("Cancelled.")
                     return 0
-                default_xgb_cv_n_jobs = _ask_text(
+                xgb_cv_n_jobs = _ask_text(
                     "Default CV parallel jobs (--cv-n-jobs, e.g., -1):",
                     default="-1",
                     validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
                 )
-                if default_xgb_cv_n_jobs is None:
+                if xgb_cv_n_jobs is None:
+                    print("Cancelled.")
+                    return 0
+
+            if not xgb_enable_tuning:
+                n_estimators = _ask_text(
+                    "Default n_estimators for template --n-estimators:",
+                    default="300",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                )
+                if n_estimators is None:
+                    print("Cancelled.")
+                    return 0
+
+                learning_rate = _ask_text(
+                    "Default learning rate for template --learning-rate:",
+                    default="0.1",
+                    validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
+                )
+                if learning_rate is None:
+                    print("Cancelled.")
+                    return 0
+
+                max_depth = _ask_text(
+                    "Default max depth for template --max-depth:",
+                    default="6",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                )
+                if max_depth is None:
+                    print("Cancelled.")
+                    return 0
+
+                subsample = _ask_text(
+                    "Default subsample for template --subsample (0 < value <= 1):",
+                    default="1.0",
+                    validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
+                )
+                if subsample is None:
+                    print("Cancelled.")
+                    return 0
+
+                colsample_bytree = _ask_text(
+                    "Default colsample_bytree for template --colsample-bytree (0 < value <= 1):",
+                    default="1.0",
+                    validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
+                )
+                if colsample_bytree is None:
+                    print("Cancelled.")
+                    return 0
+
+                xgb_min_child_weight = _ask_text(
+                    "Default min_child_weight for template --min-child-weight:",
+                    default="1.0",
+                    validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0) else "Must be a non-negative number",
+                )
+                if xgb_min_child_weight is None:
+                    print("Cancelled.")
+                    return 0
+
+                xgb_reg_lambda = _ask_text(
+                    "Default reg_lambda (L2) for template --reg-lambda:",
+                    default="1.0",
+                    validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0) else "Must be a non-negative number",
+                )
+                if xgb_reg_lambda is None:
+                    print("Cancelled.")
+                    return 0
+
+                xgb_reg_alpha = _ask_text(
+                    "Default reg_alpha (L1) for template --reg-alpha:",
+                    default="0.0",
+                    validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0) else "Must be a non-negative number",
+                )
+                if xgb_reg_alpha is None:
                     print("Cancelled.")
                     return 0
         else:
-            default_n_estimators = profile_defaults.get("default_n_estimators", "300")
-            default_learning_rate = profile_defaults.get("default_learning_rate", "0.1")
-            default_max_depth = profile_defaults.get("default_max_depth", "6")
-            default_subsample = profile_defaults.get("default_subsample", "1.0")
-            default_colsample_bytree = profile_defaults.get("default_colsample_bytree", "1.0")
-            default_xgb_min_child_weight = profile_defaults.get("default_xgb_min_child_weight", "1.0")
-            default_xgb_reg_lambda = profile_defaults.get("default_xgb_reg_lambda", "1.0")
-            default_xgb_reg_alpha = profile_defaults.get("default_xgb_reg_alpha", "0.0")
-            default_xgb_enable_tuning = profile_defaults.get("default_xgb_enable_tuning", False)
-            default_xgb_tuning_method = profile_defaults.get("default_xgb_tuning_method", "random")
-            default_xgb_cv_folds = profile_defaults.get("default_xgb_cv_folds", "5")
-            default_xgb_cv_scoring = profile_defaults.get(
-                "default_xgb_cv_scoring",
+            n_estimators = profile_defaults.get("n_estimators", "300")
+            learning_rate = profile_defaults.get("learning_rate", "0.1")
+            max_depth = profile_defaults.get("max_depth", "6")
+            subsample = profile_defaults.get("subsample", "1.0")
+            colsample_bytree = profile_defaults.get("colsample_bytree", "1.0")
+            xgb_min_child_weight = profile_defaults.get("xgb_min_child_weight", "1.0")
+            xgb_reg_lambda = profile_defaults.get("xgb_reg_lambda", "1.0")
+            xgb_reg_alpha = profile_defaults.get("xgb_reg_alpha", "0.0")
+            xgb_enable_tuning = profile_defaults.get("xgb_enable_tuning", False)
+            xgb_tuning_method = profile_defaults.get("xgb_tuning_method", "random")
+            xgb_cv_folds = profile_defaults.get("xgb_cv_folds", "5")
+            xgb_cv_scoring = profile_defaults.get(
+                "xgb_cv_scoring",
                 "rmse" if task == "regression" else "f1_macro",
             )
-            default_xgb_cv_n_iter = profile_defaults.get("default_xgb_cv_n_iter", "20")
-            default_xgb_cv_n_jobs = profile_defaults.get("default_xgb_cv_n_jobs", "-1")
+            xgb_cv_n_iter = profile_defaults.get("xgb_cv_n_iter", "20")
+            xgb_cv_n_jobs = profile_defaults.get("xgb_cv_n_jobs", "-1")
 
     if library == "scikit-learn" and model == "logistic_regression":
         if use_custom:
-            default_c = _ask_text(
-                "Default C for template --c:",
-                default="1.0",
-                validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
-            )
-            if default_c is None:
-                print("Cancelled.")
-                return 0
-
-            default_solver = _ask_select(
-                "Default solver for template --solver:",
-                choices=SKLEARN_LOGISTIC_SOLVERS,
-            )
-            if default_solver is None:
-                print("Cancelled.")
-                return 0
-
-            default_logistic_penalty = _ask_select(
-                "Default penalty for template --penalty:",
-                choices=["none", "l1", "l2", "elasticnet"],
-            )
-            if default_logistic_penalty is None:
-                print("Cancelled.")
-                return 0
-
-            default_logistic_class_weight = _ask_select(
-                "Default class_weight for template --class-weight:",
-                choices=["none", "balanced"],
-            )
-            if default_logistic_class_weight is None:
-                print("Cancelled.")
-                return 0
-
-            default_logistic_enable_tuning = questionary.confirm(
+            logistic_enable_tuning = questionary.confirm(
                 "Enable hyperparameter tuning by default? (--enable-tuning)",
                 default=False,
                 style=CUSTOM_STYLE,
             ).ask()
-            if default_logistic_enable_tuning is None:
+            if logistic_enable_tuning is None:
                 print("Cancelled.")
                 return 0
-            if default_logistic_enable_tuning:
-                default_logistic_tuning_method = _ask_select(
+
+            if logistic_enable_tuning:
+                logistic_tuning_method = _ask_select(
                     "Default tuning method (--tuning-method):",
                     choices=["grid", "random"],
                 )
-                if default_logistic_tuning_method is None:
+                if logistic_tuning_method is None:
                     print("Cancelled.")
                     return 0
-                default_logistic_cv_folds = _ask_text(
+                logistic_cv_folds = _ask_text(
                     "Default CV folds (--cv-folds, >=2):",
                     default="5",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
                 )
-                if default_logistic_cv_folds is None:
+                if logistic_cv_folds is None:
                     print("Cancelled.")
                     return 0
-                default_logistic_cv_scoring = _ask_select(
+                logistic_cv_scoring = _ask_select(
                     "Default CV scoring (--cv-scoring):",
                     choices=["f1_macro", "accuracy", "roc_auc_ovr"],
                 )
-                if default_logistic_cv_scoring is None:
+                if logistic_cv_scoring is None:
                     print("Cancelled.")
                     return 0
-                if default_logistic_tuning_method == "random":
-                    default_logistic_cv_n_iter = _ask_text(
+                if logistic_tuning_method == "random":
+                    logistic_cv_n_iter = _ask_text(
                         "Default random-search iterations (--cv-n-iter, >0):",
                         default="20",
                         validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                     )
-                    if default_logistic_cv_n_iter is None:
+                    if logistic_cv_n_iter is None:
                         print("Cancelled.")
                         return 0
-                default_logistic_cv_n_jobs = _ask_text(
+                logistic_cv_n_jobs = _ask_text(
                     "Default CV parallel jobs (--cv-n-jobs, e.g., -1):",
                     default="-1",
                     validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
                 )
-                if default_logistic_cv_n_jobs is None:
+                if logistic_cv_n_jobs is None:
+                    print("Cancelled.")
+                    return 0
+
+            if not logistic_enable_tuning:
+                c = _ask_text(
+                    "Default C for template --c:",
+                    default="1.0",
+                    validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
+                )
+                if c is None:
+                    print("Cancelled.")
+                    return 0
+
+                solver = _ask_select(
+                    "Default solver for template --solver:",
+                    choices=SKLEARN_LOGISTIC_SOLVERS,
+                )
+                if solver is None:
+                    print("Cancelled.")
+                    return 0
+
+                logistic_penalty = _ask_select(
+                    "Default penalty for template --penalty:",
+                    choices=["none", "l1", "l2", "elasticnet"],
+                )
+                if logistic_penalty is None:
+                    print("Cancelled.")
+                    return 0
+
+                logistic_class_weight = _ask_select(
+                    "Default class_weight for template --class-weight:",
+                    choices=["none", "balanced"],
+                )
+                if logistic_class_weight is None:
                     print("Cancelled.")
                     return 0
         else:
-            default_c = profile_defaults.get("default_c", "1.0")
-            default_solver = profile_defaults.get("default_solver", "lbfgs")
-            default_logistic_penalty = profile_defaults.get("default_logistic_penalty", "l2")
-            default_logistic_class_weight = profile_defaults.get("default_logistic_class_weight", "none")
-            default_logistic_enable_tuning = profile_defaults.get("default_logistic_enable_tuning", False)
-            default_logistic_tuning_method = profile_defaults.get("default_logistic_tuning_method", "grid")
-            default_logistic_cv_folds = profile_defaults.get("default_logistic_cv_folds", "5")
-            default_logistic_cv_scoring = profile_defaults.get("default_logistic_cv_scoring", "f1_macro")
-            default_logistic_cv_n_iter = profile_defaults.get("default_logistic_cv_n_iter", "20")
-            default_logistic_cv_n_jobs = profile_defaults.get("default_logistic_cv_n_jobs", "-1")
+            c = profile_defaults.get("c", "1.0")
+            solver = profile_defaults.get("solver", "lbfgs")
+            logistic_penalty = profile_defaults.get("logistic_penalty", "l2")
+            logistic_class_weight = profile_defaults.get("logistic_class_weight", "none")
+            logistic_enable_tuning = profile_defaults.get("logistic_enable_tuning", False)
+            logistic_tuning_method = profile_defaults.get("logistic_tuning_method", "grid")
+            logistic_cv_folds = profile_defaults.get("logistic_cv_folds", "5")
+            logistic_cv_scoring = profile_defaults.get("logistic_cv_scoring", "f1_macro")
+            logistic_cv_n_iter = profile_defaults.get("logistic_cv_n_iter", "20")
+            logistic_cv_n_jobs = profile_defaults.get("logistic_cv_n_jobs", "-1")
 
     if library == "scikit-learn" and model == "random_forest":
         if use_custom:
-            default_rf_n_estimators = _ask_text(
-                "Default n_estimators for template --n-estimators:",
-                default="300",
-                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-            )
-            if default_rf_n_estimators is None:
-                print("Cancelled.")
-                return 0
-
-            default_rf_max_depth = _ask_text(
-                "Default max depth for template --max-depth:",
-                default="16",
-                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-            )
-            if default_rf_max_depth is None:
-                print("Cancelled.")
-                return 0
-
-            default_rf_min_samples_leaf = _ask_text(
-                "Default min_samples_leaf for template --min-samples-leaf:",
-                default="1",
-                validate_fn=lambda s: True if (_is_int(s) and int(s) >= 1) else "Must be an integer >= 1",
-            )
-            if default_rf_min_samples_leaf is None:
-                print("Cancelled.")
-                return 0
-
-            default_rf_max_features = _ask_select(
-                "Default max_features for template --max-features:",
-                choices=["sqrt", "log2", "1.0"],
-            )
-            if default_rf_max_features is None:
-                print("Cancelled.")
-                return 0
-
-            default_rf_enable_tuning = questionary.confirm(
+            rf_enable_tuning = questionary.confirm(
                 "Enable hyperparameter tuning by default? (--enable-tuning)",
                 default=False,
                 style=CUSTOM_STYLE,
             ).ask()
-            if default_rf_enable_tuning is None:
+            if rf_enable_tuning is None:
                 print("Cancelled.")
                 return 0
-            if default_rf_enable_tuning:
-                default_rf_tuning_method = _ask_select(
+            if rf_enable_tuning:
+                rf_tuning_method = _ask_select(
                     "Default tuning method (--tuning-method):",
                     choices=["grid", "random"],
                 )
-                if default_rf_tuning_method is None:
+                if rf_tuning_method is None:
                     print("Cancelled.")
                     return 0
-                default_rf_cv_folds = _ask_text(
+                rf_cv_folds = _ask_text(
                     "Default CV folds (--cv-folds, >=2):",
                     default="5",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
                 )
-                if default_rf_cv_folds is None:
+                if rf_cv_folds is None:
                     print("Cancelled.")
                     return 0
-                default_rf_cv_scoring = _ask_select(
+                rf_cv_scoring = _ask_select(
                     "Default CV scoring (--cv-scoring):",
                     choices=["rmse", "mae", "r2"] if task == "regression" else ["f1_macro", "accuracy", "roc_auc_ovr"],
                 )
-                if default_rf_cv_scoring is None:
+                if rf_cv_scoring is None:
                     print("Cancelled.")
                     return 0
-                if default_rf_tuning_method == "random":
-                    default_rf_cv_n_iter = _ask_text(
+                if rf_tuning_method == "random":
+                    rf_cv_n_iter = _ask_text(
                         "Default random-search iterations (--cv-n-iter, >0):",
                         default="20",
                         validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                     )
-                    if default_rf_cv_n_iter is None:
+                    if rf_cv_n_iter is None:
                         print("Cancelled.")
                         return 0
-                default_rf_cv_n_jobs = _ask_text(
+                rf_cv_n_jobs = _ask_text(
                     "Default CV parallel jobs (--cv-n-jobs, e.g., -1):",
                     default="-1",
                     validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
                 )
-                if default_rf_cv_n_jobs is None:
+                if rf_cv_n_jobs is None:
+                    print("Cancelled.")
+                    return 0
+
+            if not rf_enable_tuning:
+                rf_n_estimators = _ask_text(
+                    "Default n_estimators for template --n-estimators:",
+                    default="300",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                )
+                if rf_n_estimators is None:
+                    print("Cancelled.")
+                    return 0
+
+                rf_max_depth = _ask_text(
+                    "Default max depth for template --max-depth:",
+                    default="16",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                )
+                if rf_max_depth is None:
+                    print("Cancelled.")
+                    return 0
+
+                rf_min_samples_leaf = _ask_text(
+                    "Default min_samples_leaf for template --min-samples-leaf:",
+                    default="1",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) >= 1) else "Must be an integer >= 1",
+                )
+                if rf_min_samples_leaf is None:
+                    print("Cancelled.")
+                    return 0
+
+                rf_max_features = _ask_select(
+                    "Default max_features for template --max-features:",
+                    choices=["sqrt", "log2", "1.0"],
+                )
+                if rf_max_features is None:
                     print("Cancelled.")
                     return 0
         else:
-            default_rf_n_estimators = profile_defaults.get("default_rf_n_estimators", "300")
-            default_rf_max_depth = profile_defaults.get("default_rf_max_depth", "16")
-            default_rf_min_samples_leaf = profile_defaults.get("default_rf_min_samples_leaf", "1")
-            default_rf_max_features = profile_defaults.get("default_rf_max_features", "sqrt")
-            default_rf_enable_tuning = profile_defaults.get("default_rf_enable_tuning", False)
-            default_rf_tuning_method = profile_defaults.get("default_rf_tuning_method", "grid")
-            default_rf_cv_folds = profile_defaults.get("default_rf_cv_folds", "5")
-            default_rf_cv_scoring = profile_defaults.get(
-                "default_rf_cv_scoring",
+            rf_n_estimators = profile_defaults.get("rf_n_estimators", "300")
+            rf_max_depth = profile_defaults.get("rf_max_depth", "16")
+            rf_min_samples_leaf = profile_defaults.get("rf_min_samples_leaf", "1")
+            rf_max_features = profile_defaults.get("rf_max_features", "sqrt")
+            rf_enable_tuning = profile_defaults.get("rf_enable_tuning", False)
+            rf_tuning_method = profile_defaults.get("rf_tuning_method", "grid")
+            rf_cv_folds = profile_defaults.get("rf_cv_folds", "5")
+            rf_cv_scoring = profile_defaults.get(
+                "rf_cv_scoring",
                 "rmse" if task == "regression" else "f1_macro",
             )
-            default_rf_cv_n_iter = profile_defaults.get("default_rf_cv_n_iter", "20")
-            default_rf_cv_n_jobs = profile_defaults.get("default_rf_cv_n_jobs", "-1")
+            rf_cv_n_iter = profile_defaults.get("rf_cv_n_iter", "20")
+            rf_cv_n_jobs = profile_defaults.get("rf_cv_n_jobs", "-1")
 
     if library == "tensorflow" and model == "dense_nn":
-        default_tf_enable_tuning = questionary.confirm(
+        tf_enable_tuning = questionary.confirm(
             "Enable hyperparameter tuning by default? (--enable-tuning)",
             default=False,
             style=CUSTOM_STYLE,
         ).ask()
-        if default_tf_enable_tuning is None:
+        if tf_enable_tuning is None:
             print("Cancelled.")
             return 0
-        if default_tf_enable_tuning:
-            default_tf_tuning_method = "random"
-            default_tf_cv_scoring = _ask_select(
+        if tf_enable_tuning:
+            tf_tuning_method = "random"
+            tf_cv_scoring = _ask_select(
                 "Default tuning scoring (--cv-scoring):",
                 choices=["rmse"] if task == "regression" else ["f1_macro"],
             )
-            if default_tf_cv_scoring is None:
+            if tf_cv_scoring is None:
                 print("Cancelled.")
                 return 0
-            default_tf_cv_n_iter = _ask_text(
+            tf_cv_n_iter = _ask_text(
                 "Default random-search iterations (--cv-n-iter, >0):",
                 default="10",
                 validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
             )
-            if default_tf_cv_n_iter is None:
+            if tf_cv_n_iter is None:
                 print("Cancelled.")
                 return 0
 
     if library == "scikit-learn" and model == "linear_regression":
         if use_custom:
-            default_lr_penalty = _ask_select(
+            lr_penalty = _ask_select(
                 "Default penalty for template --penalty:",
                 choices=["none", "l1", "l2", "elasticnet"],
             )
-            if default_lr_penalty is None:
+            if lr_penalty is None:
                 print("Cancelled.")
                 return 0
 
-            if default_lr_penalty != "none":
-                default_lr_alpha = _ask_text(
-                    "Default alpha (regularization strength) for template --alpha:",
-                    default="1.0",
-                    validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
-                )
-                if default_lr_alpha is None:
-                    print("Cancelled.")
-                    return 0
-            else:
-                default_lr_alpha = "1.0"
-
-            default_lr_fit_intercept = questionary.confirm(
-                "Fit intercept in default template? (--fit-intercept)",
-                default=True,
-                style=CUSTOM_STYLE,
-            ).ask()
-            if default_lr_fit_intercept is None:
-                print("Cancelled.")
-                return 0
-
-            if default_lr_penalty == "elasticnet":
-                default_lr_l1_ratio = _ask_text(
-                    "Default l1_ratio for ElasticNet (0 = pure L2, 1 = pure L1) --l1-ratio:",
-                    default="0.5",
-                    validate_fn=lambda s: True if (_is_float(s) and 0.0 <= float(s) <= 1.0) else "Must be in range [0, 1]",
-                )
-                if default_lr_l1_ratio is None:
-                    print("Cancelled.")
-                    return 0
-            else:
-                default_lr_l1_ratio = "0.5"
-
-            default_lr_enable_tuning = questionary.confirm(
+            lr_enable_tuning = questionary.confirm(
                 "Enable hyperparameter tuning by default in generated template? (--enable-tuning)",
                 default=False,
                 style=CUSTOM_STYLE,
             ).ask()
-            if default_lr_enable_tuning is None:
+            if lr_enable_tuning is None:
                 print("Cancelled.")
                 return 0
 
-            if default_lr_enable_tuning:
-                if default_lr_penalty == "none":
+            if not lr_enable_tuning:
+                if lr_penalty == "elasticnet":
+                    lr_l1_ratio = _ask_text(
+                        "Default l1_ratio for ElasticNet (0 = pure L2, 1 = pure L1) --l1-ratio:",
+                        default="0.5",
+                        validate_fn=lambda s: True if (_is_float(s) and 0.0 <= float(s) <= 1.0) else "Must be in range [0, 1]",
+                    )
+                    if lr_l1_ratio is None:
+                        print("Cancelled.")
+                        return 0
+                else:
+                    lr_l1_ratio = "0.5"
+
+                if lr_penalty != "none":
+                    lr_alpha = _ask_text(
+                        "Default alpha (regularization strength) for template --alpha:",
+                        default="1.0",
+                        validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
+                    )
+                    if lr_alpha is None:
+                        print("Cancelled.")
+                        return 0
+                else:
+                    lr_alpha = "1.0"
+
+                lr_fit_intercept = questionary.confirm(
+                    "Fit intercept in default template? (--fit-intercept)",
+                    default=True,
+                    style=CUSTOM_STYLE,
+                ).ask()
+                if lr_fit_intercept is None:
+                    print("Cancelled.")
+                    return 0
+            else:
+                lr_alpha = None
+                lr_fit_intercept = None
+                lr_l1_ratio = None
+
+            if lr_enable_tuning:
+                if lr_penalty == "none":
                     print(
                         "Note: penalty=none with tuning enabled uses a small search space "
                         "(primarily fit_intercept)."
                     )
 
-                default_lr_tuning_method = _ask_select(
+                lr_tuning_method = _ask_select(
                     "Default tuning method (--tuning-method):",
                     choices=["grid", "random"],
                 )
-                if default_lr_tuning_method is None:
+                if lr_tuning_method is None:
                     print("Cancelled.")
                     return 0
 
-                default_lr_cv_folds = _ask_text(
+                lr_cv_folds = _ask_text(
                     "Default CV folds (--cv-folds, >=2):",
                     default="5",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
                 )
-                if default_lr_cv_folds is None:
+                if lr_cv_folds is None:
                     print("Cancelled.")
                     return 0
 
-                default_lr_cv_scoring = _ask_select(
+                lr_cv_scoring = _ask_select(
                     "Default CV scoring (--cv-scoring):",
                     choices=["rmse", "mae", "r2"],
                 )
-                if default_lr_cv_scoring is None:
+                if lr_cv_scoring is None:
                     print("Cancelled.")
                     return 0
 
-                if default_lr_tuning_method == "random":
-                    default_lr_cv_n_iter = _ask_text(
+                if lr_tuning_method == "random":
+                    lr_cv_n_iter = _ask_text(
                         "Default random-search iterations (--cv-n-iter, >0):",
                         default="20",
                         validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                     )
-                    if default_lr_cv_n_iter is None:
+                    if lr_cv_n_iter is None:
                         print("Cancelled.")
                         return 0
 
-                default_lr_cv_n_jobs = _ask_text(
+                lr_cv_n_jobs = _ask_text(
                     "Default CV parallel jobs (--cv-n-jobs, e.g., -1):",
                     default="-1",
                     validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
                 )
-                if default_lr_cv_n_jobs is None:
+                if lr_cv_n_jobs is None:
                     print("Cancelled.")
                     return 0
         else:
-            default_lr_penalty = profile_defaults.get("default_lr_penalty", "none")
-            default_lr_alpha = profile_defaults.get("default_lr_alpha", "1.0")
-            default_lr_fit_intercept = profile_defaults.get("default_lr_fit_intercept", True)
-            default_lr_l1_ratio = profile_defaults.get("default_lr_l1_ratio", "0.5")
-            default_lr_enable_tuning = profile_defaults.get("default_lr_enable_tuning", False)
-            default_lr_tuning_method = profile_defaults.get("default_lr_tuning_method", "grid")
-            default_lr_cv_folds = profile_defaults.get("default_lr_cv_folds", "5")
-            default_lr_cv_scoring = profile_defaults.get("default_lr_cv_scoring", "rmse")
-            default_lr_cv_n_iter = profile_defaults.get("default_lr_cv_n_iter", "20")
-            default_lr_cv_n_jobs = profile_defaults.get("default_lr_cv_n_jobs", "-1")
+            lr_penalty = profile_defaults.get("lr_penalty", "none")
+            lr_alpha = profile_defaults.get("lr_alpha", "1.0")
+            lr_fit_intercept = profile_defaults.get("lr_fit_intercept", True)
+            lr_l1_ratio = profile_defaults.get("lr_l1_ratio", "0.5")
+            lr_enable_tuning = profile_defaults.get("lr_enable_tuning", False)
+            lr_tuning_method = profile_defaults.get("lr_tuning_method", "grid")
+            lr_cv_folds = profile_defaults.get("lr_cv_folds", "5")
+            lr_cv_scoring = profile_defaults.get("lr_cv_scoring", "rmse")
+            lr_cv_n_iter = profile_defaults.get("lr_cv_n_iter", "20")
+            lr_cv_n_jobs = profile_defaults.get("lr_cv_n_jobs", "-1")
 
-    if _supports_default_max_iter(library, model, task):
+    if _supports_max_iter(library, model, task):
         if use_custom:
-            default_max_iter = _ask_text(
+            max_iter = _ask_text(
                 "Default max iterations for template --max-iter:",
                 default="1000",
                 validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
             )
-            if default_max_iter is None:
+            if max_iter is None:
                 print("Cancelled.")
                 return 0
-            default_max_iter = int(default_max_iter)
+            max_iter = int(max_iter)
         else:
-            default_max_iter = int(profile_defaults.get("default_max_iter", 1000))
+            max_iter = int(profile_defaults.get("max_iter", 1000))
 
     if _supports_early_stopping_defaults(library, model, task):
         if use_custom:
@@ -1192,13 +1285,13 @@ def main() -> int:
                 model,
             )
 
-            default_early_stopping = questionary.confirm(
+            early_stopping = questionary.confirm(
                 "Enable early stopping by default in the generated template (--early-stopping)?",
                 default=bool(recommended_early_stopping),
                 style=CUSTOM_STYLE,
             ).ask()
 
-            if default_early_stopping is None:
+            if early_stopping is None:
                 print("Cancelled.")
                 return 0
 
@@ -1213,36 +1306,36 @@ def main() -> int:
                 return 0
 
             if use_recommended_defaults:
-                default_validation_fraction = recommended_validation_fraction
-                default_n_iter_no_change = recommended_n_iter_no_change
+                validation_fraction = recommended_validation_fraction
+                n_iter_no_change = recommended_n_iter_no_change
             else:
-                default_validation_fraction = _ask_text(
+                validation_fraction = _ask_text(
                     "Default validation fraction for template --validation-fraction (0 < value < 1):",
                     default=str(recommended_validation_fraction),
                     validate_fn=lambda s: True
                     if (_is_float(s) and 0.0 < float(s) < 1.0)
                     else "Must be a number where 0 < value < 1",
                 )
-                if default_validation_fraction is None:
+                if validation_fraction is None:
                     print("Cancelled.")
                     return 0
 
-                default_n_iter_no_change = _ask_text(
+                n_iter_no_change = _ask_text(
                     "Default n_iter_no_change for template --n-iter-no-change:",
                     default=str(recommended_n_iter_no_change),
                     validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                 )
-                if default_n_iter_no_change is None:
+                if n_iter_no_change is None:
                     print("Cancelled.")
                     return 0
 
-                default_validation_fraction = float(default_validation_fraction)
-                default_n_iter_no_change = int(default_n_iter_no_change)
+                validation_fraction = float(validation_fraction)
+                n_iter_no_change = int(n_iter_no_change)
         else:
             # Profile provides ES defaults
-            default_early_stopping = profile_defaults.get("default_early_stopping", True)
-            default_validation_fraction = profile_defaults.get("default_validation_fraction", 0.1)
-            default_n_iter_no_change = profile_defaults.get("default_n_iter_no_change", 5)
+            early_stopping = profile_defaults.get("early_stopping", True)
+            validation_fraction = profile_defaults.get("validation_fraction", 0.1)
+            n_iter_no_change = profile_defaults.get("n_iter_no_change", 5)
 
     resolved_defaults: list[tuple[str, object]] = [
         ("library", library),
@@ -1256,61 +1349,61 @@ def main() -> int:
         ("booster", booster),
         ("device", device),
         ("optimizer", optimizer),
-        ("learning_rate", learning_rate),
+        ("tf_learning_rate", tf_learning_rate),
         ("epochs", epochs),
         ("batch_size", batch_size),
-        ("default_early_stopping", default_early_stopping),
-        ("default_validation_fraction", default_validation_fraction),
-        ("default_n_iter_no_change", default_n_iter_no_change),
-        ("default_max_iter", default_max_iter),
-        ("default_n_estimators", default_n_estimators),
-        ("default_learning_rate", default_learning_rate),
-        ("default_max_depth", default_max_depth),
-        ("default_subsample", default_subsample),
-        ("default_colsample_bytree", default_colsample_bytree),
-        ("default_xgb_min_child_weight", default_xgb_min_child_weight),
-        ("default_xgb_reg_lambda", default_xgb_reg_lambda),
-        ("default_xgb_reg_alpha", default_xgb_reg_alpha),
-        ("default_xgb_enable_tuning", default_xgb_enable_tuning),
-        ("default_xgb_tuning_method", default_xgb_tuning_method),
-        ("default_xgb_cv_folds", default_xgb_cv_folds),
-        ("default_xgb_cv_scoring", default_xgb_cv_scoring),
-        ("default_xgb_cv_n_iter", default_xgb_cv_n_iter),
-        ("default_xgb_cv_n_jobs", default_xgb_cv_n_jobs),
-        ("default_c", default_c),
-        ("default_solver", default_solver),
-        ("default_logistic_penalty", default_logistic_penalty),
-        ("default_logistic_class_weight", default_logistic_class_weight),
-        ("default_logistic_enable_tuning", default_logistic_enable_tuning),
-        ("default_logistic_tuning_method", default_logistic_tuning_method),
-        ("default_logistic_cv_folds", default_logistic_cv_folds),
-        ("default_logistic_cv_scoring", default_logistic_cv_scoring),
-        ("default_logistic_cv_n_iter", default_logistic_cv_n_iter),
-        ("default_logistic_cv_n_jobs", default_logistic_cv_n_jobs),
-        ("default_rf_n_estimators", default_rf_n_estimators),
-        ("default_rf_max_depth", default_rf_max_depth),
-        ("default_rf_min_samples_leaf", default_rf_min_samples_leaf),
-        ("default_rf_max_features", default_rf_max_features),
-        ("default_rf_enable_tuning", default_rf_enable_tuning),
-        ("default_rf_tuning_method", default_rf_tuning_method),
-        ("default_rf_cv_folds", default_rf_cv_folds),
-        ("default_rf_cv_scoring", default_rf_cv_scoring),
-        ("default_rf_cv_n_iter", default_rf_cv_n_iter),
-        ("default_rf_cv_n_jobs", default_rf_cv_n_jobs),
-        ("default_lr_penalty", default_lr_penalty),
-        ("default_lr_alpha", default_lr_alpha),
-        ("default_lr_fit_intercept", default_lr_fit_intercept),
-        ("default_lr_l1_ratio", default_lr_l1_ratio),
-        ("default_lr_enable_tuning", default_lr_enable_tuning),
-        ("default_lr_tuning_method", default_lr_tuning_method),
-        ("default_lr_cv_folds", default_lr_cv_folds),
-        ("default_lr_cv_scoring", default_lr_cv_scoring),
-        ("default_lr_cv_n_iter", default_lr_cv_n_iter),
-        ("default_lr_cv_n_jobs", default_lr_cv_n_jobs),
-        ("default_tf_enable_tuning", default_tf_enable_tuning),
-        ("default_tf_tuning_method", default_tf_tuning_method),
-        ("default_tf_cv_scoring", default_tf_cv_scoring),
-        ("default_tf_cv_n_iter", default_tf_cv_n_iter),
+        ("early_stopping", early_stopping),
+        ("validation_fraction", validation_fraction),
+        ("n_iter_no_change", n_iter_no_change),
+        ("max_iter", max_iter),
+        ("n_estimators", n_estimators),
+        ("learning_rate", learning_rate),
+        ("max_depth", max_depth),
+        ("subsample", subsample),
+        ("colsample_bytree", colsample_bytree),
+        ("xgb_min_child_weight", xgb_min_child_weight),
+        ("xgb_reg_lambda", xgb_reg_lambda),
+        ("xgb_reg_alpha", xgb_reg_alpha),
+        ("xgb_enable_tuning", xgb_enable_tuning),
+        ("xgb_tuning_method", xgb_tuning_method),
+        ("xgb_cv_folds", xgb_cv_folds),
+        ("xgb_cv_scoring", xgb_cv_scoring),
+        ("xgb_cv_n_iter", xgb_cv_n_iter),
+        ("xgb_cv_n_jobs", xgb_cv_n_jobs),
+        ("c", c),
+        ("solver", solver),
+        ("logistic_penalty", logistic_penalty),
+        ("logistic_class_weight", logistic_class_weight),
+        ("logistic_enable_tuning", logistic_enable_tuning),
+        ("logistic_tuning_method", logistic_tuning_method),
+        ("logistic_cv_folds", logistic_cv_folds),
+        ("logistic_cv_scoring", logistic_cv_scoring),
+        ("logistic_cv_n_iter", logistic_cv_n_iter),
+        ("logistic_cv_n_jobs", logistic_cv_n_jobs),
+        ("rf_n_estimators", rf_n_estimators),
+        ("rf_max_depth", rf_max_depth),
+        ("rf_min_samples_leaf", rf_min_samples_leaf),
+        ("rf_max_features", rf_max_features),
+        ("rf_enable_tuning", rf_enable_tuning),
+        ("rf_tuning_method", rf_tuning_method),
+        ("rf_cv_folds", rf_cv_folds),
+        ("rf_cv_scoring", rf_cv_scoring),
+        ("rf_cv_n_iter", rf_cv_n_iter),
+        ("rf_cv_n_jobs", rf_cv_n_jobs),
+        ("lr_penalty", lr_penalty),
+        ("lr_alpha", lr_alpha),
+        ("lr_fit_intercept", lr_fit_intercept),
+        ("lr_l1_ratio", lr_l1_ratio),
+        ("lr_enable_tuning", lr_enable_tuning),
+        ("lr_tuning_method", lr_tuning_method),
+        ("lr_cv_folds", lr_cv_folds),
+        ("lr_cv_scoring", lr_cv_scoring),
+        ("lr_cv_n_iter", lr_cv_n_iter),
+        ("lr_cv_n_jobs", lr_cv_n_jobs),
+        ("tf_enable_tuning", tf_enable_tuning),
+        ("tf_tuning_method", tf_tuning_method),
+        ("tf_cv_scoring", tf_cv_scoring),
+        ("tf_cv_n_iter", tf_cv_n_iter),
     ]
 
     optional_values_by_key = {key: value for key, value in optional_defaults if value is not None}
@@ -1324,7 +1417,8 @@ def main() -> int:
 
     print("\nResolved defaults:")
     for key, value in resolved_defaults:
-        print(f"  {key}={_stringify_setting(value)}")
+        display_key = _resolved_display_key(key)
+        print(f"  {display_key}={_stringify_setting(value)}")
 
     models_dir = script_dir / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -1369,121 +1463,121 @@ def main() -> int:
         cmd.extend(["--starter-dataset", starter_dataset])
 
     if _supports_early_stopping_defaults(library, model, task):
-        cmd.extend(["--default-early-stopping", "true" if default_early_stopping else "false"])
-        cmd.extend(["--default-validation-fraction", str(float(default_validation_fraction))])
-        cmd.extend(["--default-n-iter-no-change", str(int(default_n_iter_no_change))])
+        cmd.extend(["--default-early-stopping", "true" if early_stopping else "false"])
+        cmd.extend(["--default-validation-fraction", str(float(validation_fraction))])
+        cmd.extend(["--default-n-iter-no-change", str(int(n_iter_no_change))])
 
-    if default_max_iter is not None:
-        cmd.extend(["--default-max-iter", str(int(default_max_iter))])
+    if max_iter is not None:
+        cmd.extend(["--default-max-iter", str(int(max_iter))])
 
-    if default_n_estimators is not None:
-        cmd.extend(["--default-n-estimators", str(int(default_n_estimators))])
-    if default_learning_rate is not None:
-        cmd.extend(["--default-learning-rate", str(float(default_learning_rate))])
-    if default_max_depth is not None:
-        cmd.extend(["--default-max-depth", str(int(default_max_depth))])
-    if default_subsample is not None:
-        cmd.extend(["--default-subsample", str(float(default_subsample))])
-    if default_colsample_bytree is not None:
-        cmd.extend(["--default-colsample-bytree", str(float(default_colsample_bytree))])
-    if default_xgb_min_child_weight is not None:
-        cmd.extend(["--default-xgb-min-child-weight", str(float(default_xgb_min_child_weight))])
-    if default_xgb_reg_lambda is not None:
-        cmd.extend(["--default-xgb-reg-lambda", str(float(default_xgb_reg_lambda))])
-    if default_xgb_reg_alpha is not None:
-        cmd.extend(["--default-xgb-reg-alpha", str(float(default_xgb_reg_alpha))])
+    if n_estimators is not None:
+        cmd.extend(["--default-n-estimators", str(int(n_estimators))])
+    if learning_rate is not None:
+        cmd.extend(["--default-learning-rate", str(float(learning_rate))])
+    if max_depth is not None:
+        cmd.extend(["--default-max-depth", str(int(max_depth))])
+    if subsample is not None:
+        cmd.extend(["--default-subsample", str(float(subsample))])
+    if colsample_bytree is not None:
+        cmd.extend(["--default-colsample-bytree", str(float(colsample_bytree))])
+    if xgb_min_child_weight is not None:
+        cmd.extend(["--default-xgb-min-child-weight", str(float(xgb_min_child_weight))])
+    if xgb_reg_lambda is not None:
+        cmd.extend(["--default-xgb-reg-lambda", str(float(xgb_reg_lambda))])
+    if xgb_reg_alpha is not None:
+        cmd.extend(["--default-xgb-reg-alpha", str(float(xgb_reg_alpha))])
 
-    if default_c is not None:
-        cmd.extend(["--default-c", str(float(default_c))])
-    if default_solver is not None:
-        cmd.extend(["--default-solver", str(default_solver)])
-    if default_logistic_penalty is not None:
-        cmd.extend(["--default-logistic-penalty", str(default_logistic_penalty)])
-    if default_logistic_class_weight is not None:
-        cmd.extend(["--default-logistic-class-weight", str(default_logistic_class_weight)])
-    if default_logistic_enable_tuning is not None:
-        cmd.extend(["--default-logistic-enable-tuning", "true" if default_logistic_enable_tuning else "false"])
-    if default_logistic_tuning_method is not None:
-        cmd.extend(["--default-logistic-tuning-method", str(default_logistic_tuning_method)])
-    if default_logistic_cv_folds is not None:
-        cmd.extend(["--default-logistic-cv-folds", str(int(default_logistic_cv_folds))])
-    if default_logistic_cv_scoring is not None:
-        cmd.extend(["--default-logistic-cv-scoring", str(default_logistic_cv_scoring)])
-    if default_logistic_tuning_method == "random" and default_logistic_cv_n_iter is not None:
-        cmd.extend(["--default-logistic-cv-n-iter", str(int(default_logistic_cv_n_iter))])
-    if default_logistic_cv_n_jobs is not None:
-        cmd.extend(["--default-logistic-cv-n-jobs", str(int(default_logistic_cv_n_jobs))])
+    if c is not None:
+        cmd.extend(["--default-c", str(float(c))])
+    if solver is not None:
+        cmd.extend(["--default-solver", str(solver)])
+    if logistic_penalty is not None:
+        cmd.extend(["--default-logistic-penalty", str(logistic_penalty)])
+    if logistic_class_weight is not None:
+        cmd.extend(["--default-logistic-class-weight", str(logistic_class_weight)])
+    if logistic_enable_tuning is not None:
+        cmd.extend(["--default-logistic-enable-tuning", "true" if logistic_enable_tuning else "false"])
+    if logistic_tuning_method is not None:
+        cmd.extend(["--default-logistic-tuning-method", str(logistic_tuning_method)])
+    if logistic_cv_folds is not None:
+        cmd.extend(["--default-logistic-cv-folds", str(int(logistic_cv_folds))])
+    if logistic_cv_scoring is not None:
+        cmd.extend(["--default-logistic-cv-scoring", str(logistic_cv_scoring)])
+    if logistic_tuning_method == "random" and logistic_cv_n_iter is not None:
+        cmd.extend(["--default-logistic-cv-n-iter", str(int(logistic_cv_n_iter))])
+    if logistic_cv_n_jobs is not None:
+        cmd.extend(["--default-logistic-cv-n-jobs", str(int(logistic_cv_n_jobs))])
 
-    if default_rf_n_estimators is not None:
-        cmd.extend(["--default-rf-n-estimators", str(int(default_rf_n_estimators))])
-    if default_rf_max_depth is not None:
-        cmd.extend(["--default-rf-max-depth", str(int(default_rf_max_depth))])
-    if default_rf_min_samples_leaf is not None:
-        cmd.extend(["--default-rf-min-samples-leaf", str(int(default_rf_min_samples_leaf))])
-    if default_rf_max_features is not None:
-        cmd.extend(["--default-rf-max-features", str(default_rf_max_features)])
-    if default_rf_enable_tuning is not None:
-        cmd.extend(["--default-rf-enable-tuning", "true" if default_rf_enable_tuning else "false"])
-    if default_rf_tuning_method is not None:
-        cmd.extend(["--default-rf-tuning-method", str(default_rf_tuning_method)])
-    if default_rf_cv_folds is not None:
-        cmd.extend(["--default-rf-cv-folds", str(int(default_rf_cv_folds))])
-    if default_rf_cv_scoring is not None:
-        cmd.extend(["--default-rf-cv-scoring", str(default_rf_cv_scoring)])
-    if default_rf_tuning_method == "random" and default_rf_cv_n_iter is not None:
-        cmd.extend(["--default-rf-cv-n-iter", str(int(default_rf_cv_n_iter))])
-    if default_rf_cv_n_jobs is not None:
-        cmd.extend(["--default-rf-cv-n-jobs", str(int(default_rf_cv_n_jobs))])
+    if rf_n_estimators is not None:
+        cmd.extend(["--default-rf-n-estimators", str(int(rf_n_estimators))])
+    if rf_max_depth is not None:
+        cmd.extend(["--default-rf-max-depth", str(int(rf_max_depth))])
+    if rf_min_samples_leaf is not None:
+        cmd.extend(["--default-rf-min-samples-leaf", str(int(rf_min_samples_leaf))])
+    if rf_max_features is not None:
+        cmd.extend(["--default-rf-max-features", str(rf_max_features)])
+    if rf_enable_tuning is not None:
+        cmd.extend(["--default-rf-enable-tuning", "true" if rf_enable_tuning else "false"])
+    if rf_tuning_method is not None:
+        cmd.extend(["--default-rf-tuning-method", str(rf_tuning_method)])
+    if rf_cv_folds is not None:
+        cmd.extend(["--default-rf-cv-folds", str(int(rf_cv_folds))])
+    if rf_cv_scoring is not None:
+        cmd.extend(["--default-rf-cv-scoring", str(rf_cv_scoring)])
+    if rf_tuning_method == "random" and rf_cv_n_iter is not None:
+        cmd.extend(["--default-rf-cv-n-iter", str(int(rf_cv_n_iter))])
+    if rf_cv_n_jobs is not None:
+        cmd.extend(["--default-rf-cv-n-jobs", str(int(rf_cv_n_jobs))])
 
-    if default_xgb_enable_tuning is not None:
-        cmd.extend(["--default-xgb-enable-tuning", "true" if default_xgb_enable_tuning else "false"])
-    if default_xgb_tuning_method is not None:
-        cmd.extend(["--default-xgb-tuning-method", str(default_xgb_tuning_method)])
-    if default_xgb_cv_folds is not None:
-        cmd.extend(["--default-xgb-cv-folds", str(int(default_xgb_cv_folds))])
-    if default_xgb_cv_scoring is not None:
-        cmd.extend(["--default-xgb-cv-scoring", str(default_xgb_cv_scoring)])
-    if default_xgb_cv_n_iter is not None:
-        cmd.extend(["--default-xgb-cv-n-iter", str(int(default_xgb_cv_n_iter))])
-    if default_xgb_cv_n_jobs is not None:
-        cmd.extend(["--default-xgb-cv-n-jobs", str(int(default_xgb_cv_n_jobs))])
+    if xgb_enable_tuning is not None:
+        cmd.extend(["--default-xgb-enable-tuning", "true" if xgb_enable_tuning else "false"])
+    if xgb_tuning_method is not None:
+        cmd.extend(["--default-xgb-tuning-method", str(xgb_tuning_method)])
+    if xgb_cv_folds is not None:
+        cmd.extend(["--default-xgb-cv-folds", str(int(xgb_cv_folds))])
+    if xgb_cv_scoring is not None:
+        cmd.extend(["--default-xgb-cv-scoring", str(xgb_cv_scoring)])
+    if xgb_cv_n_iter is not None:
+        cmd.extend(["--default-xgb-cv-n-iter", str(int(xgb_cv_n_iter))])
+    if xgb_cv_n_jobs is not None:
+        cmd.extend(["--default-xgb-cv-n-jobs", str(int(xgb_cv_n_jobs))])
 
-    if default_lr_penalty is not None:
-        cmd.extend(["--default-lr-penalty", str(default_lr_penalty)])
-    if default_lr_alpha is not None:
-        cmd.extend(["--default-lr-alpha", str(float(default_lr_alpha))])
-    if default_lr_fit_intercept is not None:
-        cmd.extend(["--default-lr-fit-intercept", "true" if default_lr_fit_intercept else "false"])
-    if default_lr_l1_ratio is not None:
-        cmd.extend(["--default-lr-l1-ratio", str(float(default_lr_l1_ratio))])
-    if default_lr_enable_tuning is not None:
-        cmd.extend(["--default-lr-enable-tuning", "true" if default_lr_enable_tuning else "false"])
-    if default_lr_tuning_method is not None:
-        cmd.extend(["--default-lr-tuning-method", str(default_lr_tuning_method)])
-    if default_lr_cv_folds is not None:
-        cmd.extend(["--default-lr-cv-folds", str(int(default_lr_cv_folds))])
-    if default_lr_cv_scoring is not None:
-        cmd.extend(["--default-lr-cv-scoring", str(default_lr_cv_scoring)])
-    if default_lr_tuning_method == "random" and default_lr_cv_n_iter is not None:
-        cmd.extend(["--default-lr-cv-n-iter", str(int(default_lr_cv_n_iter))])
-    if default_lr_cv_n_jobs is not None:
-        cmd.extend(["--default-lr-cv-n-jobs", str(int(default_lr_cv_n_jobs))])
+    if lr_penalty is not None:
+        cmd.extend(["--default-lr-penalty", str(lr_penalty)])
+    if lr_alpha is not None:
+        cmd.extend(["--default-lr-alpha", str(float(lr_alpha))])
+    if lr_fit_intercept is not None:
+        cmd.extend(["--default-lr-fit-intercept", "true" if lr_fit_intercept else "false"])
+    if lr_l1_ratio is not None:
+        cmd.extend(["--default-lr-l1-ratio", str(float(lr_l1_ratio))])
+    if lr_enable_tuning is not None:
+        cmd.extend(["--default-lr-enable-tuning", "true" if lr_enable_tuning else "false"])
+    if lr_tuning_method is not None:
+        cmd.extend(["--default-lr-tuning-method", str(lr_tuning_method)])
+    if lr_cv_folds is not None:
+        cmd.extend(["--default-lr-cv-folds", str(int(lr_cv_folds))])
+    if lr_cv_scoring is not None:
+        cmd.extend(["--default-lr-cv-scoring", str(lr_cv_scoring)])
+    if lr_tuning_method == "random" and lr_cv_n_iter is not None:
+        cmd.extend(["--default-lr-cv-n-iter", str(int(lr_cv_n_iter))])
+    if lr_cv_n_jobs is not None:
+        cmd.extend(["--default-lr-cv-n-jobs", str(int(lr_cv_n_jobs))])
 
     # Add TensorFlow-only flags where necessary
     if library == "tensorflow":
         # These variables are guaranteed non-None here due to the prompts above.
         cmd.extend(["--optimizer", optimizer])
-        cmd.extend(["--learning_rate", str(float(learning_rate))])
+        cmd.extend(["--learning_rate", str(float(tf_learning_rate))])
         cmd.extend(["--epochs", str(int(epochs))])
         cmd.extend(["--batch_size", str(int(batch_size))])
-        if default_tf_enable_tuning is not None:
-            cmd.extend(["--default-tf-enable-tuning", "true" if default_tf_enable_tuning else "false"])
-        if default_tf_tuning_method is not None:
-            cmd.extend(["--default-tf-tuning-method", str(default_tf_tuning_method)])
-        if default_tf_cv_scoring is not None:
-            cmd.extend(["--default-tf-cv-scoring", str(default_tf_cv_scoring)])
-        if default_tf_cv_n_iter is not None:
-            cmd.extend(["--default-tf-cv-n-iter", str(int(default_tf_cv_n_iter))])
+        if tf_enable_tuning is not None:
+            cmd.extend(["--default-tf-enable-tuning", "true" if tf_enable_tuning else "false"])
+        if tf_tuning_method is not None:
+            cmd.extend(["--default-tf-tuning-method", str(tf_tuning_method)])
+        if tf_cv_scoring is not None:
+            cmd.extend(["--default-tf-cv-scoring", str(tf_cv_scoring)])
+        if tf_cv_n_iter is not None:
+            cmd.extend(["--default-tf-cv-n-iter", str(int(tf_cv_n_iter))])
 
     print("\nRunning:")
     print("  " + " ".join(cmd) + "\n")

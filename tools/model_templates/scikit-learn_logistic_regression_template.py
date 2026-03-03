@@ -142,41 +142,6 @@ if args.penalty not in _SOLVER_PENALTY_COMPAT.get(args.solver, set()):
 		f"Valid penalties for {args.solver}: {valid_penalties}"
 	)
 
-def _build_search_space(random_state: int) -> list[dict[str, list]]:
-	common_c = [0.01, 0.1, 1.0, 10.0]
-	common_max_iter = [500, 1000, 2000]
-	return [
-		{
-			"classifier__solver": ["lbfgs", "newton-cg", "sag", "newton-cholesky"],
-			"classifier__penalty": ["none", "l2"],
-			"classifier__C": common_c,
-			"classifier__class_weight": [None, "balanced"],
-			"classifier__max_iter": common_max_iter,
-		},
-		{
-			"classifier__solver": ["liblinear"],
-			"classifier__penalty": ["l1", "l2"],
-			"classifier__C": common_c,
-			"classifier__class_weight": [None, "balanced"],
-			"classifier__max_iter": common_max_iter,
-		},
-		{
-			"classifier__solver": ["saga"],
-			"classifier__penalty": ["l1", "l2", "none"],
-			"classifier__C": common_c,
-			"classifier__class_weight": [None, "balanced"],
-			"classifier__max_iter": common_max_iter,
-		},
-		{
-			"classifier__solver": ["saga"],
-			"classifier__penalty": ["elasticnet"],
-			"classifier__l1_ratio": [0.2, 0.5, 0.8],
-			"classifier__C": common_c,
-			"classifier__class_weight": [None, "balanced"],
-			"classifier__max_iter": common_max_iter,
-		},
-	]
-
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
 cv_verbose = 0 if training_verbose <= 1 else 2
@@ -327,6 +292,7 @@ model = Pipeline(
 # =============================================================
 # ===================== TRAIN MODEL ===========================
 # =============================================================
+
 selected_cv_scoring = _cv_scoring_name(
 	args.cv_scoring,
 	{"f1_macro": "f1_macro", "accuracy": "accuracy", "roc_auc_ovr": "roc_auc_ovr"},
@@ -353,6 +319,41 @@ if training_verbose > 0:
 		)
 	else:
 		print(f"Training started: {classifier_name}")
+
+def _build_search_space(random_state: int) -> list[dict[str, list]]:
+	common_c = [0.01, 0.1, 1.0, 10.0]
+	common_max_iter = [500, 1000, 2000]
+	return [
+		{
+			"classifier__solver": ["lbfgs", "newton-cg", "sag", "newton-cholesky"],
+			"classifier__penalty": ["none", "l2"],
+			"classifier__C": common_c,
+			"classifier__class_weight": [None, "balanced"],
+			"classifier__max_iter": common_max_iter,
+		},
+		{
+			"classifier__solver": ["liblinear"],
+			"classifier__penalty": ["l1", "l2"],
+			"classifier__C": common_c,
+			"classifier__class_weight": [None, "balanced"],
+			"classifier__max_iter": common_max_iter,
+		},
+		{
+			"classifier__solver": ["saga"],
+			"classifier__penalty": ["l1", "l2", "none"],
+			"classifier__C": common_c,
+			"classifier__class_weight": [None, "balanced"],
+			"classifier__max_iter": common_max_iter,
+		},
+		{
+			"classifier__solver": ["saga"],
+			"classifier__penalty": ["elasticnet"],
+			"classifier__l1_ratio": [0.2, 0.5, 0.8],
+			"classifier__C": common_c,
+			"classifier__class_weight": [None, "balanced"],
+			"classifier__max_iter": common_max_iter,
+		},
+	]
 
 if args.enable_tuning:
 	search_space = _build_search_space(int(args.random_state))

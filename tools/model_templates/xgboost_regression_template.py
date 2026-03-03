@@ -326,6 +326,7 @@ if args.enable_tuning:
 		args.cv_scoring,
 		{"rmse": "neg_root_mean_squared_error", "mae": "neg_mean_absolute_error", "r2": "r2"},
 	)
+
 	search_space = {
 		"regressor__n_estimators": [100, 200, 300, 500],
 		"regressor__learning_rate": [0.01, 0.05, 0.1, 0.2],
@@ -336,6 +337,7 @@ if args.enable_tuning:
 		"regressor__reg_lambda": [0.5, 1.0, 2.0],
 		"regressor__reg_alpha": [0.0, 0.1, 0.5],
 	}
+	
 	n_iter = int(args.cv_n_iter)
 	n_candidates_upper = _search_space_size(search_space)
 	if n_candidates_upper > 0:

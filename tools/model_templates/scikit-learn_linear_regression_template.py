@@ -47,23 +47,70 @@ from libraries.serialization_utils import json_safe_best_params as _json_safe_be
 
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
+# 
+#   Run + artifacts + logging
 #   --name <model_name>
 #   --save-model true|false
-#   --random-state <int>
-#   --test-size <float>
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
+# 
+# 	Reproducibility + data split
+#   --random-state <int>
+#   --test-size <float> (e.g., 0.2 for 80/20 split)
+# 
+# 	Model behavior
+#   --fit-intercept true|false
 #   --penalty none|l1|l2|elasticnet
 #   --alpha <float>
-#   --fit-intercept true|false
-#   --l1-ratio <float>
+#   --l1-ratio <float> (only used if penalty=elasticnet; balance between l1 and l2 regularization, where 0=l2 only, 1=l1 only)
+# 
+# 	Hyperparameter tuning
 #   --enable-tuning true|false
 #   --tuning-method grid|random
 #   --cv-folds <int>
 #   --cv-scoring rmse|mae|r2
-#   --cv-n-iter <int>
-#   --cv-n-jobs <int>
+#   --cv-n-iter <int> (only used if tuning-method=random; number of random hyperparameter combinations to try)
+#   --cv-n-jobs <int> (number of parallel jobs for CV; -1 to use all cores)
+# 
 # ---------------------------------------------------------------------
+
+# NOTE: Adjust or extend this search space manually to customize which estimators and hyperparameter ranges are explored during tuning.
+def _build_search_space(penalty: str, random_state: int) -> list[dict[str, list]]:
+	if penalty == "none":
+		return [
+			{
+				"regressor": [LinearRegression()],
+				"regressor__fit_intercept": [True, False],
+			}
+		]
+	if penalty == "l2":
+		return [
+			{
+				"regressor": [Ridge(random_state=random_state)],
+				"regressor__alpha": [1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0],
+				"regressor__fit_intercept": [True, False],
+			}
+		]
+	if penalty == "l1":
+		return [
+			{
+				"regressor": [Lasso(random_state=random_state)],
+				"regressor__alpha": [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
+				"regressor__fit_intercept": [True, False],
+				"regressor__max_iter": [5_000, 10_000, 20_000],
+			}
+		]
+	if penalty == "elasticnet":
+		return [
+			{
+				"regressor": [ElasticNet(random_state=random_state)],
+				"regressor__alpha": [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
+				"regressor__l1_ratio": [0.1, 0.3, 0.5, 0.7, 0.9],
+				"regressor__fit_intercept": [True, False],
+				"regressor__max_iter": [5_000, 10_000, 20_000],
+			}
+		]
+	raise ValueError(f"Unsupported penalty '{penalty}'")
 
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
@@ -226,7 +273,7 @@ preprocessor = _build_preprocessor(X_train)
 # ================= BUILD MODEL PIPELINE ======================
 # =============================================================
 
-
+# Helper to construct the appropriate regressor based on CLI flags.
 def _base_regressor_from_flags() -> LinearRegression | Ridge | Lasso | ElasticNet:
 	if args.penalty == "none":
 		return LinearRegression(fit_intercept=args.fit_intercept)
@@ -248,44 +295,6 @@ def _base_regressor_from_flags() -> LinearRegression | Ridge | Lasso | ElasticNe
 			max_iter=10_000,
 		)
 	raise ValueError(f"Unsupported --penalty '{args.penalty}'. Choose from: none, l1, l2, elasticnet")
-
-
-def _build_search_space(penalty: str, random_state: int) -> list[dict[str, list]]:
-	if penalty == "none":
-		return [
-			{
-				"regressor": [LinearRegression()],
-				"regressor__fit_intercept": [True, False],
-			}
-		]
-	if penalty == "l2":
-		return [
-			{
-				"regressor": [Ridge(random_state=random_state)],
-				"regressor__alpha": [1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0],
-				"regressor__fit_intercept": [True, False],
-			}
-		]
-	if penalty == "l1":
-		return [
-			{
-				"regressor": [Lasso(random_state=random_state)],
-				"regressor__alpha": [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
-				"regressor__fit_intercept": [True, False],
-				"regressor__max_iter": [5_000, 10_000, 20_000],
-			}
-		]
-	if penalty == "elasticnet":
-		return [
-			{
-				"regressor": [ElasticNet(random_state=random_state)],
-				"regressor__alpha": [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
-				"regressor__l1_ratio": [0.1, 0.3, 0.5, 0.7, 0.9],
-				"regressor__fit_intercept": [True, False],
-				"regressor__max_iter": [5_000, 10_000, 20_000],
-			}
-		]
-	raise ValueError(f"Unsupported penalty '{penalty}'")
 
 # Bundle preprocessing + model into one inference-ready pipeline.
 model = Pipeline(
@@ -356,10 +365,13 @@ if args.enable_tuning:
 			random_state=int(args.random_state),
 		)
 
+	# Each candidate model is trained only inside CV folds.
 	search.fit(X_train, y_train)
 	best_params = dict(search.best_params_)
 	best_params_for_artifacts = _json_safe_best_params(best_params)
 	model.set_params(**best_params)
+
+	# Train the final model
 	model.fit(X_train, y_train)
 
 	best_score = float(search.best_score_)

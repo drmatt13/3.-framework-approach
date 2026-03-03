@@ -355,6 +355,7 @@ if args.enable_tuning:
 		args.cv_scoring,
 		{"f1_macro": "f1_macro", "accuracy": "accuracy", "roc_auc_ovr": "roc_auc_ovr"},
 	)
+	
 	search_space = {
 		"classifier__n_estimators": [100, 200, 300, 500],
 		"classifier__learning_rate": [0.01, 0.05, 0.1, 0.2],
@@ -365,6 +366,7 @@ if args.enable_tuning:
 		"classifier__reg_lambda": [0.5, 1.0, 2.0],
 		"classifier__reg_alpha": [0.0, 0.1, 0.5],
 	}
+
 	n_iter = int(args.cv_n_iter)
 	n_candidates_upper = _search_space_size(search_space)
 	if n_candidates_upper > 0:
