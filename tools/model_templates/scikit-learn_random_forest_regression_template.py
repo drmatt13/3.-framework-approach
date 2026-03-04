@@ -74,9 +74,9 @@ from libraries.sklearn_template_utils import parse_max_features as _parse_max_fe
 #   --min-impurity-decrease <float>
 #   --max-features auto|sqrt|log2|float|none
 #   --bootstrap true|false
-#   --max-samples <int|float|none>
+#   --max-samples <int|float|none>       (requires --bootstrap=true; 1.0 uses all rows)
 #   --ccp-alpha <float>
-#   --n-jobs <int|none>
+#   --n-jobs <int|none>                  (estimator parallelism for fit/predict)
 #
 # Hyperparameter tuning
 #   --enable-tuning true|false
@@ -84,7 +84,7 @@ from libraries.sklearn_template_utils import parse_max_features as _parse_max_fe
 #   --cv-folds <int>
 #   --cv-scoring rmse|mae|r2
 #   --cv-n-iter <int>                    (random search only)
-#   --cv-n-jobs <int>                    (-1 uses all cores)
+#   --cv-n-jobs <int>                    (CV search parallelism; -1 uses all cores)
 # ---------------------------------------------------------------------
 
 # NOTE: Adjust these grids to customize search breadth for tuning.
@@ -187,6 +187,8 @@ if float(args.ccp_alpha) < 0.0:
 	raise ValueError("--ccp-alpha must be >= 0")
 if args.n_jobs == 0:
 	raise ValueError("--n-jobs must be != 0 or none")
+if int(args.cv_n_jobs) == 0:
+	raise ValueError("--cv-n-jobs must be != 0")
 if (not bool(args.bootstrap)) and args.max_samples is not None:
 	raise ValueError("--max-samples requires --bootstrap=true")
 

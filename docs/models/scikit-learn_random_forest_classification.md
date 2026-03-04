@@ -61,8 +61,16 @@ These are applied directly to the estimator when tuning is disabled
 
 -   `--n-estimators` (int)
 -   `--max-depth` (int\|none)
+-   `--min-samples-split` (int)
 -   `--min-samples-leaf` (int)
+-   `--min-weight-fraction-leaf` (float)
+-   `--max-leaf-nodes` (int\|none)
+-   `--min-impurity-decrease` (float)
 -   `--max-features` (`auto|sqrt|log2|float|none`)
+-   `--bootstrap` (`true|false`)
+-   `--max-samples` (int\|float\|none, requires `--bootstrap=true`; `1.0` uses all rows)
+-   `--ccp-alpha` (float)
+-   `--n-jobs` (int\|none, estimator fit/predict parallelism)
 
 Example (direct configuration, no tuning):
 
@@ -77,9 +85,9 @@ behavior with:
 
 -   `--tuning-method` (`grid|random`)
 -   `--cv-folds` (int)
--   `--cv-scoring` (`accuracy|f1|f1_macro|roc_auc`)
+-   `--cv-scoring` (`f1_macro|accuracy|roc_auc_ovr`)
 -   `--cv-n-iter` (int, random search only)
--   `--cv-n-jobs` (int, `-1` uses all cores)
+-   `--cv-n-jobs` (int, CV search parallelism, `-1` uses all cores)
 
 Example (grid search):
 

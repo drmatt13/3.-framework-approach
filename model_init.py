@@ -202,8 +202,11 @@ def _should_omit_resolved_key(key: str, values_by_key: dict[str, object]) -> boo
         if key in dependent_keys and enable_key in values_by_key:
             return not _is_truthy(values_by_key[enable_key])
 
-    if key == "rf_max_samples" and "rf_bootstrap" in values_by_key:
-        return not _is_truthy(values_by_key["rf_bootstrap"])
+    if key == "rf_max_samples":
+        if "rf_enable_tuning" in values_by_key and _is_truthy(values_by_key["rf_enable_tuning"]):
+            return True
+        if "rf_bootstrap" in values_by_key:
+            return not _is_truthy(values_by_key["rf_bootstrap"])
 
     # When tuning is enabled, omit direct estimator defaults to simplify summary.
     direct_defaults_by_enable: dict[str, tuple[str, ...]] = {
@@ -477,9 +480,9 @@ def _get_profile_defaults(
                 "mid": 0.0,
                 "mf": "sqrt",
                 "bootstrap": True,
-                "max_samples": None,
+                "max_samples": 1.0,
                 "ccp_alpha": 0.0,
-                "n_jobs": None,
+                "n_jobs": -1,
                 "enable_tuning": False,
                 "tuning_method": "grid",
                 "cv_folds": 5,
@@ -497,9 +500,9 @@ def _get_profile_defaults(
                 "mid": 0.0,
                 "mf": "sqrt",
                 "bootstrap": True,
-                "max_samples": None,
+                "max_samples": 1.0,
                 "ccp_alpha": 0.0,
-                "n_jobs": None,
+                "n_jobs": -1,
                 "enable_tuning": False,
                 "tuning_method": "grid",
                 "cv_folds": 5,
@@ -517,9 +520,9 @@ def _get_profile_defaults(
                 "mid": 0.0,
                 "mf": "sqrt",
                 "bootstrap": True,
-                "max_samples": None,
+                "max_samples": 1.0,
                 "ccp_alpha": 0.0,
-                "n_jobs": None,
+                "n_jobs": -1,
                 "enable_tuning": True,
                 "tuning_method": "grid",
                 "cv_folds": 5,
@@ -545,9 +548,9 @@ def _get_profile_defaults(
             "rf_min_impurity_decrease": str(p["mid"]),
             "rf_max_features": str(p["mf"]),
             "rf_bootstrap": p["bootstrap"],
-            "rf_max_samples": "none" if p["max_samples"] is None else str(p["max_samples"]),
+            "rf_max_samples": str(p["max_samples"]),
             "rf_ccp_alpha": str(p["ccp_alpha"]),
-            "rf_n_jobs": "none" if p["n_jobs"] is None else str(p["n_jobs"]),
+            "rf_n_jobs": str(p["n_jobs"]),
             "rf_enable_tuning": p["enable_tuning"],
             "rf_tuning_method": p["tuning_method"],
             "rf_cv_folds": str(p["cv_folds"]),
@@ -906,9 +909,9 @@ def main() -> int:
                     print("Cancelled.")
                     return 0
                 xgb_cv_n_jobs = _ask_text(
-                    "Enter CV parallel jobs (e.g., -1 for all cores):",
+                    "Enter cv_n_jobs (integer != 0; -1 for all cores):",
                     default="-1",
-                    validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) != 0) else "Must be an integer != 0",
                 )
                 if xgb_cv_n_jobs is None:
                     print("Cancelled.")
@@ -1116,9 +1119,9 @@ def main() -> int:
                         print("Cancelled.")
                         return 0
                 logistic_cv_n_jobs = _ask_text(
-                    "Enter CV parallel jobs (e.g., -1 for all cores):",
+                    "Enter cv_n_jobs (integer != 0; -1 for all cores):",
                     default="-1",
-                    validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) != 0) else "Must be an integer != 0",
                 )
                 if logistic_cv_n_jobs is None:
                     print("Cancelled.")
@@ -1199,9 +1202,9 @@ def main() -> int:
                         print("Cancelled.")
                         return 0
                 rf_cv_n_jobs = _ask_text(
-                    "Enter CV parallel jobs (e.g., -1 for all cores):",
+                    "Enter cv_n_jobs (integer != 0; -1 for all cores):",
                     default="-1",
-                    validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) != 0) else "Must be an integer != 0",
                 )
                 if rf_cv_n_jobs is None:
                     print("Cancelled.")
@@ -1218,7 +1221,7 @@ def main() -> int:
                     return 0
 
                 rf_max_depth_preset = _ask_select(
-                    "Select max_depth preset:",
+                    "Select max_depth:",
                     choices=["16", "32", "64", "unlimited", "custom"],
                 )
                 if rf_max_depth_preset is None:
@@ -1240,7 +1243,7 @@ def main() -> int:
                     rf_max_depth = rf_max_depth_preset
 
                 rf_max_leaf_nodes_preset = _ask_select(
-                    "Select max_leaf_nodes preset:",
+                    "Select max_leaf_nodes:",
                     choices=["unlimited", "64", "128", "256", "512", "custom"],
                 )
                 if rf_max_leaf_nodes_preset is None:
@@ -1298,7 +1301,7 @@ def main() -> int:
                     return 0
 
                 rf_max_features_preset = _ask_select(
-                    "Select max_features preset:",
+                    "Select max_features:",
                     choices=["sqrt", "log2", "auto", "none", "custom"],
                 )
                 if rf_max_features_preset is None:
@@ -1328,8 +1331,8 @@ def main() -> int:
 
                 if rf_bootstrap:
                     rf_max_samples_preset = _ask_select(
-                        "Select max_samples preset:",
-                        choices=["all", "0.8", "0.7", "0.5", "custom"],
+                        "Select max_samples:",
+                        choices=["1.0 (all rows)", "0.8", "0.7", "0.5", "custom"],
                     )
                     if rf_max_samples_preset is None:
                         print("Cancelled.")
@@ -1344,8 +1347,8 @@ def main() -> int:
                         if rf_max_samples is None:
                             print("Cancelled.")
                             return 0
-                    elif rf_max_samples_preset == "all":
-                        rf_max_samples = "none"
+                    elif rf_max_samples_preset == "1.0 (all rows)":
+                        rf_max_samples = "1.0"
                     else:
                         rf_max_samples = rf_max_samples_preset
                 else:
@@ -1360,27 +1363,14 @@ def main() -> int:
                     print("Cancelled.")
                     return 0
 
-                rf_n_jobs_preset = _ask_select(
-                    "Select n_jobs preset:",
-                    choices=["single-core", "all-cores", "custom"],
+                rf_n_jobs = _ask_text(
+                    "Enter n_jobs (integer != 0; -1 for all cores):",
+                    default="-1",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) != 0) else "Must be an integer != 0",
                 )
-                if rf_n_jobs_preset is None:
+                if rf_n_jobs is None:
                     print("Cancelled.")
                     return 0
-
-                if rf_n_jobs_preset == "single-core":
-                    rf_n_jobs = "none"
-                elif rf_n_jobs_preset == "all-cores":
-                    rf_n_jobs = "-1"
-                else:
-                    rf_n_jobs = _ask_text(
-                        "Enter n_jobs (integer != 0, use -1 for all cores):",
-                        default="-1",
-                        validate_fn=lambda s: True if (_is_int(s) and int(s) != 0) else "Must be an integer != 0",
-                    )
-                    if rf_n_jobs is None:
-                        print("Cancelled.")
-                        return 0
         else:
             rf_n_estimators = profile_defaults.get("rf_n_estimators", "300")
             rf_max_depth = profile_defaults.get("rf_max_depth", "16")
@@ -1391,9 +1381,9 @@ def main() -> int:
             rf_min_impurity_decrease = profile_defaults.get("rf_min_impurity_decrease", "0.0")
             rf_max_features = profile_defaults.get("rf_max_features", "sqrt")
             rf_bootstrap = profile_defaults.get("rf_bootstrap", True)
-            rf_max_samples = profile_defaults.get("rf_max_samples", "none")
+            rf_max_samples = profile_defaults.get("rf_max_samples", "1.0")
             rf_ccp_alpha = profile_defaults.get("rf_ccp_alpha", "0.0")
-            rf_n_jobs = profile_defaults.get("rf_n_jobs", "none")
+            rf_n_jobs = profile_defaults.get("rf_n_jobs", "-1")
             rf_enable_tuning = profile_defaults.get("rf_enable_tuning", False)
             rf_tuning_method = profile_defaults.get("rf_tuning_method", "grid")
             rf_cv_folds = profile_defaults.get("rf_cv_folds", "5")
@@ -1571,9 +1561,9 @@ def main() -> int:
                         return 0
 
                 lr_cv_n_jobs = _ask_text(
-                    "Enter CV parallel jobs (e.g., -1 for all cores):",
+                    "Enter cv_n_jobs (integer != 0; -1 for all cores):",
                     default="-1",
-                    validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) != 0) else "Must be an integer != 0",
                 )
                 if lr_cv_n_jobs is None:
                     print("Cancelled.")
