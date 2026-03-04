@@ -34,7 +34,10 @@ from libraries.model_template_helpers import (
 	post_transform_feature_count as _post_transform_feature_count,
 	round_metric as _round_metric_base,
 	select_estimator_params as _select_estimator_params,
+	transformed_feature_names as _transformed_feature_names,
+	validate_artifact_contract as _validate_artifact_contract,
 	validate_etl_outputs as _validate_etl_outputs,
+	write_unified_registry_sqlite as _write_unified_registry_sqlite,
 	write_model_schemas as _write_model_schemas,
 )
 from libraries.linear_regression_search_space import (
@@ -258,6 +261,8 @@ preprocessor = _build_preprocessor(X_train)
 
 # Helper to construct the appropriate regressor based on CLI flags.
 def _base_regressor_from_flags() -> LinearRegression | Ridge | Lasso | ElasticNet:
+	if args.penalty == "auto":
+		return Ridge(alpha=max(float(args.alpha), 1e-3), fit_intercept=args.fit_intercept, random_state=args.random_state)
 	if args.penalty == "none":
 		return LinearRegression(fit_intercept=args.fit_intercept)
 	if args.penalty == "l2":
@@ -591,6 +596,41 @@ print(results)
 		preprocessor=model.named_steps["preprocess"],
 		y_original=y_original,
 	)
+	coefficient_artifacts: dict[str, Path] = {}
+	feature_names = _transformed_feature_names(model.named_steps["preprocess"], X_train)
+	regressor_step = model.named_steps["regressor"]
+	if hasattr(regressor_step, "coef_"):
+		coef_array = np.asarray(getattr(regressor_step, "coef_"), dtype=float).reshape(-1)
+		usable_length = min(len(feature_names), int(coef_array.shape[0]))
+		coefficient_table = pd.DataFrame(
+			{
+				"feature": feature_names[:usable_length],
+				"coefficient": coef_array[:usable_length].tolist(),
+			}
+		)
+		coefficients_csv_path = eval_dir / "coefficients.csv"
+		coefficient_table.to_csv(coefficients_csv_path, index=False)
+		intercept_value = None
+		if hasattr(regressor_step, "intercept_"):
+			intercept_raw = np.asarray(getattr(regressor_step, "intercept_"), dtype=float).reshape(-1)
+			if intercept_raw.size > 0:
+				intercept_value = float(intercept_raw[0])
+		coefficients_summary_path = eval_dir / "coefficients_summary.json"
+		coefficients_summary_path.write_text(
+			json.dumps(
+				{
+					"intercept": _round_metric(intercept_value) if intercept_value is not None else None,
+					"n_coefficients": int(usable_length),
+					"feature_source": "preprocessor.get_feature_names_out",
+				},
+				indent=2,
+			),
+			encoding="utf-8",
+		)
+		coefficient_artifacts = {
+			"eval_coefficients": coefficients_csv_path,
+			"eval_coefficients_summary": coefficients_summary_path,
+		}
 
 	post_transform_feature_count = _post_transform_feature_count(model.named_steps["preprocess"], X_train.iloc[:1])
 	regressor_params = model.named_steps["regressor"].get_params()
@@ -608,6 +648,15 @@ print(results)
 		_lr_param_keys.append("l1_ratio")
 	estimator_params_compact = _select_estimator_params(regressor_params, _lr_param_keys)
 
+	artifacts_for_map = {
+		"model": model_dir / "model.pkl",
+		"preprocess": preprocess_dir / "preprocessor.pkl",
+		"eval_metrics": eval_dir / "metrics.json",
+		"eval_predictions_preview": eval_dir / "predictions_preview.csv",
+		**schema_artifacts,
+		**coefficient_artifacts,
+		"inference_example": inference_dir / "inference_example.py",
+	}
 	run_metadata = {
 		"run_id": run_id,
 		"name": model_name,
@@ -679,17 +728,7 @@ print(results)
 			"random_state_effective": int(args.random_state),
 			"n_jobs": int(args.cv_n_jobs) if tuning_summary["enabled"] else None,
 		},
-		"artifacts": _artifact_map(
-			run_dir,
-			{
-				"model": model_dir / "model.pkl",
-				"preprocess": preprocess_dir / "preprocessor.pkl",
-				"eval_metrics": eval_dir / "metrics.json",
-				"eval_predictions_preview": eval_dir / "predictions_preview.csv",
-				**schema_artifacts,
-				"inference_example": inference_dir / "inference_example.py",
-			},
-		),
+		"artifacts": _artifact_map(run_dir, artifacts_for_map),
 		"versions": {
 			"python": platform.python_version(),
 			"pandas": pd.__version__,
@@ -699,8 +738,26 @@ print(results)
 	run_metadata = _compact_metadata(run_metadata)
 	with (run_dir / "run.json").open("w", encoding="utf-8") as run_file:
 		json.dump(run_metadata, run_file, indent=2)
+	artifact_warnings = _validate_artifact_contract(
+		run_dir=run_dir,
+		artifact_files=artifacts_for_map,
+		run_metadata=run_metadata,
+		metrics=metrics,
+		required_artifact_keys=[
+			"model",
+			"preprocess",
+			"eval_metrics",
+			"eval_predictions_preview",
+			"input_schema",
+			"target_mapping_schema",
+			"inference_example",
+		],
+		warn_only=True,
+	)
+	if artifact_warnings:
+		print(f"Artifact validation warnings: {artifact_warnings}")
 
-	registry_path = model_root_dir / "model_registry.csv"
+	registry_path = model_root_dir / "registry.csv"
 	if registry_path.exists():
 		registry_df = pd.read_csv(registry_path)
 		if "model_id" in registry_df.columns and not registry_df.empty:
@@ -736,5 +793,11 @@ print(results)
 	)
 	registry_df = pd.concat([registry_df, registry_row], ignore_index=True)
 	registry_df.to_csv(registry_path, index=False)
+	_write_unified_registry_sqlite(
+		project_root=_project_root(),
+		run_dir=run_dir,
+		run_metadata=run_metadata,
+		metrics=metrics,
+	)
 
 	print(f"Artifacts exported to: {run_dir}")

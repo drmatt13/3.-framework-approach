@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 from collections import Counter
+import sqlite3
 
 def main() -> int:
     workspace_root = Path.cwd().resolve()
@@ -35,6 +36,14 @@ def main() -> int:
             "algorithm": Counter(),
             "metric_key_signatures": Counter(),
             "runjson_top_level_signatures": Counter(),
+        },
+        "sqlite_registry": {
+            "path": "artifacts/model_registry.sqlite",
+            "exists": False,
+            "runs_count": None,
+            "regression_metrics_count": None,
+            "classification_metrics_count": None,
+            "error": None,
         },
     }
 
@@ -217,6 +226,22 @@ def main() -> int:
         if isinstance(v, Counter):
             results["distributions"][k] = dict(v)
 
+    sqlite_path = Path("artifacts/model_registry.sqlite")
+    results["sqlite_registry"]["exists"] = sqlite_path.exists()
+    if sqlite_path.exists():
+        try:
+            conn = sqlite3.connect(sqlite_path)
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM runs")
+            results["sqlite_registry"]["runs_count"] = int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) FROM regression_metrics")
+            results["sqlite_registry"]["regression_metrics_count"] = int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) FROM classification_metrics")
+            results["sqlite_registry"]["classification_metrics_count"] = int(cur.fetchone()[0])
+            conn.close()
+        except Exception as ex:
+            results["sqlite_registry"]["error"] = str(ex)
+
     analysis_dir = Path("artifacts/analysis")
     analysis_dir.mkdir(parents=True, exist_ok=True)
     out_json = analysis_dir / "artifact_audit_summary.json"
@@ -235,6 +260,7 @@ def main() -> int:
     print("Libraries:", results["distributions"]["library"])
     print("Tasks:", results["distributions"]["task"])
     print("Model IDs:", results["distributions"]["model_id"])
+    print("SQLite registry:", results["sqlite_registry"])
 
     return 0
 

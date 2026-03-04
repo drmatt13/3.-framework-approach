@@ -1,5 +1,7 @@
 from pathlib import Path
 import json
+import sqlite3
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -241,3 +243,260 @@ def write_model_schemas(
     artifacts["target_mapping_schema"] = target_mapping_schema_path
 
     return artifacts
+
+
+def transformed_feature_names(preprocessor, X_frame: pd.DataFrame) -> list[str]:
+    if hasattr(preprocessor, "get_feature_names_out"):
+        try:
+            return [str(name) for name in preprocessor.get_feature_names_out()]
+        except Exception:
+            pass
+    try:
+        transformed = preprocessor.transform(X_frame.iloc[:1])
+        width = int(transformed.shape[1])
+    except Exception:
+        width = int(X_frame.shape[1])
+    return [f"feature_{index}" for index in range(width)]
+
+
+def validate_artifact_contract(
+    *,
+    run_dir: Path,
+    artifact_files: dict[str, Path],
+    run_metadata: dict,
+    metrics: dict,
+    required_artifact_keys: list[str],
+    warn_only: bool = True,
+) -> list[str]:
+    warnings: list[str] = []
+
+    missing_keys = [key for key in required_artifact_keys if key not in artifact_files]
+    if missing_keys:
+        warnings.append(f"Missing artifact keys in map: {missing_keys}")
+
+    missing_files = [key for key, file_path in artifact_files.items() if not file_path.exists()]
+    if missing_files:
+        warnings.append(f"Artifact files not found on disk: {missing_files}")
+
+    expected_run_sections = {
+        "run_id",
+        "name",
+        "timestamp",
+        "library",
+        "task",
+        "algorithm",
+        "estimator_class",
+        "model_id",
+        "dataset",
+        "data_split",
+        "preprocessing",
+        "params",
+        "fit_summary",
+        "artifacts",
+        "versions",
+    }
+    missing_run_sections = sorted(expected_run_sections - set(run_metadata.keys()))
+    if missing_run_sections:
+        warnings.append(f"run.json missing top-level sections: {missing_run_sections}")
+
+    expected_metric_sections = {"train", "test", "data_sizes", "primary_metric", "tuning"}
+    missing_metric_sections = sorted(expected_metric_sections - set(metrics.keys()))
+    if missing_metric_sections:
+        warnings.append(f"metrics.json missing sections: {missing_metric_sections}")
+
+    if warnings and not warn_only:
+        raise ValueError("Artifact contract validation failed: " + " | ".join(warnings))
+
+    if warnings:
+        warning_payload = {
+            "warnings": warnings,
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        (run_dir / "eval").mkdir(parents=True, exist_ok=True)
+        (run_dir / "eval" / "artifact_validation_warnings.json").write_text(
+            json.dumps(warning_payload, indent=2),
+            encoding="utf-8",
+        )
+
+    return warnings
+
+
+def write_unified_registry_sqlite(
+    *,
+    project_root: Path,
+    run_dir: Path,
+    run_metadata: dict,
+    metrics: dict,
+) -> Path:
+    registry_dir = project_root / "artifacts"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    db_path = registry_dir / "model_registry.sqlite"
+
+    connection = sqlite3.connect(db_path)
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runs (
+                run_id TEXT PRIMARY KEY,
+                name TEXT,
+                timestamp TEXT,
+                library TEXT,
+                task TEXT,
+                algorithm TEXT,
+                estimator_class TEXT,
+                model_id TEXT,
+                dataset_path TEXT,
+                dataset_sha256 TEXT,
+                dataset_rows INTEGER,
+                dataset_columns INTEGER,
+                test_size REAL,
+                random_state INTEGER,
+                n_train INTEGER,
+                n_val INTEGER,
+                n_test INTEGER,
+                tuning_enabled INTEGER,
+                tuning_method TEXT,
+                cv_best_score REAL,
+                primary_metric_name TEXT,
+                primary_metric_direction TEXT,
+                primary_metric_value REAL,
+                run_dir TEXT,
+                created_at_utc TEXT
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS regression_metrics (
+                run_id TEXT PRIMARY KEY,
+                mse REAL,
+                mae REAL,
+                rmse REAL,
+                r2 REAL,
+                max_error REAL,
+                FOREIGN KEY(run_id) REFERENCES runs(run_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS classification_metrics (
+                run_id TEXT PRIMARY KEY,
+                accuracy REAL,
+                balanced_accuracy REAL,
+                precision_macro REAL,
+                recall_macro REAL,
+                f1_macro REAL,
+                roc_auc_value REAL,
+                pr_auc_value REAL,
+                log_loss REAL,
+                brier_score REAL,
+                support_total INTEGER,
+                support_by_class_json TEXT,
+                FOREIGN KEY(run_id) REFERENCES runs(run_id)
+            )
+            """
+        )
+
+        dataset = run_metadata.get("dataset", {}) if isinstance(run_metadata.get("dataset"), dict) else {}
+        data_split = run_metadata.get("data_split", {}) if isinstance(run_metadata.get("data_split"), dict) else {}
+        sizes = data_split.get("sizes", {}) if isinstance(data_split.get("sizes"), dict) else {}
+        tuning = run_metadata.get("tuning", {}) if isinstance(run_metadata.get("tuning"), dict) else {}
+        primary_metric = metrics.get("primary_metric", {}) if isinstance(metrics.get("primary_metric"), dict) else {}
+
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO runs (
+                run_id, name, timestamp, library, task, algorithm, estimator_class, model_id,
+                dataset_path, dataset_sha256, dataset_rows, dataset_columns,
+                test_size, random_state, n_train, n_val, n_test,
+                tuning_enabled, tuning_method, cv_best_score,
+                primary_metric_name, primary_metric_direction, primary_metric_value,
+                run_dir, created_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(run_metadata.get("run_id")),
+                str(run_metadata.get("name")),
+                str(run_metadata.get("timestamp")),
+                str(run_metadata.get("library")),
+                str(run_metadata.get("task")),
+                str(run_metadata.get("algorithm")),
+                str(run_metadata.get("estimator_class")),
+                str(run_metadata.get("model_id")),
+                str(dataset.get("path")) if dataset.get("path") is not None else None,
+                str(dataset.get("sha256")) if dataset.get("sha256") is not None else None,
+                int(dataset.get("rows")) if dataset.get("rows") is not None else None,
+                int(dataset.get("columns")) if dataset.get("columns") is not None else None,
+                float(data_split.get("test_size")) if data_split.get("test_size") is not None else None,
+                int(data_split.get("random_state")) if data_split.get("random_state") is not None else None,
+                int(sizes.get("n_train")) if sizes.get("n_train") is not None else None,
+                int(sizes.get("n_val")) if sizes.get("n_val") is not None else None,
+                int(sizes.get("n_test")) if sizes.get("n_test") is not None else None,
+                1 if bool(tuning.get("enabled")) else 0,
+                str(tuning.get("method")) if tuning.get("method") is not None else None,
+                float(tuning.get("best_score")) if tuning.get("best_score") is not None else None,
+                str(primary_metric.get("name")) if primary_metric.get("name") is not None else None,
+                str(primary_metric.get("direction")) if primary_metric.get("direction") is not None else None,
+                float(primary_metric.get("value")) if primary_metric.get("value") is not None else None,
+                str(run_dir.relative_to(project_root)).replace("\\", "/"),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+        task = str(run_metadata.get("task"))
+        test_metrics = metrics.get("test", {}) if isinstance(metrics.get("test"), dict) else {}
+        if task == "regression":
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO regression_metrics (
+                    run_id, mse, mae, rmse, r2, max_error
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(run_metadata.get("run_id")),
+                    float(test_metrics.get("mse")) if test_metrics.get("mse") is not None else None,
+                    float(test_metrics.get("mae")) if test_metrics.get("mae") is not None else None,
+                    float(test_metrics.get("rmse")) if test_metrics.get("rmse") is not None else None,
+                    float(test_metrics.get("r2")) if test_metrics.get("r2") is not None else None,
+                    float(test_metrics.get("max_error")) if test_metrics.get("max_error") is not None else None,
+                ),
+            )
+        else:
+            roc_auc_value = None
+            pr_auc_value = None
+            if isinstance(test_metrics.get("roc_auc"), dict):
+                roc_auc_value = test_metrics.get("roc_auc", {}).get("value")
+            if isinstance(test_metrics.get("pr_auc"), dict):
+                pr_auc_value = test_metrics.get("pr_auc", {}).get("value")
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO classification_metrics (
+                    run_id, accuracy, balanced_accuracy, precision_macro, recall_macro, f1_macro,
+                    roc_auc_value, pr_auc_value, log_loss, brier_score, support_total, support_by_class_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(run_metadata.get("run_id")),
+                    float(test_metrics.get("accuracy")) if test_metrics.get("accuracy") is not None else None,
+                    float(test_metrics.get("balanced_accuracy")) if test_metrics.get("balanced_accuracy") is not None else None,
+                    float(test_metrics.get("precision_macro")) if test_metrics.get("precision_macro") is not None else None,
+                    float(test_metrics.get("recall_macro")) if test_metrics.get("recall_macro") is not None else None,
+                    float(test_metrics.get("f1_macro")) if test_metrics.get("f1_macro") is not None else None,
+                    float(roc_auc_value) if roc_auc_value is not None else None,
+                    float(pr_auc_value) if pr_auc_value is not None else None,
+                    float(test_metrics.get("log_loss")) if test_metrics.get("log_loss") is not None else None,
+                    float(test_metrics.get("brier_score")) if test_metrics.get("brier_score") is not None else None,
+                    int(test_metrics.get("support_total")) if test_metrics.get("support_total") is not None else None,
+                    json.dumps(test_metrics.get("support_by_class"), ensure_ascii=False)
+                    if test_metrics.get("support_by_class") is not None
+                    else None,
+                ),
+            )
+
+        connection.commit()
+    finally:
+        connection.close()
+
+    return db_path

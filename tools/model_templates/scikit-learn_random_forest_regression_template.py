@@ -34,7 +34,9 @@ from libraries.model_template_helpers import (
 	post_transform_feature_count as _post_transform_feature_count,
 	round_metric as _round_metric_base,
 	select_estimator_params as _select_estimator_params,
+	validate_artifact_contract as _validate_artifact_contract,
 	validate_etl_outputs as _validate_etl_outputs,
+	write_unified_registry_sqlite as _write_unified_registry_sqlite,
 	write_model_schemas as _write_model_schemas,
 )
 from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
@@ -660,6 +662,14 @@ print(results)
 		],
 	)
 
+	artifacts_for_map = {
+		"model": model_dir / "model.pkl",
+		"preprocess": preprocess_dir / "preprocessor.pkl",
+		"eval_metrics": eval_dir / "metrics.json",
+		"eval_predictions_preview": eval_dir / "predictions_preview.csv",
+		**schema_artifacts,
+		"inference_example": inference_dir / "inference_example.py",
+	}
 	run_metadata = {
 		"run_id": run_id,
 		"name": model_name,
@@ -739,17 +749,7 @@ print(results)
 			"random_state_effective": int(args.random_state),
 			"n_jobs": model.named_steps["regressor"].get_params().get("n_jobs"),
 		},
-		"artifacts": _artifact_map(
-			run_dir,
-			{
-				"model": model_dir / "model.pkl",
-				"preprocess": preprocess_dir / "preprocessor.pkl",
-				"eval_metrics": eval_dir / "metrics.json",
-				"eval_predictions_preview": eval_dir / "predictions_preview.csv",
-				**schema_artifacts,
-				"inference_example": inference_dir / "inference_example.py",
-			},
-		),
+		"artifacts": _artifact_map(run_dir, artifacts_for_map),
 		"versions": {
 			"python": platform.python_version(),
 			"pandas": pd.__version__,
@@ -759,8 +759,26 @@ print(results)
 	run_metadata = _compact_metadata(run_metadata)
 	with (run_dir / "run.json").open("w", encoding="utf-8") as run_file:
 		json.dump(run_metadata, run_file, indent=2)
+	artifact_warnings = _validate_artifact_contract(
+		run_dir=run_dir,
+		artifact_files=artifacts_for_map,
+		run_metadata=run_metadata,
+		metrics=metrics,
+		required_artifact_keys=[
+			"model",
+			"preprocess",
+			"eval_metrics",
+			"eval_predictions_preview",
+			"input_schema",
+			"target_mapping_schema",
+			"inference_example",
+		],
+		warn_only=True,
+	)
+	if artifact_warnings:
+		print(f"Artifact validation warnings: {artifact_warnings}")
 
-	registry_path = model_root_dir / "model_registry.csv"
+	registry_path = model_root_dir / "registry.csv"
 	if registry_path.exists():
 		registry_df = pd.read_csv(registry_path)
 		if "model_id" in registry_df.columns and not registry_df.empty:
@@ -796,5 +814,11 @@ print(results)
 	)
 	registry_df = pd.concat([registry_df, registry_row], ignore_index=True)
 	registry_df.to_csv(registry_path, index=False)
+	_write_unified_registry_sqlite(
+		project_root=_project_root(),
+		run_dir=run_dir,
+		run_metadata=run_metadata,
+		metrics=metrics,
+	)
 
 	print(f"Artifacts exported to: {run_dir}")

@@ -103,6 +103,6 @@ With `--save-model=true`, the run exports:
 - `data/target_mapping_schema.json`
 - `inference/inference_example.py`
 - `run.json`
-- `model_registry.csv`
+- `registry.csv`
 
 Tuning-enabled runs include CV details (best params, CV scoring, best CV score) in evaluation and run metadata schemas.

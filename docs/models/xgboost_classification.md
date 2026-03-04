@@ -128,7 +128,7 @@ With `--save-model=true`, the run exports:
 -   `data/target_mapping_schema.json`
 -   `inference/inference_example.py`
 -   `run.json`
--   `model_registry.csv`
+-   `registry.csv`
 
 Metrics and run metadata keep `training_control`, `selection`, and
 `tuning` aligned. Tuned runs persist best trial parameters and CV

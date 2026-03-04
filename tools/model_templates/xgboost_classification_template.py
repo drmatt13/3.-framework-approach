@@ -1039,7 +1039,7 @@ print(results)
 	with (run_dir / "run.json").open("w", encoding="utf-8") as run_file:
 		json.dump(run_metadata, run_file, indent=2, allow_nan=False)
 
-	registry_path = model_root_dir / "model_registry.csv"
+	registry_path = model_root_dir / "registry.csv"
 	if registry_path.exists():
 		registry_df = pd.read_csv(registry_path)
 		if "model_id" in registry_df.columns and not registry_df.empty:

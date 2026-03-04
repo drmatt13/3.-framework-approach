@@ -114,7 +114,7 @@ With `--save-model=true`, the run exports:
 -   `data/target_mapping_schema.json`
 -   `inference/inference_example.py`
 -   `run.json`
--   `model_registry.csv`
+-   `registry.csv`
 
 Tuned runs persist best search details in `run.json` under tuning
 metadata.

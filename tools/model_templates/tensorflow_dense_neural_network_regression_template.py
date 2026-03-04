@@ -730,7 +730,7 @@ print("Expected:", expected_y)
 	}
 	(run_dir / "run.json").write_text(json.dumps(_compact_metadata(_json_safe(run_metadata)), indent=2), encoding="utf-8")
 
-	registry_path = model_root_dir / "model_registry.csv"
+	registry_path = model_root_dir / "registry.csv"
 	registry_df = pd.read_csv(registry_path) if registry_path.exists() else pd.DataFrame()
 	next_id = int(registry_df["model_id"].max()) + 1 if ("model_id" in registry_df.columns and not registry_df.empty) else 1
 	registry_row = pd.DataFrame(
