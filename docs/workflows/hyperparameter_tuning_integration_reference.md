@@ -4,15 +4,15 @@ This workflow captures a reusable pattern for introducing template-level hyperpa
 
 ## Scope of This Iteration
 
-Applied for:
+Applied For:
 - `scikit-learn` + `linear_regression`, `logistic_regression`, `random_forest`
 - `xgboost` + `classification`, `regression`
 - `tensorflow` + `dense_nn` (`classification`, `regression`)
 
-Not included:
+Not Included:
 - `tensorflow` + `cnn`
 
-Updated files:
+Updated Files:
 - [model_init.py](model_init.py)
 - [tools/generate_model.py](tools/generate_model.py)
 
@@ -28,7 +28,7 @@ Related template dependency:
 
 ## What Was Updated (and Why)
 
-### 1) Interactive defaults in `model_init.py`
+### 1) Interactive Defaults in `model_init.py`
 
 Added non-CNN tuning defaults to profile/custom flows:
 - linear regression: `default_lr_*`
@@ -38,10 +38,11 @@ Added non-CNN tuning defaults to profile/custom flows:
 - tensorflow dense: `default_tf_*`
 
 Why:
-- Ensures generated model defaults can be configured from interactive setup, not hardcoded in template.
+- Ensures generated model defaults can be configured from interactive setup, not hard-coded in templates.
 - Keeps behavior aligned with existing default injection style used by other model families.
+- Non-TensorFlow custom flows now ask the tuning decision first, and resolved-default output omits direct-fit estimator defaults when tuning is enabled.
 
-### 2) Generator support in `tools/generate_model.py`
+### 2) Generator Support in `tools/generate_model.py`
 
 Added parser + validation + replacement support for non-CNN tuning defaults:
 - New generator flags for logistic/rf/xgb/tf dense tuning defaults
@@ -53,7 +54,7 @@ Why:
 - Creates a complete defaults pipeline: init prompt -> generator args -> replacement values -> rendered model defaults.
 - Prevents invalid flag combinations and keeps templates deterministic.
 
-### 3) Template placeholder parameterization
+### 3) Template Placeholder Parameterization
 
 Changed non-CNN templates to use replacement placeholders for tuning defaults and emit consistent `tuning` metadata.
 
@@ -64,25 +65,25 @@ Why:
 
 Use this checklist when adding tuning support to another model template:
 
-1. Template defaults
+1. Template Defaults
    - Add/confirm tuning runtime flags exist.
    - Replace hardcoded default literals with `{{...}}` placeholders.
 
-2. Generator default map
+2. Generator Default Map
    - Extend model-specific `DEFAULT_*_PARAMS_BY_TEMPLATE` with tuning default keys.
 
-3. Generator parser
+3. Generator Parser
    - Add model-specific `--default-...` tuning flags.
 
-4. Generator validation
+4. Generator Validation
    - Add value-range validation.
    - Add model/library routing restrictions.
 
-5. Template replacements
+5. Template Replacements
    - Resolve defaults from args or map fallback.
    - Inject all tuning placeholders.
 
-6. Interactive setup (`model_init.py`)
+6. Interactive Setup (`model_init.py`)
    - Add profile defaults for tuning knobs.
    - Add custom prompts for tuning knobs.
    - Forward new defaults into generator command.

@@ -57,32 +57,60 @@ from libraries.preprocessing_utils import build_tabular_preprocessor as _build_p
 from libraries.search_utils import cv_scoring_name as _cv_scoring_name, search_space_size as _search_space_size
 from libraries.serialization_utils import json_safe_best_params as _json_safe_best_params
 from libraries.sklearn_template_utils import resolved_n_iter as _resolved_n_iter
+from libraries.logistic_regression_search_space import (
+	LogisticRegressionSearchGridConfig,
+	build_logistic_regression_search_space as _build_search_space,
+)
+from libraries.logistic_compat import (
+	LOGISTIC_SOLVER_PENALTY_COMPAT as _SOLVER_PENALTY_COMPAT,
+	NON_AUTO_LOGISTIC_SOLVERS as _NON_AUTO_LOGISTIC_SOLVERS,
+)
 
 # =============================================================
 # =============== CONFIGURATION / CLI FLAGS ===================
 # =============================================================
 
 # ---------------------------------------------------------------------
-# Supported CLI flags (common usage)
-#   --task binary_classification|multiclass_classification
+# Supported CLI flags (Logistic Regression template)
+#
+# Core run options
 #   --name <model_name>
+#   --artifact-name-mode full|short
 #   --save-model true|false
-#   --random-state <int>
-#   --test-size <float>
-#   --max-iter <int>
-#   --penalty none|l1|l2|elasticnet
-#   --c <float>
-#   --solver lbfgs|liblinear|newton-cg|newton-cholesky|sag|saga
-#   --class-weight none|balanced
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
+#
+# Task + reproducibility
+#   --task binary_classification|multiclass_classification
+#   --random-state <int>
+#   --test-size <float>                  (e.g., 0.2 for 80/20 split)
+#
+# Direct-fit model settings (used when --enable-tuning=false)
+#   --penalty none|l1|l2|elasticnet
+#   --solver lbfgs|liblinear|newton-cg|newton-cholesky|sag|saga
+#   --c <float>                          (inverse regularization strength)
+#   --class-weight none|balanced
+#   --max-iter <int>
+#
+# Hyperparameter tuning
 #   --enable-tuning true|false
+#   --penalty auto|l1|l2|elasticnet
+#   --solver auto|lbfgs|liblinear|newton-cg|newton-cholesky|sag|saga
 #   --tuning-method grid|random
 #   --cv-folds <int>
-#   --cv-scoring accuracy|f1|f1_macro|roc_auc
-#   --cv-n-iter <int>
-#   --cv-n-jobs <int>
+#   --cv-scoring f1_macro|accuracy|roc_auc_ovr
+#   --cv-n-iter <int>                    (random search only)
+#   --cv-n-jobs <int>                    (-1 uses all cores)
 # ---------------------------------------------------------------------
+
+LOGISTIC_SEARCH_GRID_CONFIG = LogisticRegressionSearchGridConfig(
+	c_grid=[0.01, 0.1, 1.0, 10.0],
+	max_iter_grid=[500, 1000, 2000],
+	class_weight_grid=[None, "balanced"],
+	elasticnet_l1_ratio_grid=[0.2, 0.5, 0.8],
+	solver_penalty_compat=_SOLVER_PENALTY_COMPAT,
+	solver_order=_NON_AUTO_LOGISTIC_SOLVERS,
+)
 
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
@@ -92,8 +120,8 @@ DEFAULT_C = float("{{LOGISTIC_C_DEFAULT}}")
 DEFAULT_SOLVER = "{{LOGISTIC_SOLVER_DEFAULT}}"
 DEFAULT_PENALTY = "{{LOGISTIC_PENALTY_DEFAULT}}"
 DEFAULT_CLASS_WEIGHT = "{{LOGISTIC_CLASS_WEIGHT_DEFAULT}}"
-LOGISTIC_SOLVERS = ["lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"]
-LOGISTIC_PENALTIES = ["none", "l1", "l2", "elasticnet"]
+LOGISTIC_SOLVERS = ["auto", *list(_NON_AUTO_LOGISTIC_SOLVERS)]
+LOGISTIC_PENALTIES = ["auto", "none", "l1", "l2", "elasticnet"]
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
 DEFAULT_ENABLE_TUNING = "{{LOGISTIC_ENABLE_TUNING_DEFAULT}}" == "True"
@@ -126,21 +154,23 @@ parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
 parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
 args = parser.parse_args()
 
-# Solver/penalty compatibility validation.
-_SOLVER_PENALTY_COMPAT = {
-	"lbfgs": {"l2", "none"},
-	"liblinear": {"l1", "l2"},
-	"newton-cg": {"l2", "none"},
-	"newton-cholesky": {"l2", "none"},
-	"sag": {"l2", "none"},
-	"saga": {"l1", "l2", "elasticnet", "none"},
-}
-if args.penalty not in _SOLVER_PENALTY_COMPAT.get(args.solver, set()):
-	valid_penalties = sorted(_SOLVER_PENALTY_COMPAT[args.solver])
-	raise ValueError(
-		f"Solver '{args.solver}' does not support penalty='{args.penalty}'. "
-		f"Valid penalties for {args.solver}: {valid_penalties}"
-	)
+if not args.enable_tuning and args.solver == "auto":
+	raise ValueError("--solver=auto requires --enable-tuning=true.")
+if not args.enable_tuning and args.penalty == "auto":
+	raise ValueError("--penalty=auto requires --enable-tuning=true.")
+
+# Solver/penalty compatibility validation (direct-fit path only).
+# When tuning is enabled the search space handles compatibility via
+# separate sub-grids, so we skip this check.  --solver=auto defers
+# solver selection to the tuning search space (or defaults to lbfgs
+# for direct fit).
+if not args.enable_tuning and args.solver != "auto":
+	if args.penalty not in _SOLVER_PENALTY_COMPAT.get(args.solver, set()):
+		valid_penalties = sorted(_SOLVER_PENALTY_COMPAT[args.solver])
+		raise ValueError(
+			f"Solver '{args.solver}' does not support penalty='{args.penalty}'. "
+			f"Valid penalties for {args.solver}: {valid_penalties}"
+		)
 
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
@@ -266,12 +296,16 @@ preprocessor = _build_preprocessor(X_train)
 
 # Bundle preprocessing + model into one inference-ready pipeline.
 # Input to inference should be raw feature columns.
+# Resolve --solver=auto to a concrete solver for the initial pipeline.
+# For direct fit this is the final solver; for tuning it's just a
+# placeholder that the search will override.
+_resolved_solver = args.solver if args.solver != "auto" else "lbfgs"
 penalty_value = "none" if args.penalty == "none" else args.penalty
 class_weight_value = None if args.class_weight == "none" else args.class_weight
 classifier_kwargs = {
 	"penalty": penalty_value,
 	"C": float(args.c),
-	"solver": args.solver,
+	"solver": _resolved_solver,
 	"class_weight": class_weight_value,
 	"max_iter": int(args.max_iter),
 	"random_state": int(args.random_state),
@@ -280,7 +314,7 @@ classifier_kwargs = {
 if penalty_value == "elasticnet":
 	classifier_kwargs["l1_ratio"] = 0.5
 classifier = LogisticRegression(**classifier_kwargs)
-classifier_name = f"LogisticRegression(penalty={penalty_value}, C={float(args.c):.6g}, solver={args.solver}, class_weight={class_weight_value})"
+classifier_name = f"LogisticRegression(penalty={penalty_value}, C={float(args.c):.6g}, solver={_resolved_solver}, class_weight={class_weight_value})"
 
 model = Pipeline(
 	steps=[
@@ -320,43 +354,13 @@ if training_verbose > 0:
 	else:
 		print(f"Training started: {classifier_name}")
 
-def _build_search_space(random_state: int) -> list[dict[str, list]]:
-	common_c = [0.01, 0.1, 1.0, 10.0]
-	common_max_iter = [500, 1000, 2000]
-	return [
-		{
-			"classifier__solver": ["lbfgs", "newton-cg", "sag", "newton-cholesky"],
-			"classifier__penalty": ["none", "l2"],
-			"classifier__C": common_c,
-			"classifier__class_weight": [None, "balanced"],
-			"classifier__max_iter": common_max_iter,
-		},
-		{
-			"classifier__solver": ["liblinear"],
-			"classifier__penalty": ["l1", "l2"],
-			"classifier__C": common_c,
-			"classifier__class_weight": [None, "balanced"],
-			"classifier__max_iter": common_max_iter,
-		},
-		{
-			"classifier__solver": ["saga"],
-			"classifier__penalty": ["l1", "l2", "none"],
-			"classifier__C": common_c,
-			"classifier__class_weight": [None, "balanced"],
-			"classifier__max_iter": common_max_iter,
-		},
-		{
-			"classifier__solver": ["saga"],
-			"classifier__penalty": ["elasticnet"],
-			"classifier__l1_ratio": [0.2, 0.5, 0.8],
-			"classifier__C": common_c,
-			"classifier__class_weight": [None, "balanced"],
-			"classifier__max_iter": common_max_iter,
-		},
-	]
-
 if args.enable_tuning:
-	search_space = _build_search_space(int(args.random_state))
+	search_space = _build_search_space(
+		args.solver,
+		args.penalty,
+		int(args.random_state),
+		LOGISTIC_SEARCH_GRID_CONFIG,
+	)
 	if args.tuning_method == "grid":
 		search = GridSearchCV(
 			estimator=model,
@@ -419,7 +423,7 @@ if training_verbose > 0:
 training_control = {
 	"enabled": bool(tuning_summary["enabled"]),
 	"type": f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
-	"max_steps_configured": tuning_summary["n_candidates"] if args.tuning_method == "grid" else (int(tuning_summary["n_iter"]) if tuning_summary["enabled"] and tuning_summary["n_iter"] is not None else int(args.max_iter)),
+	"max_steps_configured": tuning_summary["n_candidates"] if args.tuning_method == "grid" else (int(tuning_summary["n_iter"]) if tuning_summary["enabled"] and tuning_summary["n_iter"] is not None else None),
 	"steps_completed": int(args.cv_folds) * int(tuning_summary["n_candidates"]) if tuning_summary["enabled"] and tuning_summary["n_candidates"] is not None else (int(resolved_n_iter) if resolved_n_iter is not None else None),
 	"patience": None,
 	"monitor_metric": f"cv_{args.cv_scoring}" if tuning_summary["enabled"] else None,

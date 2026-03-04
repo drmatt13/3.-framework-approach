@@ -26,7 +26,7 @@ Run and export artifacts:
 -   `--random-state` (int): seed used for dataset split and
     reproducibility.
 -   `--test-size` (float): train/test split ratio (e.g., `0.2`).
--   `--optimizer` (`adam|sgd|rmsprop|adagrad|adamw`)
+-   `--optimizer` (`auto|adam|sgd|rmsprop|adagrad|adamw`). `auto` resolves to `adam` for direct-fit; searches all five during tuning.
 -   `--learning-rate` (float)
 -   `--epochs` (int)
 -   `--batch-size` (int)
@@ -47,10 +47,12 @@ When generating via:
 
 Selecting `tensorflow` + `dense_nn` (regression):
 
--   Profile mode (`Quick|Balanced|Thorough`) applies preset defaults and
-    prints a resolved-default summary before generation.
--   `Thorough` is preset to tuning enabled.
--   Custom mode prompts tuning details only when you choose
+-   TensorFlow generation does not use `Quick|Balanced|Thorough`
+    profile selection.
+-   The generator prompts direct training defaults (`optimizer`,
+    `learning-rate`, `epochs`, `batch-size`) first, then asks whether to
+    enable tuning.
+-   Tuning details are prompted only when you choose
     `Enable hyperparameter tuning = true`.
 -   Random search iteration count (`--cv-n-iter`) is requested only when
     tuning is enabled.

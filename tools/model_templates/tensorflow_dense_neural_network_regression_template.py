@@ -45,23 +45,35 @@ from libraries.tensorflow_template_utils import build_dense_regressor as _build_
 
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
-#   --task regression
+#
+#   Run + Artifacts + Logging
 #   --name <model_name>
 #   --save-model true|false
+#   --verbose 0|1|2|auto
+#   --metric-decimals <int>
+#
+#   Reproducibility + Data Split
+#   --task regression
 #   --random-state <int>
-#   --test-size <float>
-#   --optimizer adam|sgd|rmsprop|adagrad|adamw
+#   --test-size <float> (e.g., 0.2 for 80/20 split)
+#
+#   Model Configuration (direct-fit)
+#   --optimizer auto|adam|sgd|rmsprop|adagrad|adamw
+#       auto  — resolves to adam for direct-fit; searches all five during tuning
+#       When tuning: constrains the candidate optimizer list to the selected value.
 #   --learning-rate <float>
 #   --epochs <int>
 #   --batch-size <int>
+#
+#   Training Path
 #   --early-stopping true|false
 #   --validation-fraction <float>
 #   --n-iter-no-change <int>
-#   --verbose 0|1|2|auto
-#   --metric-decimals <int>
 #   --enable-tuning true|false
-#   --tuning-method grid|random
-#   --cv-scoring rmse|mae|r2
+#
+#   Tuning-specific (only when --enable-tuning=true)
+#   --tuning-method random
+#   --cv-scoring rmse
 #   --cv-n-iter <int>
 # ---------------------------------------------------------------------
 
@@ -89,7 +101,7 @@ parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
-parser.add_argument("--optimizer", choices=["adam", "sgd", "rmsprop", "adagrad", "adamw"], default=DEFAULT_OPTIMIZER_NAME)
+parser.add_argument("--optimizer", choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"], default=DEFAULT_OPTIMIZER_NAME)
 parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
 parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
 parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
@@ -287,9 +299,10 @@ tf.keras.utils.set_random_seed(int(args.random_state))
 # ---------------------------------------------------------------------
 
 # Adjust the architecture and hyperparameters of the model as needed for your dataset/task.
+_ALL_OPTIMIZERS = ["adam", "sgd", "rmsprop", "adagrad", "adamw"]
 selected_hidden_layers = [128, 64, 32]
 selected_dropout = 0.0
-selected_optimizer = args.optimizer
+selected_optimizer = "adam" if args.optimizer == "auto" else args.optimizer
 selected_learning_rate = float(args.learning_rate)
 tuning_summary = {
 	"enabled": False,
@@ -317,9 +330,10 @@ if args.enable_tuning:
 		test_size=float(args.validation_fraction),
 		random_state=int(args.random_state),
 	)
+	_tuning_optimizers = _ALL_OPTIMIZERS if args.optimizer == "auto" else [args.optimizer]
 	candidates = [
 		{"optimizer": opt, "learning_rate": lr, "batch_size": bs, "hidden_layers": hl, "dropout": dr}
-		for opt in ["adam", "sgd", "rmsprop", "adagrad", "adamw"]
+		for opt in _tuning_optimizers
 		for lr in [1e-4, 3e-4, 1e-3, 3e-3]
 		for bs in [16, 32, 64]
 		for hl in ([128, 64], [128, 64, 32], [256, 128, 64])

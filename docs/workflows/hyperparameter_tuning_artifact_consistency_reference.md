@@ -1,6 +1,6 @@
 # Hyperparameter Tuning Artifact Consistency Reference
 
-This reference documents artifact-quality rules used for hyperparameter tuning across non-CNN templates (`scikit-learn`, `xgboost`, and `tensorflow dense`) and provides a repeatable rollout pattern for new templates.
+This reference documents artifact quality rules used for hyperparameter tuning across non-CNN templates (`scikit-learn`, `xgboost`, and `tensorflow dense`) and provides a repeatable rollout pattern for new templates.
 
 ## Why This Reference Exists
 
@@ -8,11 +8,11 @@ During tuning integration, artifact export failed with:
 
 - `TypeError: Object of type Ridge is not JSON serializable`
 
-Root cause:
+Root Cause:
 - `best_params` from CV search included estimator objects (for example, `"regressor": Ridge(...)`) that were written into `metrics.json` / `run.json`.
 - JSON serialization failed because estimator instances are not JSON-safe by default.
 
-Additional issue found during validation:
+Additional Issue Found During Validation:
 - The non-tuning path did not call `model.fit(...)`, causing `NotFittedError` before artifact export.
 
 ## What Was Updated (Non-CNN Templates)
@@ -28,7 +28,7 @@ Representative files:
 - [tools/model_templates/tensorflow_dense_neural_network_regression_template.py](tools/model_templates/tensorflow_dense_neural_network_regression_template.py)
 
 Changes:
-1. Added JSON-safe tuning-param sanitization helpers:
+1. Added JSON-safe tuning-parameter sanitization helpers:
    - `_json_safe_param_value(...)`
    - `_json_safe_best_params(...)`
 2. In tuning flow:
@@ -54,7 +54,7 @@ For consistency with current schema standards:
   - MUST include training/evaluation context and `artifacts` map
   - SHOULD include mirrored tuning summary and tuned execution params
 
-JSON safety rules:
+JSON-Safety Rules:
 - Never write estimator objects directly to JSON.
 - Convert estimator instances to stable strings (class names).
 - Normalize numpy scalars to Python `int`/`float`/`bool`.
@@ -64,22 +64,22 @@ JSON safety rules:
 
 When adding tuning to any template:
 
-1. **Keep train-time vs artifact-time values separate**
+1. **Keep Train-Time vs Artifact-Time Values Separate**
    - Use raw values for `model.set_params(...)`
    - Use JSON-safe transformed values for artifact payloads
 
-2. **Guarantee both execution paths are fit**
+2. **Guarantee Both Execution Paths Are Fit**
    - Tuning path: search -> set best params -> fit
    - Non-tuning path: direct fit
 
-3. **Keep tuning metadata compact and deterministic**
+3. **Keep Tuning Metadata Compact and Deterministic**
    - Include only meaningful keys
    - Omit/`null` fields that are not applicable
 
-4. **Mirror key fields across `metrics.json` and `run.json`**
+4. **Mirror Key Fields Across `metrics.json` and `run.json`**
    - Prevent drift between quick-eval and registry metadata
 
-5. **Validate with at least 3 scenarios**
+5. **Validate With at Least 3 Scenarios**
    - Non-tuned run
    - Grid search tuned run
    - Random search tuned run

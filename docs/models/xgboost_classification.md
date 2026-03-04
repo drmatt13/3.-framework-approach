@@ -21,7 +21,7 @@ Run and export artifacts:
 -   `--name` (string): model name used for artifact folder naming.
 -   `--artifact-name-mode` (`full|short`): artifact run folder naming
     style.
--   `--booster` (`gbtree|gblinear|dart`)
+-   `--booster` (`auto|gbtree|gblinear|dart`). `auto` resolves to `gbtree` for direct-fit; searches all three during tuning. The search space is constrained to the selected booster family (tree-specific params excluded for `gblinear`).
 -   `--device` (`auto|cpu|gpu`): for this template architecture, `gpu` is downgraded once at startup to CPU to avoid repeated XGBoost CPU/GPU mismatch fallback warnings.
 -   `--save-model` (`true|false`)
 -   `--random-state` (int)
@@ -54,8 +54,11 @@ Selecting `xgboost` + classification:
 -   Profile mode (`Quick|Balanced|Thorough`) applies preset defaults and
     prints a resolved-default summary before generation.
 -   `Thorough` is preset to tuning enabled.
--   Custom mode prompts tuning details only when you choose
-    `Enable hyperparameter tuning = true`.
+-   Custom mode asks `Enable hyperparameter tuning` before direct-fit
+    estimator defaults.
+-   When tuning is enabled in Custom mode, direct-fit estimator
+    defaults are auto-defaulted and omitted from the resolved-default
+    summary.
 -   Random search iteration count (`--cv-n-iter`) is requested only when
     tuning is enabled.
 

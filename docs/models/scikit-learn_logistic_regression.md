@@ -43,10 +43,19 @@ When generating via `python .\model_init.py` for `scikit-learn` +
 -   Profile mode (`Quick|Balanced|Thorough`) applies preset defaults and
     prints a resolved-default summary before generation.
 -   `Thorough` is preset to tuning enabled.
--   Custom mode asks tuning details only when you choose
-    `Enable hyperparameter tuning = true`.
+-   Custom mode asks `Enable hyperparameter tuning` before direct-fit
+    estimator defaults.
+-   In Custom mode, penalty is selected first in both tuning states, and
+    solver options are then derived from solver/penalty compatibility.
+    Example: `penalty=l1` yields `liblinear|saga`; `penalty=elasticnet`
+    yields `saga`.
+-   When tuning is enabled in Custom mode, direct-fit estimator
+    defaults are auto-defaulted and omitted from the resolved-default
+    summary.
 -   In Custom mode, `--cv-n-iter` is asked only when tuning method is
     `random`.
+-   In Custom mode, when tuning is enabled, `penalty=none` is not
+    offered.
 -   If you pick a `penalty` that is incompatible with the chosen
     `solver`, the template (or your generator validation) should force a
     compatible combination.
@@ -59,10 +68,10 @@ cross-validation search.
 These are applied directly to the estimator when tuning is disabled
 (`--enable-tuning=false`):
 
--   `--penalty` (`none|l1|l2|elasticnet`)
+-   `--penalty` (`auto|none|l1|l2|elasticnet`). `auto` requires `--enable-tuning=true` and searches all penalty families.
 -   `--c` (float, inverse regularization strength; smaller = more
     regularization)
--   `--solver` (`lbfgs|liblinear|newton-cg|newton-cholesky|sag|saga`)
+-   `--solver` (`auto|lbfgs|liblinear|newton-cg|newton-cholesky|sag|saga`). `auto` requires `--enable-tuning=true` and searches all solvers during tuning. Both `--solver` and `--penalty` constrain the CV search space to compatible combinations. Compatibility is shared between `model_init.py` and the template runtime.
 -   `--class-weight` (`none|balanced`)
 
 Example (direct configuration, no tuning):
@@ -80,6 +89,7 @@ When tuning is enabled (`--enable-tuning=true`), configure search
 behavior with:
 
 -   `--tuning-method` (`grid|random`)
+-   `--penalty=none` is not allowed when `--enable-tuning=true`.
 -   `--cv-folds` (int, number of CV folds)
 -   `--cv-scoring` (`accuracy|f1|f1_macro|roc_auc`)
     -   `accuracy` -\> `accuracy`

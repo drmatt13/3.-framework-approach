@@ -2,6 +2,10 @@ import subprocess
 import sys
 from pathlib import Path
 from prompt_toolkit.styles import Style
+from libraries.logistic_compat import (
+    NON_AUTO_LOGISTIC_SOLVERS,
+    compatible_solvers_for_penalty,
+)
 
 try:
     import questionary
@@ -22,12 +26,12 @@ TASKS_BY_LIBRARY_MODEL = {
     ("xgboost", None): ["regression", "binary_classification", "multiclass_classification"],
 }
 
-XGBOOST_BOOSTERS = ["gbtree", "gblinear", "dart"]
+XGBOOST_BOOSTERS = ["auto", "gbtree", "gblinear", "dart"]
 XGBOOST_DEVICE_DEFAULTS = ["cpu", "gpu"]
-SKLEARN_LOGISTIC_SOLVERS = ["lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"]
+SKLEARN_LOGISTIC_SOLVERS = ["auto", *list(NON_AUTO_LOGISTIC_SOLVERS)]
 
 # Only meaningful for TensorFlow models (gradient-based training)
-TENSORFLOW_OPTIMIZERS = ["adam", "sgd", "rmsprop", "adagrad", "adamw"]
+TENSORFLOW_OPTIMIZERS = ["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"]
 
 STARTER_DATASETS_BY_TASK = {
     "regression": ["ames_housing.csv", "california_housing.csv", "insurance.csv"],
@@ -96,6 +100,36 @@ def _is_int(s: str) -> bool:
         return False
 
 
+def _is_optional_positive_int_text(s: str) -> bool:
+    v = s.strip().lower()
+    return v in {"none", "null"} or (_is_int(v) and int(v) > 0)
+
+
+def _is_optional_nonzero_int_text(s: str) -> bool:
+    v = s.strip().lower()
+    return v in {"none", "null"} or (_is_int(v) and int(v) != 0)
+
+
+def _is_rf_max_features_text(s: str) -> bool:
+    v = s.strip().lower()
+    if v in {"auto", "sqrt", "log2", "none"}:
+        return True
+    if not _is_float(v):
+        return False
+    return 0.0 < float(v) <= 1.0
+
+
+def _is_rf_max_samples_text(s: str) -> bool:
+    v = s.strip().lower()
+    if v in {"none", "null"}:
+        return True
+    if _is_int(v):
+        return int(v) > 0
+    if _is_float(v):
+        return 0.0 < float(v) <= 1.0
+    return False
+
+
 def _stringify_setting(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -111,6 +145,23 @@ def _is_truthy(value) -> bool:
 
 
 def _should_omit_resolved_key(key: str, values_by_key: dict[str, object]) -> bool:
+    # Hide random-search iteration settings when tuning is disabled or method is grid.
+    n_iter_by_method: tuple[tuple[str, str], ...] = (
+        ("xgb_cv_n_iter", "xgb_tuning_method"),
+        ("logistic_cv_n_iter", "logistic_tuning_method"),
+        ("rf_cv_n_iter", "rf_tuning_method"),
+        ("lr_cv_n_iter", "lr_tuning_method"),
+        ("tf_cv_n_iter", "tf_tuning_method"),
+    )
+    for n_iter_key, method_key in n_iter_by_method:
+        if key == n_iter_key:
+            enable_key = f"{n_iter_key.removesuffix('_cv_n_iter')}_enable_tuning"
+            if enable_key in values_by_key and not _is_truthy(values_by_key[enable_key]):
+                return True
+            if method_key in values_by_key:
+                return str(values_by_key[method_key]).strip().lower() == "grid"
+            return False
+
     tuning_dependencies: dict[str, tuple[str, ...]] = {
         "xgb_enable_tuning": (
             "xgb_tuning_method",
@@ -151,17 +202,8 @@ def _should_omit_resolved_key(key: str, values_by_key: dict[str, object]) -> boo
         if key in dependent_keys and enable_key in values_by_key:
             return not _is_truthy(values_by_key[enable_key])
 
-    # Hide random-search iteration settings when method is grid.
-    n_iter_by_method: tuple[tuple[str, str], ...] = (
-        ("xgb_cv_n_iter", "xgb_tuning_method"),
-        ("logistic_cv_n_iter", "logistic_tuning_method"),
-        ("rf_cv_n_iter", "rf_tuning_method"),
-        ("lr_cv_n_iter", "lr_tuning_method"),
-        ("tf_cv_n_iter", "tf_tuning_method"),
-    )
-    for n_iter_key, method_key in n_iter_by_method:
-        if key == n_iter_key and method_key in values_by_key:
-            return str(values_by_key[method_key]).strip().lower() == "grid"
+    if key == "rf_max_samples" and "rf_bootstrap" in values_by_key:
+        return not _is_truthy(values_by_key["rf_bootstrap"])
 
     # When tuning is enabled, omit direct estimator defaults to simplify summary.
     direct_defaults_by_enable: dict[str, tuple[str, ...]] = {
@@ -177,15 +219,21 @@ def _should_omit_resolved_key(key: str, values_by_key: dict[str, object]) -> boo
         ),
         "logistic_enable_tuning": (
             "c",
-            "solver",
-            "logistic_penalty",
             "logistic_class_weight",
         ),
         "rf_enable_tuning": (
             "rf_n_estimators",
             "rf_max_depth",
+            "rf_min_samples_split",
             "rf_min_samples_leaf",
+            "rf_min_weight_fraction_leaf",
+            "rf_max_leaf_nodes",
+            "rf_min_impurity_decrease",
             "rf_max_features",
+            "rf_bootstrap",
+            "rf_max_samples",
+            "rf_ccp_alpha",
+            "rf_n_jobs",
         ),
         "lr_enable_tuning": (
             "lr_alpha",
@@ -209,8 +257,16 @@ def _resolved_display_key(key: str) -> str:
         "logistic_class_weight": "class_weight",
         "rf_n_estimators": "n_estimators",
         "rf_max_depth": "max_depth",
+        "rf_min_samples_split": "min_samples_split",
         "rf_min_samples_leaf": "min_samples_leaf",
+        "rf_min_weight_fraction_leaf": "min_weight_fraction_leaf",
+        "rf_max_leaf_nodes": "max_leaf_nodes",
+        "rf_min_impurity_decrease": "min_impurity_decrease",
         "rf_max_features": "max_features",
+        "rf_bootstrap": "bootstrap",
+        "rf_max_samples": "max_samples",
+        "rf_ccp_alpha": "ccp_alpha",
+        "rf_n_jobs": "n_jobs",
         "lr_penalty": "penalty",
         "lr_alpha": "alpha",
         "lr_fit_intercept": "fit_intercept",
@@ -243,6 +299,14 @@ def _supports_early_stopping_defaults(library: str, model: str | None, task: str
     return False
 
 
+def _supports_validation_n_iter_defaults(library: str, model: str | None, task: str) -> bool:
+    if library == "tensorflow" and model == "dense_nn":
+        return True
+    if library == "xgboost":
+        return True
+    return False
+
+
 def _supports_max_iter(library: str, model: str | None, task: str) -> bool:
     return library == "scikit-learn" and model == "logistic_regression" and task in {
         "binary_classification",
@@ -256,6 +320,10 @@ def _recommended_es_defaults(library: str, model: str | None) -> tuple[bool, flo
     if library == "tensorflow" and model == "dense_nn":
         return True, 0.1, 5
     return True, 0.1, 5
+
+
+def _xgb_booster_uses_tree_params(booster: str | None) -> bool:
+    return booster in {"gbtree", "dart", "auto"}
 
 
 # ---------------------------------------------------------
@@ -402,8 +470,16 @@ def _get_profile_defaults(
             "Quick": {
                 "n_est": 100,
                 "depth": 8,
-                "msl": 5,
+                "mss": 4,
+                "msl": 2,
+                "mwfl": 0.0,
+                "mln": None,
+                "mid": 0.0,
                 "mf": "sqrt",
+                "bootstrap": True,
+                "max_samples": None,
+                "ccp_alpha": 0.0,
+                "n_jobs": None,
                 "enable_tuning": False,
                 "tuning_method": "grid",
                 "cv_folds": 5,
@@ -414,8 +490,16 @@ def _get_profile_defaults(
             "Balanced": {
                 "n_est": 300,
                 "depth": 16,
-                "msl": 1,
+                "mss": 4,
+                "msl": 2,
+                "mwfl": 0.0,
+                "mln": None,
+                "mid": 0.0,
                 "mf": "sqrt",
+                "bootstrap": True,
+                "max_samples": None,
+                "ccp_alpha": 0.0,
+                "n_jobs": None,
                 "enable_tuning": False,
                 "tuning_method": "grid",
                 "cv_folds": 5,
@@ -426,8 +510,16 @@ def _get_profile_defaults(
             "Thorough": {
                 "n_est": 500,
                 "depth": 32,
-                "msl": 1,
+                "mss": 4,
+                "msl": 2,
+                "mwfl": 0.0,
+                "mln": None,
+                "mid": 0.0,
                 "mf": "sqrt",
+                "bootstrap": True,
+                "max_samples": None,
+                "ccp_alpha": 0.0,
+                "n_jobs": None,
                 "enable_tuning": True,
                 "tuning_method": "grid",
                 "cv_folds": 5,
@@ -446,8 +538,16 @@ def _get_profile_defaults(
         defaults = {
             "rf_n_estimators": str(p["n_est"]),
             "rf_max_depth": str(p["depth"]),
+            "rf_min_samples_split": str(p["mss"]),
             "rf_min_samples_leaf": str(p["msl"]),
+            "rf_min_weight_fraction_leaf": str(p["mwfl"]),
+            "rf_max_leaf_nodes": "none" if p["mln"] is None else str(p["mln"]),
+            "rf_min_impurity_decrease": str(p["mid"]),
             "rf_max_features": str(p["mf"]),
+            "rf_bootstrap": p["bootstrap"],
+            "rf_max_samples": "none" if p["max_samples"] is None else str(p["max_samples"]),
+            "rf_ccp_alpha": str(p["ccp_alpha"]),
+            "rf_n_jobs": "none" if p["n_jobs"] is None else str(p["n_jobs"]),
             "rf_enable_tuning": p["enable_tuning"],
             "rf_tuning_method": p["tuning_method"],
             "rf_cv_folds": str(p["cv_folds"]),
@@ -624,27 +724,9 @@ def main() -> int:
             print("Cancelled.")
             return 0
 
-    # Optional xgboost booster selection
+    # Optional xgboost defaults (asked after tuning mode is known)
     booster = None
     device = None
-    if library == "xgboost":
-        booster = _ask_select(
-            "Default xgboost booster:",
-            choices=XGBOOST_BOOSTERS,
-        )
-
-        if booster is None:
-            print("Cancelled.")
-            return 0
-
-        device = _ask_select(
-            "Default xgboost device for generated template:",
-            choices=XGBOOST_DEVICE_DEFAULTS,
-        )
-
-        if device is None:
-            print("Cancelled.")
-            return 0
 
     # Optional starter dataset selection (task-aware)
     starter_dataset = None
@@ -690,44 +772,6 @@ def main() -> int:
     epochs = None
     batch_size = None
 
-    if library == "tensorflow":
-        optimizer = _ask_select(
-            "Select optimizer:",
-            choices=TENSORFLOW_OPTIMIZERS,
-        )
-        if optimizer is None:
-            print("Cancelled.")
-            return 0
-
-        tf_learning_rate = _ask_text(
-            "Enter learning rate (e.g., 0.001):",
-            default="0.001",
-            validate_fn=lambda s: True
-            if (_is_float(s) and float(s) > 0)
-            else "Must be a positive number",
-        )
-        if tf_learning_rate is None:
-            print("Cancelled.")
-            return 0
-
-        epochs = _ask_text(
-            "Enter epochs (e.g., 100):",
-            default="100",
-            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-        )
-        if epochs is None:
-            print("Cancelled.")
-            return 0
-
-        batch_size = _ask_text(
-            "Enter batch size (e.g., 32):",
-            default="32",
-            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-        )
-        if batch_size is None:
-            print("Cancelled.")
-            return 0
-
     early_stopping = None
     validation_fraction = None
     n_iter_no_change = None
@@ -741,8 +785,16 @@ def main() -> int:
     solver = None
     rf_n_estimators = None
     rf_max_depth = None
+    rf_min_samples_split = None
     rf_min_samples_leaf = None
+    rf_min_weight_fraction_leaf = None
+    rf_max_leaf_nodes = None
+    rf_min_impurity_decrease = None
     rf_max_features = None
+    rf_bootstrap = None
+    rf_max_samples = None
+    rf_ccp_alpha = None
+    rf_n_jobs = None
     logistic_penalty = None
     logistic_class_weight = None
     logistic_enable_tuning = None
@@ -786,6 +838,14 @@ def main() -> int:
 
     if library == "xgboost":
         if use_custom:
+            booster = _ask_select(
+                "Select xgboost booster family:",
+                choices=["gbtree", "gblinear", "dart"],
+            )
+            if booster is None:
+                print("Cancelled.")
+                return 0
+
             xgb_enable_tuning = questionary.confirm(
                 "Enable hyperparameter tuning by default? (--enable-tuning)",
                 default=False,
@@ -796,9 +856,34 @@ def main() -> int:
                 return 0
 
             if xgb_enable_tuning:
+                enable_auto_booster = questionary.confirm(
+                    "Allow tuning to search across booster families (--booster auto)?",
+                    default=False,
+                    style=CUSTOM_STYLE,
+                ).ask()
+                if enable_auto_booster is None:
+                    print("Cancelled.")
+                    return 0
+                if enable_auto_booster:
+                    booster = "auto"
+                    print("Note: booster=auto enables cross-family search in tuning.")
+                else:
+                    print(
+                        f"Note: tuning search will stay within the selected booster family ({booster})."
+                    )
+
+            device = _ask_select(
+                "Select xgboost device:",
+                choices=XGBOOST_DEVICE_DEFAULTS,
+            )
+            if device is None:
+                print("Cancelled.")
+                return 0
+
+            if xgb_enable_tuning:
                 xgb_tuning_method = "random"
                 xgb_cv_folds = _ask_text(
-                    "Default CV folds (--cv-folds, >=2):",
+                    "Enter CV folds (>=2):",
                     default="5",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
                 )
@@ -806,14 +891,14 @@ def main() -> int:
                     print("Cancelled.")
                     return 0
                 xgb_cv_scoring = _ask_select(
-                    "Default CV scoring (--cv-scoring):",
+                    "Select CV scoring metric:",
                     choices=["rmse", "mae", "r2"] if task == "regression" else ["f1_macro", "accuracy", "roc_auc_ovr"],
                 )
                 if xgb_cv_scoring is None:
                     print("Cancelled.")
                     return 0
                 xgb_cv_n_iter = _ask_text(
-                    "Default random-search iterations (--cv-n-iter, >0):",
+                    "Enter random-search iterations (>0):",
                     default="20",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                 )
@@ -821,7 +906,7 @@ def main() -> int:
                     print("Cancelled.")
                     return 0
                 xgb_cv_n_jobs = _ask_text(
-                    "Default CV parallel jobs (--cv-n-jobs, e.g., -1):",
+                    "Enter CV parallel jobs (e.g., -1 for all cores):",
                     default="-1",
                     validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
                 )
@@ -831,7 +916,7 @@ def main() -> int:
 
             if not xgb_enable_tuning:
                 n_estimators = _ask_text(
-                    "Default n_estimators for template --n-estimators:",
+                    "Enter n_estimators:",
                     default="300",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                 )
@@ -840,7 +925,7 @@ def main() -> int:
                     return 0
 
                 learning_rate = _ask_text(
-                    "Default learning rate for template --learning-rate:",
+                    "Enter learning rate:",
                     default="0.1",
                     validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
                 )
@@ -848,44 +933,51 @@ def main() -> int:
                     print("Cancelled.")
                     return 0
 
-                max_depth = _ask_text(
-                    "Default max depth for template --max-depth:",
-                    default="6",
-                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-                )
-                if max_depth is None:
-                    print("Cancelled.")
-                    return 0
+                if _xgb_booster_uses_tree_params(booster):
+                    max_depth = _ask_text(
+                        "Enter max depth:",
+                        default="6",
+                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                    )
+                    if max_depth is None:
+                        print("Cancelled.")
+                        return 0
 
-                subsample = _ask_text(
-                    "Default subsample for template --subsample (0 < value <= 1):",
-                    default="1.0",
-                    validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
-                )
-                if subsample is None:
-                    print("Cancelled.")
-                    return 0
+                    subsample = _ask_text(
+                        "Enter subsample (0 < value <= 1):",
+                        default="1.0",
+                        validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
+                    )
+                    if subsample is None:
+                        print("Cancelled.")
+                        return 0
 
-                colsample_bytree = _ask_text(
-                    "Default colsample_bytree for template --colsample-bytree (0 < value <= 1):",
-                    default="1.0",
-                    validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
-                )
-                if colsample_bytree is None:
-                    print("Cancelled.")
-                    return 0
+                    colsample_bytree = _ask_text(
+                        "Enter colsample_bytree (0 < value <= 1):",
+                        default="1.0",
+                        validate_fn=lambda s: True if (_is_float(s) and 0 < float(s) <= 1.0) else "Must be in range (0, 1]",
+                    )
+                    if colsample_bytree is None:
+                        print("Cancelled.")
+                        return 0
 
-                xgb_min_child_weight = _ask_text(
-                    "Default min_child_weight for template --min-child-weight:",
-                    default="1.0",
-                    validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0) else "Must be a non-negative number",
-                )
-                if xgb_min_child_weight is None:
-                    print("Cancelled.")
-                    return 0
+                    xgb_min_child_weight = _ask_text(
+                        "Enter min_child_weight:",
+                        default="1.0",
+                        validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
+                    )
+                    if xgb_min_child_weight is None:
+                        print("Cancelled.")
+                        return 0
+                else:
+                    max_depth = None
+                    subsample = None
+                    colsample_bytree = None
+                    xgb_min_child_weight = None
+                    print("Note: booster=gblinear ignores tree-only params (max_depth/subsample/colsample_bytree/min_child_weight).")
 
                 xgb_reg_lambda = _ask_text(
-                    "Default reg_lambda (L2) for template --reg-lambda:",
+                    "Enter reg_lambda (L2 regularization):",
                     default="1.0",
                     validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0) else "Must be a non-negative number",
                 )
@@ -894,7 +986,7 @@ def main() -> int:
                     return 0
 
                 xgb_reg_alpha = _ask_text(
-                    "Default reg_alpha (L1) for template --reg-alpha:",
+                    "Enter reg_alpha (L1 regularization):",
                     default="0.0",
                     validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0) else "Must be a non-negative number",
                 )
@@ -920,6 +1012,36 @@ def main() -> int:
             xgb_cv_n_iter = profile_defaults.get("xgb_cv_n_iter", "20")
             xgb_cv_n_jobs = profile_defaults.get("xgb_cv_n_jobs", "-1")
 
+            booster_choices = ["gbtree", "auto", "gblinear", "dart"] if _is_truthy(xgb_enable_tuning) else ["gbtree", "gblinear", "dart"]
+            booster = _ask_select(
+                "Select xgboost booster:",
+                choices=booster_choices,
+            )
+            if booster is None:
+                print("Cancelled.")
+                return 0
+
+            if _is_truthy(xgb_enable_tuning):
+                if booster == "auto":
+                    print("Note: booster=auto enables cross-family search in tuning.")
+                else:
+                    print(
+                        f"Note: tuning search will stay within the selected booster family ({booster})."
+                    )
+            elif not _xgb_booster_uses_tree_params(booster):
+                max_depth = None
+                subsample = None
+                colsample_bytree = None
+                xgb_min_child_weight = None
+
+            device = _ask_select(
+                "Select xgboost device:",
+                choices=XGBOOST_DEVICE_DEFAULTS,
+            )
+            if device is None:
+                print("Cancelled.")
+                return 0
+
     if library == "scikit-learn" and model == "logistic_regression":
         if use_custom:
             logistic_enable_tuning = questionary.confirm(
@@ -931,16 +1053,46 @@ def main() -> int:
                 print("Cancelled.")
                 return 0
 
+            penalty_choices = ["auto", "l1", "l2", "elasticnet"] if logistic_enable_tuning else ["none", "l1", "l2", "elasticnet"]
+            logistic_penalty = _ask_select(
+                "Select penalty:",
+                choices=penalty_choices,
+            )
+            if logistic_penalty is None:
+                print("Cancelled.")
+                return 0
+
+            if logistic_enable_tuning and logistic_penalty == "auto":
+                solver_choices = SKLEARN_LOGISTIC_SOLVERS
+            else:
+                non_auto_solver_choices = compatible_solvers_for_penalty(logistic_penalty)
+                solver_choices = ["auto", *non_auto_solver_choices] if logistic_enable_tuning else non_auto_solver_choices
+
+            if len(solver_choices) == 1:
+                solver = solver_choices[0]
+                print(
+                    f"Note: penalty={logistic_penalty} constrains "
+                    f"solver to '{solver}'."
+                )
+            else:
+                solver = _ask_select(
+                    "Select solver:",
+                    choices=solver_choices,
+                )
+                if solver is None:
+                    print("Cancelled.")
+                    return 0
+
             if logistic_enable_tuning:
                 logistic_tuning_method = _ask_select(
-                    "Default tuning method (--tuning-method):",
+                    "Select tuning method:",
                     choices=["grid", "random"],
                 )
                 if logistic_tuning_method is None:
                     print("Cancelled.")
                     return 0
                 logistic_cv_folds = _ask_text(
-                    "Default CV folds (--cv-folds, >=2):",
+                    "Enter CV folds (>=2):",
                     default="5",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
                 )
@@ -948,7 +1100,7 @@ def main() -> int:
                     print("Cancelled.")
                     return 0
                 logistic_cv_scoring = _ask_select(
-                    "Default CV scoring (--cv-scoring):",
+                    "Select CV scoring metric:",
                     choices=["f1_macro", "accuracy", "roc_auc_ovr"],
                 )
                 if logistic_cv_scoring is None:
@@ -956,7 +1108,7 @@ def main() -> int:
                     return 0
                 if logistic_tuning_method == "random":
                     logistic_cv_n_iter = _ask_text(
-                        "Default random-search iterations (--cv-n-iter, >0):",
+                        "Enter random-search iterations (>0):",
                         default="20",
                         validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                     )
@@ -964,7 +1116,7 @@ def main() -> int:
                         print("Cancelled.")
                         return 0
                 logistic_cv_n_jobs = _ask_text(
-                    "Default CV parallel jobs (--cv-n-jobs, e.g., -1):",
+                    "Enter CV parallel jobs (e.g., -1 for all cores):",
                     default="-1",
                     validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
                 )
@@ -973,33 +1125,20 @@ def main() -> int:
                     return 0
 
             if not logistic_enable_tuning:
-                c = _ask_text(
-                    "Default C for template --c:",
-                    default="1.0",
-                    validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
-                )
-                if c is None:
-                    print("Cancelled.")
-                    return 0
-
-                solver = _ask_select(
-                    "Default solver for template --solver:",
-                    choices=SKLEARN_LOGISTIC_SOLVERS,
-                )
-                if solver is None:
-                    print("Cancelled.")
-                    return 0
-
-                logistic_penalty = _ask_select(
-                    "Default penalty for template --penalty:",
-                    choices=["none", "l1", "l2", "elasticnet"],
-                )
-                if logistic_penalty is None:
-                    print("Cancelled.")
-                    return 0
+                if logistic_penalty != "none":
+                    c = _ask_text(
+                        "Enter C (inverse regularization strength):",
+                        default="1.0",
+                        validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
+                    )
+                    if c is None:
+                        print("Cancelled.")
+                        return 0
+                else:
+                    c = None
 
                 logistic_class_weight = _ask_select(
-                    "Default class_weight for template --class-weight:",
+                    "Select class_weight:",
                     choices=["none", "balanced"],
                 )
                 if logistic_class_weight is None:
@@ -1029,14 +1168,14 @@ def main() -> int:
                 return 0
             if rf_enable_tuning:
                 rf_tuning_method = _ask_select(
-                    "Default tuning method (--tuning-method):",
+                    "Select tuning method:",
                     choices=["grid", "random"],
                 )
                 if rf_tuning_method is None:
                     print("Cancelled.")
                     return 0
                 rf_cv_folds = _ask_text(
-                    "Default CV folds (--cv-folds, >=2):",
+                    "Enter CV folds (>=2):",
                     default="5",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
                 )
@@ -1044,7 +1183,7 @@ def main() -> int:
                     print("Cancelled.")
                     return 0
                 rf_cv_scoring = _ask_select(
-                    "Default CV scoring (--cv-scoring):",
+                    "Select CV scoring metric:",
                     choices=["rmse", "mae", "r2"] if task == "regression" else ["f1_macro", "accuracy", "roc_auc_ovr"],
                 )
                 if rf_cv_scoring is None:
@@ -1052,7 +1191,7 @@ def main() -> int:
                     return 0
                 if rf_tuning_method == "random":
                     rf_cv_n_iter = _ask_text(
-                        "Default random-search iterations (--cv-n-iter, >0):",
+                        "Enter random-search iterations (>0):",
                         default="20",
                         validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                     )
@@ -1060,7 +1199,7 @@ def main() -> int:
                         print("Cancelled.")
                         return 0
                 rf_cv_n_jobs = _ask_text(
-                    "Default CV parallel jobs (--cv-n-jobs, e.g., -1):",
+                    "Enter CV parallel jobs (e.g., -1 for all cores):",
                     default="-1",
                     validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
                 )
@@ -1070,7 +1209,7 @@ def main() -> int:
 
             if not rf_enable_tuning:
                 rf_n_estimators = _ask_text(
-                    "Default n_estimators for template --n-estimators:",
+                    "Enter n_estimators:",
                     default="300",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                 )
@@ -1078,36 +1217,183 @@ def main() -> int:
                     print("Cancelled.")
                     return 0
 
-                rf_max_depth = _ask_text(
-                    "Default max depth for template --max-depth:",
-                    default="16",
-                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                rf_max_depth_preset = _ask_select(
+                    "Select max_depth preset:",
+                    choices=["16", "32", "64", "unlimited", "custom"],
                 )
-                if rf_max_depth is None:
+                if rf_max_depth_preset is None:
+                    print("Cancelled.")
+                    return 0
+
+                if rf_max_depth_preset == "custom":
+                    rf_max_depth = _ask_text(
+                        "Enter max_depth:",
+                        default="16",
+                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                    )
+                    if rf_max_depth is None:
+                        print("Cancelled.")
+                        return 0
+                elif rf_max_depth_preset == "unlimited":
+                    rf_max_depth = "none"
+                else:
+                    rf_max_depth = rf_max_depth_preset
+
+                rf_max_leaf_nodes_preset = _ask_select(
+                    "Select max_leaf_nodes preset:",
+                    choices=["unlimited", "64", "128", "256", "512", "custom"],
+                )
+                if rf_max_leaf_nodes_preset is None:
+                    print("Cancelled.")
+                    return 0
+
+                if rf_max_leaf_nodes_preset == "custom":
+                    rf_max_leaf_nodes = _ask_text(
+                        "Enter max_leaf_nodes (>=2):",
+                        default="128",
+                        validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
+                    )
+                    if rf_max_leaf_nodes is None:
+                        print("Cancelled.")
+                        return 0
+                elif rf_max_leaf_nodes_preset == "unlimited":
+                    rf_max_leaf_nodes = "none"
+                else:
+                    rf_max_leaf_nodes = rf_max_leaf_nodes_preset
+
+                rf_min_samples_split = _ask_text(
+                    "Enter min_samples_split:",
+                    default="4",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
+                )
+                if rf_min_samples_split is None:
                     print("Cancelled.")
                     return 0
 
                 rf_min_samples_leaf = _ask_text(
-                    "Default min_samples_leaf for template --min-samples-leaf:",
-                    default="1",
+                    "Enter min_samples_leaf:",
+                    default="2",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) >= 1) else "Must be an integer >= 1",
                 )
                 if rf_min_samples_leaf is None:
                     print("Cancelled.")
                     return 0
 
-                rf_max_features = _ask_select(
-                    "Default max_features for template --max-features:",
-                    choices=["sqrt", "log2", "1.0"],
+                rf_min_impurity_decrease = _ask_text(
+                    "Enter min_impurity_decrease:",
+                    default="0.0",
+                    validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0.0) else "Must be a non-negative number",
                 )
-                if rf_max_features is None:
+                if rf_min_impurity_decrease is None:
                     print("Cancelled.")
                     return 0
+
+                rf_min_weight_fraction_leaf = _ask_text(
+                    "Enter min_weight_fraction_leaf (0 to 0.5):",
+                    default="0.0",
+                    validate_fn=lambda s: True if (_is_float(s) and 0.0 <= float(s) <= 0.5) else "Must be a number in range [0, 0.5]",
+                )
+                if rf_min_weight_fraction_leaf is None:
+                    print("Cancelled.")
+                    return 0
+
+                rf_max_features_preset = _ask_select(
+                    "Select max_features preset:",
+                    choices=["sqrt", "log2", "auto", "none", "custom"],
+                )
+                if rf_max_features_preset is None:
+                    print("Cancelled.")
+                    return 0
+
+                if rf_max_features_preset == "custom":
+                    rf_max_features = _ask_text(
+                        "Enter max_features as fraction (0 < value <= 1):",
+                        default="0.5",
+                        validate_fn=lambda s: True if (_is_float(s) and 0.0 < float(s) <= 1.0) else "Must be a float in (0, 1]",
+                    )
+                    if rf_max_features is None:
+                        print("Cancelled.")
+                        return 0
+                else:
+                    rf_max_features = rf_max_features_preset
+
+                rf_bootstrap = questionary.confirm(
+                    "Enable bootstrap sampling?",
+                    default=True,
+                    style=CUSTOM_STYLE,
+                ).ask()
+                if rf_bootstrap is None:
+                    print("Cancelled.")
+                    return 0
+
+                if rf_bootstrap:
+                    rf_max_samples_preset = _ask_select(
+                        "Select max_samples preset:",
+                        choices=["all", "0.8", "0.7", "0.5", "custom"],
+                    )
+                    if rf_max_samples_preset is None:
+                        print("Cancelled.")
+                        return 0
+
+                    if rf_max_samples_preset == "custom":
+                        rf_max_samples = _ask_text(
+                            "Enter max_samples (int > 0 or float in (0,1]):",
+                            default="0.8",
+                            validate_fn=lambda s: True if _is_rf_max_samples_text(s) and s.strip().lower() not in {"none", "null"} else "Must be int > 0 or float in (0,1]",
+                        )
+                        if rf_max_samples is None:
+                            print("Cancelled.")
+                            return 0
+                    elif rf_max_samples_preset == "all":
+                        rf_max_samples = "none"
+                    else:
+                        rf_max_samples = rf_max_samples_preset
+                else:
+                    rf_max_samples = "none"
+
+                rf_ccp_alpha = _ask_text(
+                    "Enter ccp_alpha (cost-complexity pruning):",
+                    default="0.0",
+                    validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0.0) else "Must be a non-negative number",
+                )
+                if rf_ccp_alpha is None:
+                    print("Cancelled.")
+                    return 0
+
+                rf_n_jobs_preset = _ask_select(
+                    "Select n_jobs preset:",
+                    choices=["single-core", "all-cores", "custom"],
+                )
+                if rf_n_jobs_preset is None:
+                    print("Cancelled.")
+                    return 0
+
+                if rf_n_jobs_preset == "single-core":
+                    rf_n_jobs = "none"
+                elif rf_n_jobs_preset == "all-cores":
+                    rf_n_jobs = "-1"
+                else:
+                    rf_n_jobs = _ask_text(
+                        "Enter n_jobs (integer != 0, use -1 for all cores):",
+                        default="-1",
+                        validate_fn=lambda s: True if (_is_int(s) and int(s) != 0) else "Must be an integer != 0",
+                    )
+                    if rf_n_jobs is None:
+                        print("Cancelled.")
+                        return 0
         else:
             rf_n_estimators = profile_defaults.get("rf_n_estimators", "300")
             rf_max_depth = profile_defaults.get("rf_max_depth", "16")
-            rf_min_samples_leaf = profile_defaults.get("rf_min_samples_leaf", "1")
+            rf_min_samples_split = profile_defaults.get("rf_min_samples_split", "4")
+            rf_min_samples_leaf = profile_defaults.get("rf_min_samples_leaf", "2")
+            rf_min_weight_fraction_leaf = profile_defaults.get("rf_min_weight_fraction_leaf", "0.0")
+            rf_max_leaf_nodes = profile_defaults.get("rf_max_leaf_nodes", "none")
+            rf_min_impurity_decrease = profile_defaults.get("rf_min_impurity_decrease", "0.0")
             rf_max_features = profile_defaults.get("rf_max_features", "sqrt")
+            rf_bootstrap = profile_defaults.get("rf_bootstrap", True)
+            rf_max_samples = profile_defaults.get("rf_max_samples", "none")
+            rf_ccp_alpha = profile_defaults.get("rf_ccp_alpha", "0.0")
+            rf_n_jobs = profile_defaults.get("rf_n_jobs", "none")
             rf_enable_tuning = profile_defaults.get("rf_enable_tuning", False)
             rf_tuning_method = profile_defaults.get("rf_tuning_method", "grid")
             rf_cv_folds = profile_defaults.get("rf_cv_folds", "5")
@@ -1127,17 +1413,62 @@ def main() -> int:
         if tf_enable_tuning is None:
             print("Cancelled.")
             return 0
+
+        optimizer_choices = ["adam", "auto", "sgd", "rmsprop", "adagrad", "adamw"] if tf_enable_tuning else ["adam", "sgd", "rmsprop", "adagrad", "adamw"]
+        optimizer = _ask_select(
+            "Select optimizer:",
+            choices=optimizer_choices,
+        )
+        if optimizer is None:
+            print("Cancelled.")
+            return 0
+
+        if tf_enable_tuning:
+            if optimizer == "auto":
+                print("Note: optimizer=auto lets tuning search across all optimizer families.")
+            else:
+                print(f"Note: tuning will keep optimizer fixed to '{optimizer}'.")
+
+        tf_learning_rate = _ask_text(
+            "Enter learning rate (e.g., 0.001):",
+            default="0.001",
+            validate_fn=lambda s: True
+            if (_is_float(s) and float(s) > 0)
+            else "Must be a positive number",
+        )
+        if tf_learning_rate is None:
+            print("Cancelled.")
+            return 0
+
+        epochs = _ask_text(
+            "Enter epochs (e.g., 100):",
+            default="100",
+            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+        )
+        if epochs is None:
+            print("Cancelled.")
+            return 0
+
+        batch_size = _ask_text(
+            "Enter batch size (e.g., 32):",
+            default="32",
+            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+        )
+        if batch_size is None:
+            print("Cancelled.")
+            return 0
+
         if tf_enable_tuning:
             tf_tuning_method = "random"
             tf_cv_scoring = _ask_select(
-                "Default tuning scoring (--cv-scoring):",
+                "Select tuning scoring metric:",
                 choices=["rmse"] if task == "regression" else ["f1_macro"],
             )
             if tf_cv_scoring is None:
                 print("Cancelled.")
                 return 0
             tf_cv_n_iter = _ask_text(
-                "Default random-search iterations (--cv-n-iter, >0):",
+                "Enter random-search iterations (>0):",
                 default="10",
                 validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
             )
@@ -1147,14 +1478,6 @@ def main() -> int:
 
     if library == "scikit-learn" and model == "linear_regression":
         if use_custom:
-            lr_penalty = _ask_select(
-                "Default penalty for template --penalty:",
-                choices=["none", "l1", "l2", "elasticnet"],
-            )
-            if lr_penalty is None:
-                print("Cancelled.")
-                return 0
-
             lr_enable_tuning = questionary.confirm(
                 "Enable hyperparameter tuning by default in generated template? (--enable-tuning)",
                 default=False,
@@ -1164,10 +1487,19 @@ def main() -> int:
                 print("Cancelled.")
                 return 0
 
+            lr_penalty_choices = ["auto", "l1", "l2", "elasticnet"] if lr_enable_tuning else ["none", "l1", "l2", "elasticnet"]
+            lr_penalty = _ask_select(
+                "Select penalty:",
+                choices=lr_penalty_choices,
+            )
+            if lr_penalty is None:
+                print("Cancelled.")
+                return 0
+
             if not lr_enable_tuning:
                 if lr_penalty == "elasticnet":
                     lr_l1_ratio = _ask_text(
-                        "Default l1_ratio for ElasticNet (0 = pure L2, 1 = pure L1) --l1-ratio:",
+                        "Enter l1_ratio for ElasticNet (0=pure L2, 1=pure L1):",
                         default="0.5",
                         validate_fn=lambda s: True if (_is_float(s) and 0.0 <= float(s) <= 1.0) else "Must be in range [0, 1]",
                     )
@@ -1179,7 +1511,7 @@ def main() -> int:
 
                 if lr_penalty != "none":
                     lr_alpha = _ask_text(
-                        "Default alpha (regularization strength) for template --alpha:",
+                        "Enter alpha (regularization strength):",
                         default="1.0",
                         validate_fn=lambda s: True if (_is_float(s) and float(s) > 0) else "Must be a positive number",
                     )
@@ -1190,7 +1522,7 @@ def main() -> int:
                     lr_alpha = "1.0"
 
                 lr_fit_intercept = questionary.confirm(
-                    "Fit intercept in default template? (--fit-intercept)",
+                    "Fit intercept?",
                     default=True,
                     style=CUSTOM_STYLE,
                 ).ask()
@@ -1203,14 +1535,8 @@ def main() -> int:
                 lr_l1_ratio = None
 
             if lr_enable_tuning:
-                if lr_penalty == "none":
-                    print(
-                        "Note: penalty=none with tuning enabled uses a small search space "
-                        "(primarily fit_intercept)."
-                    )
-
                 lr_tuning_method = _ask_select(
-                    "Default tuning method (--tuning-method):",
+                    "Select tuning method:",
                     choices=["grid", "random"],
                 )
                 if lr_tuning_method is None:
@@ -1218,7 +1544,7 @@ def main() -> int:
                     return 0
 
                 lr_cv_folds = _ask_text(
-                    "Default CV folds (--cv-folds, >=2):",
+                    "Enter CV folds (>=2):",
                     default="5",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) >= 2) else "Must be an integer >= 2",
                 )
@@ -1227,7 +1553,7 @@ def main() -> int:
                     return 0
 
                 lr_cv_scoring = _ask_select(
-                    "Default CV scoring (--cv-scoring):",
+                    "Select CV scoring metric:",
                     choices=["rmse", "mae", "r2"],
                 )
                 if lr_cv_scoring is None:
@@ -1236,7 +1562,7 @@ def main() -> int:
 
                 if lr_tuning_method == "random":
                     lr_cv_n_iter = _ask_text(
-                        "Default random-search iterations (--cv-n-iter, >0):",
+                        "Enter random-search iterations (>0):",
                         default="20",
                         validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                     )
@@ -1245,7 +1571,7 @@ def main() -> int:
                         return 0
 
                 lr_cv_n_jobs = _ask_text(
-                    "Default CV parallel jobs (--cv-n-jobs, e.g., -1):",
+                    "Enter CV parallel jobs (e.g., -1 for all cores):",
                     default="-1",
                     validate_fn=lambda s: True if _is_int(s) else "Must be an integer",
                 )
@@ -1267,7 +1593,7 @@ def main() -> int:
     if _supports_max_iter(library, model, task):
         if use_custom:
             max_iter = _ask_text(
-                "Default max iterations for template --max-iter:",
+                "Enter max iterations:",
                 default="1000",
                 validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
             )
@@ -1279,6 +1605,7 @@ def main() -> int:
             max_iter = int(profile_defaults.get("max_iter", 1000))
 
     if _supports_early_stopping_defaults(library, model, task):
+        supports_validation_defaults = _supports_validation_n_iter_defaults(library, model, task)
         if use_custom:
             recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change = _recommended_es_defaults(
                 library,
@@ -1286,7 +1613,7 @@ def main() -> int:
             )
 
             early_stopping = questionary.confirm(
-                "Enable early stopping by default in the generated template (--early-stopping)?",
+                "Enable early stopping?",
                 default=bool(recommended_early_stopping),
                 style=CUSTOM_STYLE,
             ).ask()
@@ -1295,47 +1622,50 @@ def main() -> int:
                 print("Cancelled.")
                 return 0
 
-            use_recommended_defaults = questionary.confirm(
-                "Use recommended preset values for --validation-fraction and --n-iter-no-change?",
-                default=True,
-                style=CUSTOM_STYLE,
-            ).ask()
+            if supports_validation_defaults:
+                use_recommended_defaults = questionary.confirm(
+                    "Use recommended preset values for validation fraction and n_iter_no_change?",
+                    default=True,
+                    style=CUSTOM_STYLE,
+                ).ask()
 
-            if use_recommended_defaults is None:
-                print("Cancelled.")
-                return 0
-
-            if use_recommended_defaults:
-                validation_fraction = recommended_validation_fraction
-                n_iter_no_change = recommended_n_iter_no_change
-            else:
-                validation_fraction = _ask_text(
-                    "Default validation fraction for template --validation-fraction (0 < value < 1):",
-                    default=str(recommended_validation_fraction),
-                    validate_fn=lambda s: True
-                    if (_is_float(s) and 0.0 < float(s) < 1.0)
-                    else "Must be a number where 0 < value < 1",
-                )
-                if validation_fraction is None:
+                if use_recommended_defaults is None:
                     print("Cancelled.")
                     return 0
 
-                n_iter_no_change = _ask_text(
-                    "Default n_iter_no_change for template --n-iter-no-change:",
-                    default=str(recommended_n_iter_no_change),
-                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-                )
-                if n_iter_no_change is None:
-                    print("Cancelled.")
-                    return 0
+                if use_recommended_defaults:
+                    validation_fraction = recommended_validation_fraction
+                    n_iter_no_change = recommended_n_iter_no_change
+                else:
+                    validation_fraction = _ask_text(
+                        "Enter validation fraction (0 < value < 1):",
+                        default=str(recommended_validation_fraction),
+                        validate_fn=lambda s: True
+                        if (_is_float(s) and 0.0 < float(s) < 1.0)
+                        else "Must be a number where 0 < value < 1",
+                    )
+                    if validation_fraction is None:
+                        print("Cancelled.")
+                        return 0
 
-                validation_fraction = float(validation_fraction)
-                n_iter_no_change = int(n_iter_no_change)
+                    n_iter_no_change = _ask_text(
+                        "Enter n_iter_no_change:",
+                        default=str(recommended_n_iter_no_change),
+                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                    )
+                    if n_iter_no_change is None:
+                        print("Cancelled.")
+                        return 0
+
+                    validation_fraction = float(validation_fraction)
+                    n_iter_no_change = int(n_iter_no_change)
         else:
             # Profile provides ES defaults
-            early_stopping = profile_defaults.get("early_stopping", True)
-            validation_fraction = profile_defaults.get("validation_fraction", 0.1)
-            n_iter_no_change = profile_defaults.get("n_iter_no_change", 5)
+            recommended_early_stopping, _, _ = _recommended_es_defaults(library, model)
+            early_stopping = profile_defaults.get("early_stopping", recommended_early_stopping)
+            if supports_validation_defaults:
+                validation_fraction = profile_defaults.get("validation_fraction", 0.1)
+                n_iter_no_change = profile_defaults.get("n_iter_no_change", 5)
 
     resolved_defaults: list[tuple[str, object]] = [
         ("library", library),
@@ -1382,8 +1712,16 @@ def main() -> int:
         ("logistic_cv_n_jobs", logistic_cv_n_jobs),
         ("rf_n_estimators", rf_n_estimators),
         ("rf_max_depth", rf_max_depth),
+        ("rf_min_samples_split", rf_min_samples_split),
         ("rf_min_samples_leaf", rf_min_samples_leaf),
+        ("rf_min_weight_fraction_leaf", rf_min_weight_fraction_leaf),
+        ("rf_max_leaf_nodes", rf_max_leaf_nodes),
+        ("rf_min_impurity_decrease", rf_min_impurity_decrease),
         ("rf_max_features", rf_max_features),
+        ("rf_bootstrap", rf_bootstrap),
+        ("rf_max_samples", rf_max_samples),
+        ("rf_ccp_alpha", rf_ccp_alpha),
+        ("rf_n_jobs", rf_n_jobs),
         ("rf_enable_tuning", rf_enable_tuning),
         ("rf_tuning_method", rf_tuning_method),
         ("rf_cv_folds", rf_cv_folds),
@@ -1464,6 +1802,7 @@ def main() -> int:
 
     if _supports_early_stopping_defaults(library, model, task):
         cmd.extend(["--default-early-stopping", "true" if early_stopping else "false"])
+    if _supports_validation_n_iter_defaults(library, model, task):
         cmd.extend(["--default-validation-fraction", str(float(validation_fraction))])
         cmd.extend(["--default-n-iter-no-change", str(int(n_iter_no_change))])
 
@@ -1511,11 +1850,27 @@ def main() -> int:
     if rf_n_estimators is not None:
         cmd.extend(["--default-rf-n-estimators", str(int(rf_n_estimators))])
     if rf_max_depth is not None:
-        cmd.extend(["--default-rf-max-depth", str(int(rf_max_depth))])
+        cmd.extend(["--default-rf-max-depth", str(rf_max_depth).strip().lower()])
+    if rf_min_samples_split is not None:
+        cmd.extend(["--default-rf-min-samples-split", str(int(rf_min_samples_split))])
     if rf_min_samples_leaf is not None:
         cmd.extend(["--default-rf-min-samples-leaf", str(int(rf_min_samples_leaf))])
+    if rf_min_weight_fraction_leaf is not None:
+        cmd.extend(["--default-rf-min-weight-fraction-leaf", str(float(rf_min_weight_fraction_leaf))])
+    if rf_max_leaf_nodes is not None:
+        cmd.extend(["--default-rf-max-leaf-nodes", str(rf_max_leaf_nodes).strip().lower()])
+    if rf_min_impurity_decrease is not None:
+        cmd.extend(["--default-rf-min-impurity-decrease", str(float(rf_min_impurity_decrease))])
     if rf_max_features is not None:
-        cmd.extend(["--default-rf-max-features", str(rf_max_features)])
+        cmd.extend(["--default-rf-max-features", str(rf_max_features).strip().lower()])
+    if rf_bootstrap is not None:
+        cmd.extend(["--default-rf-bootstrap", "true" if rf_bootstrap else "false"])
+    if rf_max_samples is not None:
+        cmd.extend(["--default-rf-max-samples", str(rf_max_samples).strip().lower()])
+    if rf_ccp_alpha is not None:
+        cmd.extend(["--default-rf-ccp-alpha", str(float(rf_ccp_alpha))])
+    if rf_n_jobs is not None:
+        cmd.extend(["--default-rf-n-jobs", str(rf_n_jobs).strip().lower()])
     if rf_enable_tuning is not None:
         cmd.extend(["--default-rf-enable-tuning", "true" if rf_enable_tuning else "false"])
     if rf_tuning_method is not None:

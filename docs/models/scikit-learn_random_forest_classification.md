@@ -44,8 +44,11 @@ Selecting `scikit-learn` + `random_forest` (classification):
 -   Profile mode (`Quick|Balanced|Thorough`) applies preset defaults and
     prints a resolved-default summary before generation.
 -   `Thorough` is preset to tuning enabled.
--   Custom mode prompts tuning details only when you choose
-    `Enable hyperparameter tuning = true`.
+-   Custom mode asks `Enable hyperparameter tuning` before direct-fit
+    estimator defaults.
+-   When tuning is enabled in Custom mode, direct-fit estimator
+    defaults are auto-defaulted and omitted from the resolved-default
+    summary.
 -   In Custom mode, `--cv-n-iter` is prompted only when tuning method is
     `random`.
 

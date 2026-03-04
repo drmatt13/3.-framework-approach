@@ -65,32 +65,46 @@ from libraries.xgboost_template_utils import resolve_xgboost_device as _resolve_
 
 # ---------------------------------------------------------------------
 # Supported CLI flags (common usage)
-#   --task binary_classification|multiclass_classification
+#
+#   Run + Artifacts + Logging
 #   --name <model_name>
-#   --booster gbtree|gblinear|dart
-#   --device auto|cpu|gpu
 #   --save-model true|false
+#   --verbose 0|1|2|auto
+#   --metric-decimals <int>
+#
+#   Reproducibility + Data Split
+#   --task binary_classification|multiclass_classification
 #   --random-state <int>
-#   --test-size <float>
+#   --test-size <float> (e.g., 0.2 for 80/20 split)
+#
+#   Model Configuration (direct-fit)
+#   --booster auto|gbtree|gblinear|dart
+#       auto  — resolves to gbtree for direct-fit; searches all three during tuning
+#       When tuning: constrains the CV search space to the selected booster family.
+#       gbtree/dart include tree params (max_depth, subsample, colsample_bytree,
+#       min_child_weight). gblinear uses only regularization + learning rate.
+#   --device auto|cpu|gpu
+#   --n-estimators <int>
+#   --learning-rate <float>
+#   --max-depth <int>          (tree boosters only)
+#   --subsample <float>        (tree boosters only)
+#   --colsample-bytree <float> (tree boosters only)
+#   --min-child-weight <float> (tree boosters only)
+#   --reg-lambda <float>
+#   --reg-alpha <float>
+#
+#   Training Path
 #   --early-stopping true|false
 #   --validation-fraction <float>
 #   --n-iter-no-change <int>
-#   --verbose 0|1|2|auto
-#   --metric-decimals <int>
-#   --n-estimators <int>
-#   --learning-rate <float>
-#   --max-depth <int>
-#   --subsample <float>
-#   --colsample-bytree <float>
-#   --min-child-weight <float>
-#   --reg-lambda <float>
-#   --reg-alpha <float>
 #   --enable-tuning true|false
-#   --tuning-method grid|random
+#
+#   Tuning-specific (only when --enable-tuning=true)
+#   --tuning-method random
 #   --cv-folds <int>
-#   --cv-scoring accuracy|f1|f1_macro|roc_auc|logloss
+#   --cv-scoring accuracy|f1|f1_macro|roc_auc_ovr
 #   --cv-n-iter <int>
-#   --cv-n-jobs <int>
+#   --cv-n-jobs <int> (parallel jobs; -1 uses all cores)
 # ---------------------------------------------------------------------
 
 # Default values for optional parameters. These can be overridden via CLI.
@@ -123,7 +137,7 @@ parser = argparse.ArgumentParser(description="XGBoost Classifier baseline")
 parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
-parser.add_argument("--booster", choices=["gbtree", "gblinear", "dart"], default=DEFAULT_BOOSTER)
+parser.add_argument("--booster", choices=["auto", "gbtree", "gblinear", "dart"], default=DEFAULT_BOOSTER)
 parser.add_argument("--device", choices=["auto", "cpu", "gpu"], default=DEFAULT_DEVICE)
 parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
 parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
@@ -270,6 +284,44 @@ X_train, X_test, y_train, y_test = train_test_split(
 preprocessor = _build_preprocessor(X_train)
 
 # =============================================================
+# ============ BOOSTER-AWARE SEARCH SPACE =====================
+# =============================================================
+
+_TREE_BOOSTERS = {"gbtree", "dart"}
+
+
+def _build_search_space(booster: str, step_name: str) -> dict:
+	"""Build a booster-aware search space for XGBoost CV tuning.
+
+	When *booster* is ``"auto"``, the booster itself becomes a tunable
+	parameter and tree-specific params are included (XGBoost silently
+	ignores them for gblinear).  When a specific booster is selected,
+	tree params are included only for gbtree/dart and excluded for
+	gblinear.
+	"""
+	space: dict = {
+		f"{step_name}__n_estimators": [100, 200, 300, 500],
+		f"{step_name}__learning_rate": [0.01, 0.05, 0.1, 0.2],
+		f"{step_name}__reg_lambda": [0.5, 1.0, 2.0],
+		f"{step_name}__reg_alpha": [0.0, 0.1, 0.5],
+	}
+	if booster == "auto":
+		space[f"{step_name}__booster"] = ["gbtree", "gblinear", "dart"]
+		# Include tree params; XGBoost ignores them when gblinear is sampled.
+		space[f"{step_name}__max_depth"] = [3, 4, 6, 8]
+		space[f"{step_name}__subsample"] = [0.7, 0.8, 1.0]
+		space[f"{step_name}__colsample_bytree"] = [0.7, 0.8, 1.0]
+		space[f"{step_name}__min_child_weight"] = [1.0, 3.0, 5.0]
+	elif booster in _TREE_BOOSTERS:
+		space[f"{step_name}__max_depth"] = [3, 4, 6, 8]
+		space[f"{step_name}__subsample"] = [0.7, 0.8, 1.0]
+		space[f"{step_name}__colsample_bytree"] = [0.7, 0.8, 1.0]
+		space[f"{step_name}__min_child_weight"] = [1.0, 3.0, 5.0]
+	# gblinear: only common params (no tree-specific ones)
+	return space
+
+
+# =============================================================
 # ================= BUILD MODEL PIPELINE ======================
 # =============================================================
 
@@ -291,8 +343,12 @@ if xgb_device_warning is not None:
 	print(f"Warning: {xgb_device_warning}")
 if training_verbose > 0:
 	print(f"Resolved XGBoost device: requested={xgb_device_requested}, effective={xgb_device}")
+
+# Resolve auto booster for direct-fit pipeline construction.
+_resolved_booster = "gbtree" if args.booster == "auto" else args.booster
+
 model_kwargs = {
-	"booster": args.booster,
+	"booster": _resolved_booster,
 	"device": xgb_device,
 	"random_state": args.random_state,
 	"objective": xgb_objective,
@@ -356,16 +412,7 @@ if args.enable_tuning:
 		{"f1_macro": "f1_macro", "accuracy": "accuracy", "roc_auc_ovr": "roc_auc_ovr"},
 	)
 	
-	search_space = {
-		"classifier__n_estimators": [100, 200, 300, 500],
-		"classifier__learning_rate": [0.01, 0.05, 0.1, 0.2],
-		"classifier__max_depth": [3, 4, 6, 8],
-		"classifier__subsample": [0.7, 0.8, 1.0],
-		"classifier__colsample_bytree": [0.7, 0.8, 1.0],
-		"classifier__min_child_weight": [1.0, 3.0, 5.0],
-		"classifier__reg_lambda": [0.5, 1.0, 2.0],
-		"classifier__reg_alpha": [0.0, 0.1, 0.5],
-	}
+	search_space = _build_search_space(args.booster, "classifier")
 
 	n_iter = int(args.cv_n_iter)
 	n_candidates_upper = _search_space_size(search_space)

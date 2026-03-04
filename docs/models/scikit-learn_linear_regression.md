@@ -33,9 +33,10 @@ When generating via `python .\model_init.py` for `scikit-learn` + `linear_regres
 
 - Profile mode (`Quick|Balanced|Thorough`) applies preset defaults and prints a resolved-default summary before generation.
 - `Thorough` is preset to tuning enabled.
-- Custom mode asks tuning details only when you choose `Enable hyperparameter tuning = true`.
+- Custom mode asks `Enable hyperparameter tuning` before direct-fit estimator defaults.
+- When tuning is enabled in Custom mode, direct-fit estimator defaults are auto-defaulted and omitted from the resolved-default summary.
 - In Custom mode, `--cv-n-iter` is asked only when tuning method is `random`.
-- If you pick `penalty=none` with tuning enabled, the setup shows a note that the tuning search space is limited.
+- In Custom mode, when tuning is enabled, `penalty=none` is not offered.
 
 ## Direct Estimator Flags
 
@@ -43,7 +44,7 @@ Use these when you want explicit, fixed model behavior without cross-validation 
 
 These are applied directly to the estimator when tuning is disabled (`--enable-tuning=false`):
 
-- `--penalty` (`none|l1|l2|elasticnet`)
+- `--penalty` (`auto|none|l1|l2|elasticnet`). `auto` requires `--enable-tuning=true` and searches all penalty families.
 - `--alpha` (float)
 - `--fit-intercept` (`true|false`)
 - `--l1-ratio` (float, used for `elasticnet`)
@@ -61,6 +62,7 @@ Use these when you want the model to search for better parameter values via cros
 When tuning is enabled (`--enable-tuning=true`), configure search behavior with:
 
 - `--tuning-method` (`grid|random`)
+- `--penalty=none` is not allowed when `--enable-tuning=true`.
 - `--cv-folds` (int, Number of CV folds) 
 - `--cv-scoring` (`rmse|mae|r2`)
   - `rmse` -> `neg_root_mean_squared_error`

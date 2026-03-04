@@ -37,6 +37,10 @@ from libraries.model_template_helpers import (
 	validate_etl_outputs as _validate_etl_outputs,
 	write_model_schemas as _write_model_schemas,
 )
+from libraries.linear_regression_search_space import (
+	LinearRegressionSearchGridConfig,
+	build_linear_regression_search_space,
+)
 from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
 from libraries.search_utils import cv_scoring_name as _cv_scoring_name, search_space_size as _search_space_size
 from libraries.serialization_utils import json_safe_best_params as _json_safe_best_params
@@ -46,71 +50,46 @@ from libraries.serialization_utils import json_safe_best_params as _json_safe_be
 # =============================================================
 
 # ---------------------------------------------------------------------
-# Supported CLI flags (common usage)
-# 
-#   Run + artifacts + logging
+# Supported CLI flags (Linear Regression template)
+#
+# Core run options
 #   --name <model_name>
+#   --artifact-name-mode full|short
 #   --save-model true|false
 #   --verbose 0|1|2|auto
 #   --metric-decimals <int>
-# 
-# 	Reproducibility + data split
+#
+# Data split / reproducibility
 #   --random-state <int>
-#   --test-size <float> (e.g., 0.2 for 80/20 split)
-# 
-# 	Model behavior
+#   --test-size <float>                  (e.g., 0.2 for 80/20 split)
+#
+# Model family / regularization
+#   --penalty auto|none|l1|l2|elasticnet
+#
+# Direct-fit hyperparameters (used when --enable-tuning=false)
+#   --alpha <float>                      (used for l1/l2/elasticnet)
 #   --fit-intercept true|false
-#   --penalty none|l1|l2|elasticnet
-#   --alpha <float>
-#   --l1-ratio <float> (only used if penalty=elasticnet; balance between l1 and l2 regularization, where 0=l2 only, 1=l1 only)
-# 
-# 	Hyperparameter tuning
+#   --l1-ratio <float>                   (only for penalty=elasticnet)
+#
+# Hyperparameter tuning
 #   --enable-tuning true|false
 #   --tuning-method grid|random
 #   --cv-folds <int>
 #   --cv-scoring rmse|mae|r2
-#   --cv-n-iter <int> (only used if tuning-method=random; number of random hyperparameter combinations to try)
-#   --cv-n-jobs <int> (number of parallel jobs for CV; -1 to use all cores)
-# 
+#   --cv-n-iter <int>                    (random search only)
+#   --cv-n-jobs <int>                    (-1 uses all cores)
 # ---------------------------------------------------------------------
 
-# NOTE: Adjust or extend this search space manually to customize which estimators and hyperparameter ranges are explored during tuning.
-def _build_search_space(penalty: str, random_state: int) -> list[dict[str, list]]:
-	if penalty == "none":
-		return [
-			{
-				"regressor": [LinearRegression()],
-				"regressor__fit_intercept": [True, False],
-			}
-		]
-	if penalty == "l2":
-		return [
-			{
-				"regressor": [Ridge(random_state=random_state)],
-				"regressor__alpha": [1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0],
-				"regressor__fit_intercept": [True, False],
-			}
-		]
-	if penalty == "l1":
-		return [
-			{
-				"regressor": [Lasso(random_state=random_state)],
-				"regressor__alpha": [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
-				"regressor__fit_intercept": [True, False],
-				"regressor__max_iter": [5_000, 10_000, 20_000],
-			}
-		]
-	if penalty == "elasticnet":
-		return [
-			{
-				"regressor": [ElasticNet(random_state=random_state)],
-				"regressor__alpha": [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
-				"regressor__l1_ratio": [0.1, 0.3, 0.5, 0.7, 0.9],
-				"regressor__fit_intercept": [True, False],
-				"regressor__max_iter": [5_000, 10_000, 20_000],
-			}
-		]
-	raise ValueError(f"Unsupported penalty '{penalty}'")
+# NOTE: Adjust these grids to customize search breadth for tuning.
+LINEAR_REGRESSION_SEARCH_GRID_CONFIG = LinearRegressionSearchGridConfig(
+	fit_intercept_grid=[True, False],
+	ridge_alpha_grid=[1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0],
+	lasso_alpha_grid=[1e-4, 1e-3, 1e-2, 1e-1, 1.0],
+	lasso_max_iter_grid=[5_000, 10_000, 20_000],
+	elasticnet_alpha_grid=[1e-4, 1e-3, 1e-2, 1e-1, 1.0],
+	elasticnet_l1_ratio_grid=[0.1, 0.3, 0.5, 0.7, 0.9],
+	elasticnet_max_iter_grid=[5_000, 10_000, 20_000],
+)
 
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
@@ -137,7 +116,7 @@ parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
 parser.add_argument("--test-size", type=float, default=0.2)
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
-parser.add_argument("--penalty", choices=["none", "l1", "l2", "elasticnet"], default=DEFAULT_PENALTY)
+parser.add_argument("--penalty", choices=["auto", "none", "l1", "l2", "elasticnet"], default=DEFAULT_PENALTY)
 parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA)
 parser.add_argument("--fit-intercept", type=_parse_bool, default=DEFAULT_FIT_INTERCEPT)
 parser.add_argument("--l1-ratio", type=float, default=DEFAULT_L1_RATIO)
@@ -148,6 +127,10 @@ parser.add_argument("--cv-scoring", choices=["rmse", "mae", "r2"], default=DEFAU
 parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
 parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
 args = parser.parse_args()
+
+if args.penalty == "auto" and not args.enable_tuning:
+	raise ValueError("--penalty=auto requires --enable-tuning=true.")
+
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
 cv_verbose = 0 if training_verbose <= 1 else 2
@@ -336,7 +319,11 @@ if training_verbose > 0:
 		print(f"Training started: {type(model.named_steps['regressor']).__name__} (penalty={args.penalty}, alpha={args.alpha})")
 
 if args.enable_tuning:
-	search_space = _build_search_space(args.penalty, int(args.random_state))
+	search_space = build_linear_regression_search_space(
+		penalty=args.penalty,
+		random_state=int(args.random_state),
+		config=LINEAR_REGRESSION_SEARCH_GRID_CONFIG,
+	)
 	search = None
 	if args.tuning_method == "grid":
 		search = GridSearchCV(

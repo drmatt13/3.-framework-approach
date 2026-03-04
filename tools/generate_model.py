@@ -26,7 +26,7 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #
 #   Generated template runtime options (configurable defaults):
 #   --verbose=0|1|2|auto
-#   --penalty=none|l1|l2|elasticnet
+#   --penalty=auto|none|l1|l2|elasticnet
 #   --alpha=<float>
 #   --enable-tuning=true|false
 #   --tuning-method=grid|random
@@ -64,7 +64,7 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #   --name=...
 #
 #   (optional)
-#   --booster=gbtree|gblinear|dart
+#   --booster=auto|gbtree|gblinear|dart
 #   --device=auto|cpu|gpu
 #
 #   Generated template runtime options (configurable defaults):
@@ -80,7 +80,7 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #   --library=tensorflow 
 #   --model=dense_nn 
 #   --task=regression|binary_classification|multiclass_classification 
-#   --optimizer=adam|sgd|rmsprop|adagrad|adamw
+#   --optimizer=auto|adam|sgd|rmsprop|adagrad|adamw
 #   --learning_rate=<float>
 #   --epochs=<int>
 #   --batch_size=<int>
@@ -93,7 +93,7 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #   --library=tensorflow 
 #   --model=cnn 
 #   --task=regression|binary_classification|multiclass_classification 
-#   --optimizer=adam|sgd|rmsprop|adagrad|adamw
+#   --optimizer=auto|adam|sgd|rmsprop|adagrad|adamw
 #   --learning_rate=<float>
 #   --epochs=<int>
 #   --batch_size=<int>
@@ -107,12 +107,13 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 SKLEARN_MODELS = {"linear_regression", "logistic_regression", "random_forest"}
 TENSORFLOW_MODELS = {"dense_nn"}
 TASKS = {"regression", "binary_classification", "multiclass_classification"}
-XGBOOST_BOOSTERS = {"gbtree", "gblinear", "dart"}
+XGBOOST_BOOSTERS = {"auto", "gbtree", "gblinear", "dart"}
 XGBOOST_DEVICES = {"auto", "cpu", "gpu"}
-TENSORFLOW_OPTIMIZERS = {"adam", "sgd", "rmsprop", "adagrad", "adamw"}
-SKLEARN_LOGISTIC_SOLVERS = {"lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"}
+TENSORFLOW_OPTIMIZERS = {"auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"}
+SKLEARN_LOGISTIC_SOLVERS = {"auto", "lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"}
 CLASSIFICATION_CV_SCORINGS = {"f1_macro", "accuracy", "roc_auc_ovr"}
 REGRESSION_CV_SCORINGS = {"rmse", "mae", "r2"}
+RF_MAX_FEATURE_PRESETS = {"auto", "sqrt", "log2", "none"}
 
 SKLEARN_MODEL_TASKS = {
     "linear_regression": {"regression"},
@@ -125,6 +126,7 @@ TENSORFLOW_MODEL_TASKS = {
 }
 
 OPTIMIZER_CLASS_MAP = {
+    "auto": "tf.keras.optimizers.Adam",
     "adam": "tf.keras.optimizers.Adam",
     "sgd": "tf.keras.optimizers.SGD",
     "rmsprop": "tf.keras.optimizers.RMSprop",
@@ -211,8 +213,16 @@ DEFAULT_RANDOM_FOREST_PARAMS_BY_TEMPLATE = {
     ("scikit-learn", "random_forest", "classification"): {
         "n_estimators": 300,
         "max_depth": 16,
+        "min_samples_split": 2,
         "min_samples_leaf": 1,
+        "min_weight_fraction_leaf": 0.0,
+        "max_leaf_nodes": None,
+        "min_impurity_decrease": 0.0,
         "max_features": "sqrt",
+        "bootstrap": True,
+        "max_samples": None,
+        "ccp_alpha": 0.0,
+        "n_jobs": None,
         "enable_tuning": False,
         "tuning_method": "grid",
         "cv_folds": 5,
@@ -223,8 +233,16 @@ DEFAULT_RANDOM_FOREST_PARAMS_BY_TEMPLATE = {
     ("scikit-learn", "random_forest", "regression"): {
         "n_estimators": 300,
         "max_depth": 16,
+        "min_samples_split": 2,
         "min_samples_leaf": 1,
+        "min_weight_fraction_leaf": 0.0,
+        "max_leaf_nodes": None,
+        "min_impurity_decrease": 0.0,
         "max_features": "1.0",
+        "bootstrap": True,
+        "max_samples": None,
+        "ccp_alpha": 0.0,
+        "n_jobs": None,
         "enable_tuning": False,
         "tuning_method": "grid",
         "cv_folds": 5,
@@ -385,6 +403,71 @@ def task_family(task: str) -> str:
     return "classification" if task in {"binary_classification", "multiclass_classification"} else "regression"
 
 
+def _parse_optional_int_token(value: str | int | None, *, arg_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"none", "null"}:
+        return None
+    try:
+        return int(normalized)
+    except Exception as exc:
+        raise ValueError(f"Invalid {arg_name}. Expected integer or 'none'.") from exc
+
+
+def _stringify_optional_int(value: int | None) -> str:
+    return "none" if value is None else str(int(value))
+
+
+def _parse_optional_max_samples_token(value: str | int | float | None, *, arg_name: str) -> int | float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        parsed = value
+    else:
+        normalized = str(value).strip().lower()
+        if normalized in {"none", "null"}:
+            return None
+        try:
+            parsed = float(normalized) if "." in normalized else int(normalized)
+        except Exception as exc:
+            raise ValueError(f"Invalid {arg_name}. Expected int, float in (0,1], or 'none'.") from exc
+    if isinstance(parsed, int):
+        if parsed <= 0:
+            raise ValueError(f"Invalid {arg_name}. Integer value must be > 0.")
+        return parsed
+    parsed_float = float(parsed)
+    if not (0.0 < parsed_float <= 1.0):
+        raise ValueError(f"Invalid {arg_name}. Float value must be in range (0, 1].")
+    return parsed_float
+
+
+def _stringify_optional_max_samples(value: int | float | None) -> str:
+    if value is None:
+        return "none"
+    if isinstance(value, int):
+        return str(int(value))
+    return str(float(value))
+
+
+def _validate_rf_max_features_default(value: str, *, arg_name: str) -> None:
+    normalized = str(value).strip().lower()
+    if normalized in RF_MAX_FEATURE_PRESETS:
+        return
+    try:
+        parsed = float(normalized)
+    except Exception as exc:
+        raise ValueError(
+            f"Invalid {arg_name}. Allowed: auto, sqrt, log2, none, or float in (0, 1]."
+        ) from exc
+    if not (0.0 < parsed <= 1.0):
+        raise ValueError(
+            f"Invalid {arg_name}. Float value must be in range (0, 1]."
+        )
+
+
 def _starter_dataset_for_args(args: argparse.Namespace) -> dict | None:
     if not args.starter_dataset:
         return None
@@ -410,6 +493,14 @@ def render_template(template: str, replacements: dict[str, str]) -> str:
 
 
 def _supports_early_stopping_defaults(args: argparse.Namespace) -> bool:
+    if args.library == "tensorflow" and args.model == "dense_nn":
+        return True
+    if args.library == "xgboost":
+        return True
+    return False
+
+
+def _supports_validation_n_iter_defaults(args: argparse.Namespace) -> bool:
     if args.library == "tensorflow" and args.model == "dense_nn":
         return True
     if args.library == "xgboost":
@@ -505,6 +596,15 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         if early_stopping_default is None:
             early_stopping_default = DEFAULT_EARLY_STOPPING_BY_TEMPLATE[key]
 
+        replacements.update(
+            {
+                "EARLY_STOPPING_DEFAULT": "True" if early_stopping_default else "False",
+            }
+        )
+
+    if _supports_validation_n_iter_defaults(args):
+        key = (args.library, args.model if args.library in {"scikit-learn", "tensorflow"} else None, family)
+
         validation_fraction_default = args.default_validation_fraction
         if validation_fraction_default is None:
             validation_fraction_default = DEFAULT_VALIDATION_FRACTION_BY_TEMPLATE[key]
@@ -515,7 +615,6 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
 
         replacements.update(
             {
-                "EARLY_STOPPING_DEFAULT": "True" if early_stopping_default else "False",
                 "VALIDATION_FRACTION_DEFAULT": str(validation_fraction_default),
                 "N_ITER_NO_CHANGE_DEFAULT": str(n_iter_no_change_default),
             }
@@ -591,17 +690,57 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         default_rf_n_estimators = (
             args.default_rf_n_estimators if args.default_rf_n_estimators is not None else rf_defaults["n_estimators"]
         )
-        default_rf_max_depth = args.default_rf_max_depth if args.default_rf_max_depth is not None else rf_defaults["max_depth"]
+        default_rf_max_depth = _parse_optional_int_token(
+            args.default_rf_max_depth,
+            arg_name="--default-rf-max-depth",
+        ) if args.default_rf_max_depth is not None else rf_defaults["max_depth"]
+        default_rf_min_samples_split = (
+            args.default_rf_min_samples_split
+            if args.default_rf_min_samples_split is not None
+            else rf_defaults["min_samples_split"]
+        )
         default_rf_min_samples_leaf = (
             args.default_rf_min_samples_leaf
             if args.default_rf_min_samples_leaf is not None
             else rf_defaults["min_samples_leaf"]
+        )
+        default_rf_min_weight_fraction_leaf = (
+            args.default_rf_min_weight_fraction_leaf
+            if args.default_rf_min_weight_fraction_leaf is not None
+            else rf_defaults["min_weight_fraction_leaf"]
+        )
+        default_rf_max_leaf_nodes = _parse_optional_int_token(
+            args.default_rf_max_leaf_nodes,
+            arg_name="--default-rf-max-leaf-nodes",
+        ) if args.default_rf_max_leaf_nodes is not None else rf_defaults["max_leaf_nodes"]
+        default_rf_min_impurity_decrease = (
+            args.default_rf_min_impurity_decrease
+            if args.default_rf_min_impurity_decrease is not None
+            else rf_defaults["min_impurity_decrease"]
         )
         default_rf_max_features = (
             args.default_rf_max_features
             if args.default_rf_max_features is not None
             else rf_defaults["max_features"]
         )
+        default_rf_bootstrap = (
+            args.default_rf_bootstrap
+            if args.default_rf_bootstrap is not None
+            else rf_defaults["bootstrap"]
+        )
+        default_rf_max_samples = _parse_optional_max_samples_token(
+            args.default_rf_max_samples,
+            arg_name="--default-rf-max-samples",
+        ) if args.default_rf_max_samples is not None else rf_defaults["max_samples"]
+        default_rf_ccp_alpha = (
+            args.default_rf_ccp_alpha
+            if args.default_rf_ccp_alpha is not None
+            else rf_defaults["ccp_alpha"]
+        )
+        default_rf_n_jobs = _parse_optional_int_token(
+            args.default_rf_n_jobs,
+            arg_name="--default-rf-n-jobs",
+        ) if args.default_rf_n_jobs is not None else rf_defaults["n_jobs"]
         default_enable_tuning = args.default_rf_enable_tuning if args.default_rf_enable_tuning is not None else rf_defaults["enable_tuning"]
         default_tuning_method = args.default_rf_tuning_method if args.default_rf_tuning_method is not None else rf_defaults["tuning_method"]
         default_cv_folds = args.default_rf_cv_folds if args.default_rf_cv_folds is not None else rf_defaults["cv_folds"]
@@ -611,9 +750,17 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
         replacements.update(
             {
                 "RF_N_ESTIMATORS_DEFAULT": str(int(default_rf_n_estimators)),
-                "RF_MAX_DEPTH_DEFAULT": str(int(default_rf_max_depth)),
+                "RF_MAX_DEPTH_DEFAULT": _stringify_optional_int(default_rf_max_depth),
+                "RF_MIN_SAMPLES_SPLIT_DEFAULT": str(int(default_rf_min_samples_split)),
                 "RF_MIN_SAMPLES_LEAF_DEFAULT": str(int(default_rf_min_samples_leaf)),
+                "RF_MIN_WEIGHT_FRACTION_LEAF_DEFAULT": str(float(default_rf_min_weight_fraction_leaf)),
+                "RF_MAX_LEAF_NODES_DEFAULT": _stringify_optional_int(default_rf_max_leaf_nodes),
+                "RF_MIN_IMPURITY_DECREASE_DEFAULT": str(float(default_rf_min_impurity_decrease)),
                 "RF_MAX_FEATURES_DEFAULT": str(default_rf_max_features),
+                "RF_BOOTSTRAP_DEFAULT": "True" if default_rf_bootstrap else "False",
+                "RF_MAX_SAMPLES_DEFAULT": _stringify_optional_max_samples(default_rf_max_samples),
+                "RF_CCP_ALPHA_DEFAULT": str(float(default_rf_ccp_alpha)),
+                "RF_N_JOBS_DEFAULT": _stringify_optional_int(default_rf_n_jobs),
                 "RF_ENABLE_TUNING_DEFAULT": "True" if default_enable_tuning else "False",
                 "RF_TUNING_METHOD_DEFAULT": str(default_tuning_method),
                 "RF_CV_FOLDS_DEFAULT": str(int(default_cv_folds)),
@@ -910,10 +1057,41 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError(f"Invalid --default-solver '{args.default_solver}'. Allowed: {allowed}")
     if args.default_rf_n_estimators is not None and args.default_rf_n_estimators <= 0:
         raise ValueError("Invalid --default-rf-n-estimators. Must be a positive integer")
-    if args.default_rf_max_depth is not None and args.default_rf_max_depth <= 0:
-        raise ValueError("Invalid --default-rf-max-depth. Must be a positive integer")
+    if args.default_rf_max_depth is not None:
+        parsed_default_rf_max_depth = _parse_optional_int_token(
+            args.default_rf_max_depth,
+            arg_name="--default-rf-max-depth",
+        )
+        if parsed_default_rf_max_depth is not None and parsed_default_rf_max_depth <= 0:
+            raise ValueError("Invalid --default-rf-max-depth. Must be a positive integer or 'none'")
+    if args.default_rf_min_samples_split is not None and args.default_rf_min_samples_split < 2:
+        raise ValueError("Invalid --default-rf-min-samples-split. Must be >= 2")
     if args.default_rf_min_samples_leaf is not None and args.default_rf_min_samples_leaf < 1:
         raise ValueError("Invalid --default-rf-min-samples-leaf. Must be >= 1")
+    if args.default_rf_min_weight_fraction_leaf is not None and not (0.0 <= args.default_rf_min_weight_fraction_leaf <= 0.5):
+        raise ValueError("Invalid --default-rf-min-weight-fraction-leaf. Allowed range: 0 <= value <= 0.5")
+    if args.default_rf_max_leaf_nodes is not None:
+        parsed_default_rf_max_leaf_nodes = _parse_optional_int_token(
+            args.default_rf_max_leaf_nodes,
+            arg_name="--default-rf-max-leaf-nodes",
+        )
+        if parsed_default_rf_max_leaf_nodes is not None and parsed_default_rf_max_leaf_nodes < 2:
+            raise ValueError("Invalid --default-rf-max-leaf-nodes. Must be >= 2 or 'none'")
+    if args.default_rf_min_impurity_decrease is not None and args.default_rf_min_impurity_decrease < 0.0:
+        raise ValueError("Invalid --default-rf-min-impurity-decrease. Must be >= 0")
+    if args.default_rf_max_features is not None:
+        _validate_rf_max_features_default(args.default_rf_max_features, arg_name="--default-rf-max-features")
+    if args.default_rf_max_samples is not None:
+        _parse_optional_max_samples_token(args.default_rf_max_samples, arg_name="--default-rf-max-samples")
+    if args.default_rf_ccp_alpha is not None and args.default_rf_ccp_alpha < 0.0:
+        raise ValueError("Invalid --default-rf-ccp-alpha. Must be >= 0")
+    if args.default_rf_n_jobs is not None:
+        parsed_default_rf_n_jobs = _parse_optional_int_token(
+            args.default_rf_n_jobs,
+            arg_name="--default-rf-n-jobs",
+        )
+        if parsed_default_rf_n_jobs == 0:
+            raise ValueError("Invalid --default-rf-n-jobs. Must be != 0 or 'none'")
     if args.default_lr_l1_ratio is not None and not (0.0 <= args.default_lr_l1_ratio <= 1.0):
         raise ValueError("Invalid --default-lr-l1-ratio. Allowed range: 0 <= value <= 1")
     if args.default_lr_alpha is not None and args.default_lr_alpha <= 0:
@@ -994,12 +1172,22 @@ def validate_args(args: argparse.Namespace) -> None:
         if (
             args.default_rf_n_estimators is not None
             or args.default_rf_max_depth is not None
+            or args.default_rf_min_samples_split is not None
             or args.default_rf_min_samples_leaf is not None
+            or args.default_rf_min_weight_fraction_leaf is not None
+            or args.default_rf_max_leaf_nodes is not None
+            or args.default_rf_min_impurity_decrease is not None
             or args.default_rf_max_features is not None
+            or args.default_rf_bootstrap is not None
+            or args.default_rf_max_samples is not None
+            or args.default_rf_ccp_alpha is not None
+            or args.default_rf_n_jobs is not None
         ):
             raise ValueError(
                 "Invalid flags: --default-rf-n-estimators/--default-rf-max-depth/"
-                "--default-rf-min-samples-leaf/--default-rf-max-features are scikit-learn random_forest-only"
+                "--default-rf-min-samples-split/--default-rf-min-samples-leaf/--default-rf-min-weight-fraction-leaf/"
+                "--default-rf-max-leaf-nodes/--default-rf-min-impurity-decrease/--default-rf-max-features/"
+                "--default-rf-bootstrap/--default-rf-max-samples/--default-rf-ccp-alpha/--default-rf-n-jobs are scikit-learn random_forest-only"
             )
         if (
             args.default_lr_penalty is not None
@@ -1099,15 +1287,41 @@ def validate_args(args: argparse.Namespace) -> None:
             )
 
         if args.model == "logistic_regression":
+            logistic_defaults = DEFAULT_LOGISTIC_PARAMS_BY_TEMPLATE[("scikit-learn", "logistic_regression", family)]
+            effective_logistic_enable_tuning = (
+                args.default_logistic_enable_tuning
+                if args.default_logistic_enable_tuning is not None
+                else logistic_defaults["enable_tuning"]
+            )
+            effective_logistic_penalty = (
+                args.default_logistic_penalty
+                if args.default_logistic_penalty is not None
+                else logistic_defaults["penalty"]
+            )
+            if effective_logistic_enable_tuning and str(effective_logistic_penalty).strip().lower() == "none":
+                raise ValueError(
+                    "Invalid default combination: --default-logistic-penalty=none is not allowed when "
+                    "--default-logistic-enable-tuning=true"
+                )
             if (
                 args.default_rf_n_estimators is not None
                 or args.default_rf_max_depth is not None
+                or args.default_rf_min_samples_split is not None
                 or args.default_rf_min_samples_leaf is not None
+                or args.default_rf_min_weight_fraction_leaf is not None
+                or args.default_rf_max_leaf_nodes is not None
+                or args.default_rf_min_impurity_decrease is not None
                 or args.default_rf_max_features is not None
+                or args.default_rf_bootstrap is not None
+                or args.default_rf_max_samples is not None
+                or args.default_rf_ccp_alpha is not None
+                or args.default_rf_n_jobs is not None
             ):
                 raise ValueError(
                     "Invalid flags: --default-rf-n-estimators/--default-rf-max-depth/"
-                    "--default-rf-min-samples-leaf/--default-rf-max-features are scikit-learn random_forest-only"
+                    "--default-rf-min-samples-split/--default-rf-min-samples-leaf/--default-rf-min-weight-fraction-leaf/"
+                    "--default-rf-max-leaf-nodes/--default-rf-min-impurity-decrease/--default-rf-max-features/"
+                    "--default-rf-bootstrap/--default-rf-max-samples/--default-rf-ccp-alpha/--default-rf-n-jobs are scikit-learn random_forest-only"
                 )
             if (
                 args.default_lr_penalty is not None
@@ -1141,6 +1355,22 @@ def validate_args(args: argparse.Namespace) -> None:
             if args.default_logistic_tuning_method is not None and args.default_logistic_tuning_method not in {"grid", "random"}:
                 raise ValueError("Invalid --default-logistic-tuning-method. Allowed: grid, random")
         elif args.model == "linear_regression":
+            linear_defaults = DEFAULT_LINEAR_REGRESSION_PARAMS_BY_TEMPLATE[("scikit-learn", "linear_regression", family)]
+            effective_lr_enable_tuning = (
+                args.default_lr_enable_tuning
+                if args.default_lr_enable_tuning is not None
+                else linear_defaults["enable_tuning"]
+            )
+            effective_lr_penalty = (
+                args.default_lr_penalty
+                if args.default_lr_penalty is not None
+                else linear_defaults["penalty"]
+            )
+            if effective_lr_enable_tuning and str(effective_lr_penalty).strip().lower() == "none":
+                raise ValueError(
+                    "Invalid default combination: --default-lr-penalty=none is not allowed when "
+                    "--default-lr-enable-tuning=true"
+                )
             if args.default_c is not None or args.default_solver is not None or args.default_logistic_penalty is not None or args.default_logistic_class_weight is not None:
                 raise ValueError("Invalid flags: --default-c/--default-solver/--default-logistic-penalty/--default-logistic-class-weight are scikit-learn logistic-only")
             if (
@@ -1223,6 +1453,8 @@ def validate_args(args: argparse.Namespace) -> None:
                         f"Invalid --default-rf-cv-scoring '{args.default_rf_cv_scoring}' for task '{args.task}'. "
                         f"Allowed: {allowed}"
                     )
+            if args.default_rf_bootstrap is False and args.default_rf_max_samples is not None:
+                raise ValueError("Invalid default combination: --default-rf-max-samples requires --default-rf-bootstrap=true")
 
         if (
             args.default_xgb_enable_tuning is not None
@@ -1288,8 +1520,16 @@ def validate_args(args: argparse.Namespace) -> None:
             or args.default_logistic_class_weight is not None
             or args.default_rf_n_estimators is not None
             or args.default_rf_max_depth is not None
+            or args.default_rf_min_samples_split is not None
             or args.default_rf_min_samples_leaf is not None
+            or args.default_rf_min_weight_fraction_leaf is not None
+            or args.default_rf_max_leaf_nodes is not None
+            or args.default_rf_min_impurity_decrease is not None
             or args.default_rf_max_features is not None
+            or args.default_rf_bootstrap is not None
+            or args.default_rf_max_samples is not None
+            or args.default_rf_ccp_alpha is not None
+            or args.default_rf_n_jobs is not None
             or args.default_lr_penalty is not None
             or args.default_lr_alpha is not None
             or args.default_lr_fit_intercept is not None
@@ -1355,7 +1595,7 @@ def main():
     parser.add_argument(
         "--booster",
         required=False,
-        choices=["gbtree", "gblinear", "dart"],
+        choices=["auto", "gbtree", "gblinear", "dart"],
         help="xgboost booster (optional; xgboost only)",
     )
     parser.add_argument(
@@ -1379,7 +1619,7 @@ def main():
     parser.add_argument(
         "--default-solver",
         required=False,
-        choices=["lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"],
+        choices=["auto", "lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"],
         help="Default value injected into generated logistic classification template --solver flag",
     )
     parser.add_argument(
@@ -1390,9 +1630,31 @@ def main():
     )
     parser.add_argument(
         "--default-rf-max-depth",
+        required=False,
+        help="Default value injected into generated random forest template --max-depth flag (integer or 'none')",
+    )
+    parser.add_argument(
+        "--default-rf-min-samples-split",
         type=int,
         required=False,
-        help="Default value injected into generated random forest template --max-depth flag",
+        help="Default value injected into generated random forest template --min-samples-split flag",
+    )
+    parser.add_argument(
+        "--default-rf-min-weight-fraction-leaf",
+        type=float,
+        required=False,
+        help="Default value injected into generated random forest template --min-weight-fraction-leaf flag",
+    )
+    parser.add_argument(
+        "--default-rf-max-leaf-nodes",
+        required=False,
+        help="Default value injected into generated random forest template --max-leaf-nodes flag (integer or 'none')",
+    )
+    parser.add_argument(
+        "--default-rf-min-impurity-decrease",
+        type=float,
+        required=False,
+        help="Default value injected into generated random forest template --min-impurity-decrease flag",
     )
     parser.add_argument(
         "--default-rf-min-samples-leaf",
@@ -1404,6 +1666,28 @@ def main():
         "--default-rf-max-features",
         required=False,
         help="Default value injected into generated random forest template --max-features flag (e.g. sqrt, log2, 1.0)",
+    )
+    parser.add_argument(
+        "--default-rf-bootstrap",
+        type=_parse_bool,
+        required=False,
+        help="Default value injected into generated random forest template --bootstrap flag",
+    )
+    parser.add_argument(
+        "--default-rf-max-samples",
+        required=False,
+        help="Default value injected into generated random forest template --max-samples flag (int, float, or 'none')",
+    )
+    parser.add_argument(
+        "--default-rf-ccp-alpha",
+        type=float,
+        required=False,
+        help="Default value injected into generated random forest template --ccp-alpha flag",
+    )
+    parser.add_argument(
+        "--default-rf-n-jobs",
+        required=False,
+        help="Default value injected into generated random forest template --n-jobs flag (integer or 'none')",
     )
     parser.add_argument(
         "--default-n-estimators",
@@ -1456,7 +1740,7 @@ def main():
     parser.add_argument(
         "--default-lr-penalty",
         required=False,
-        choices=["none", "l1", "l2", "elasticnet"],
+        choices=["auto", "none", "l1", "l2", "elasticnet"],
         help="Default regularization penalty for linear regression template",
     )
     parser.add_argument(
@@ -1516,7 +1800,7 @@ def main():
     parser.add_argument(
         "--default-logistic-penalty",
         required=False,
-        choices=["none", "l1", "l2", "elasticnet"],
+        choices=["auto", "none", "l1", "l2", "elasticnet"],
         help="Default penalty for logistic regression template",
     )
     parser.add_argument(
@@ -1678,7 +1962,7 @@ def main():
     parser.add_argument(
         "--optimizer",
         required=False,
-        choices=["adam", "sgd", "rmsprop", "adagrad", "adamw"],
+        choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"],
         help="tensorflow optimizer",
     )
     parser.add_argument(
