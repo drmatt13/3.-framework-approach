@@ -6,14 +6,14 @@ from typing import Any
 
 @dataclass(frozen=True)
 class RandomForestSearchGridConfig:
-	n_estimators_grid: list[int] = field(default_factory=lambda: [100, 200, 300, 500])
-	max_depth_grid: list[int | None] = field(default_factory=lambda: [None, 8, 16, 32])
-	max_leaf_nodes_grid: list[int | None] = field(default_factory=lambda: [None, 64, 128])
-	max_features_grid: list[str | float | None] = field(default_factory=lambda: [None, "sqrt", "log2", 1.0])
-	max_samples_when_bootstrap_grid: list[int | float | None] = field(default_factory=lambda: [None, 0.7, 1.0])
-	min_weight_fraction_leaf_grid: list[float] = field(default_factory=lambda: [0.0, 0.01])
-	min_impurity_decrease_grid: list[float] = field(default_factory=lambda: [0.0, 1e-6, 1e-4])
-	ccp_alpha_grid: list[float] = field(default_factory=lambda: [0.0, 1e-4, 1e-3])
+	n_estimators: list[int] = field(default_factory=lambda: [100, 200, 300, 500])
+	max_depth: list[int | None] = field(default_factory=lambda: [None, 8, 16, 32])
+	max_leaf_nodes: list[int | None] = field(default_factory=lambda: [None, 64, 128])
+	max_features: list[str | float | None] = field(default_factory=lambda: [None, "sqrt", "log2", 1.0])
+	max_samples_when_bootstrap: list[int | float | None] = field(default_factory=lambda: [None, 0.7, 1.0])
+	min_weight_fraction_leaf: list[float] = field(default_factory=lambda: [0.0, 0.01])
+	min_impurity_decrease: list[float] = field(default_factory=lambda: [0.0, 1e-6, 1e-4])
+	ccp_alpha: list[float] = field(default_factory=lambda: [0.0, 1e-4, 1e-3])
 
 
 def _unique_preserve_order(values: list[Any]) -> list[Any]:
@@ -48,34 +48,34 @@ def build_random_forest_search_space(
 	_ = random_state
 
 	if max_depth is None:
-		max_depth_candidates = list(config.max_depth_grid)
+		max_depth_candidates = list(config.max_depth)
 	else:
 		max_depth_candidates = _unique_preserve_order([max_depth, max(2, int(max_depth) // 2), int(max_depth) * 2])
 
 	min_samples_split_candidates = _unique_preserve_order([2, int(min_samples_split), max(2, int(min_samples_split) * 2)])
 	min_samples_leaf_candidates = _unique_preserve_order([1, int(min_samples_leaf), max(1, int(min_samples_leaf) * 2)])
 	_ = min_weight_fraction_leaf
-	min_weight_fraction_leaf_candidates = list(config.min_weight_fraction_leaf_grid)
+	min_weight_fraction_leaf_candidates = list(config.min_weight_fraction_leaf)
 
 	if max_leaf_nodes is None:
-		max_leaf_nodes_candidates = list(config.max_leaf_nodes_grid)
+		max_leaf_nodes_candidates = list(config.max_leaf_nodes)
 	else:
 		max_leaf_nodes_candidates = _unique_preserve_order([None, int(max_leaf_nodes), max(2, int(max_leaf_nodes) * 2)])
 
 	_ = min_impurity_decrease
-	min_impurity_decrease_candidates = list(config.min_impurity_decrease_grid)
+	min_impurity_decrease_candidates = list(config.min_impurity_decrease)
 
 	if max_features is None:
-		max_features_candidates = list(config.max_features_grid)
+		max_features_candidates = list(config.max_features)
 	else:
 		max_features_candidates = _unique_preserve_order([max_features, "sqrt", "log2", 1.0])
 
 	_ = ccp_alpha
-	ccp_alpha_candidates = list(config.ccp_alpha_grid)
+	ccp_alpha_candidates = list(config.ccp_alpha)
 
 	prefix = f"{step_name}__"
 	base: dict[str, list[Any]] = {
-		f"{prefix}n_estimators": list(config.n_estimators_grid),
+		f"{prefix}n_estimators": list(config.n_estimators),
 		f"{prefix}max_depth": max_depth_candidates,
 		f"{prefix}min_samples_split": min_samples_split_candidates,
 		f"{prefix}min_samples_leaf": min_samples_leaf_candidates,
@@ -87,6 +87,6 @@ def build_random_forest_search_space(
 		f"{prefix}bootstrap": [bool(bootstrap)],
 	}
 	if bootstrap:
-		base[f"{prefix}max_samples"] = [max_samples] if max_samples is not None else list(config.max_samples_when_bootstrap_grid)
+		base[f"{prefix}max_samples"] = [max_samples] if max_samples is not None else list(config.max_samples_when_bootstrap)
 
 	return [base]

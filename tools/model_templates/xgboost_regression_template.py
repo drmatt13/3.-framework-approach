@@ -48,47 +48,48 @@ from libraries.xgboost_template_utils import resolve_xgboost_device as _resolve_
 # =============================================================
 
 # ---------------------------------------------------------------------
-# Supported CLI flags (common usage)
+# Supported CLI flags (XGBoost Regression)
 #
-#   Run + Artifacts + Logging
-#   --name <model_name>
-#   --save-model true|false
-#   --verbose 0|1|2|auto
-#   --metric-decimals <int>
+# Core run options (auto-configured for all ML models generated)
+#   --name <model_name>                             (model name used for registry and artifact folder; default: script filename)
+#   --artifact-name-mode full|short                 (full = timestamp + UUID for unique runs; short = readable name but may overwrite previous runs)
+#   --save-model true|false                         (save trained model and artifacts; false logs metrics only)
+#   --verbose 0|1|2|auto                            (0=silent, 1=training progress, 2=training + tuning progress, auto=adaptive verbosity)
+#   --metric-decimals <int>                         (decimal precision for logged metrics and artifacts)
 #
-#   Reproducibility + Data Split
-#   --task regression
-#   --random-state <int>
-#   --test-size <float> (e.g., 0.2 for 80/20 split)
+# Reproducibility + data split
+#   --task binary_classification|										(task type for metric calculation and logging)
+# 				 multiclass_classification								^
+#   --random-state <int>                            (random seed for reproducibility)
+#   --test-size <float>                             (test set fraction; e.g., 0.2 = 80/20 split)
+#   --booster gbtree|gblinear|dart             			(booster algorithm used for training)
 #
-#   Model Configuration (direct-fit)
-#   --booster auto|gbtree|gblinear|dart
-#       auto  — resolves to gbtree for direct-fit; searches all three during tuning
-#       When tuning: constrains the CV search space to the selected booster family.
-#       gbtree/dart include tree params (max_depth, subsample, colsample_bytree,
-#       min_child_weight). gblinear uses only regularization + learning rate.
-#   --device auto|cpu|gpu
-#   --n-estimators <int>
-#   --learning-rate <float>
-#   --max-depth <int>          (tree boosters only)
-#   --subsample <float>        (tree boosters only)
-#   --colsample-bytree <float> (tree boosters only)
-#   --min-child-weight <float> (tree boosters only)
-#   --reg-lambda <float>
-#   --reg-alpha <float>
+# Hyperparameter tuning configuration
+#   --enable-tuning true|false                  		(enable hyperparameter tuning with cross-validation)
+
+# Model configuration (direct-fit)              (used when --enable-tuning=false)
+#   --device auto|cpu|gpu                           (training device selection)
+#   --n-estimators <int>                            (number of boosting rounds)
+#   --learning-rate <float>                         (step size shrinkage used during boosting)
+#   --max-depth <int>                               (tree boosters only)
+#   --subsample <float>                             (tree boosters only)
+#   --colsample-bytree <float>                      (tree boosters only)
+#   --min-child-weight <float>                      (tree boosters only)
+#   --reg-lambda <float>                            (L2 regularization strength)
+#   --reg-alpha <float>                             (L1 regularization strength)
 #
-#   Training Path
-#   --early-stopping true|false
-#   --validation-fraction <float>
-#   --n-iter-no-change <int>
-#   --enable-tuning true|false
+# Training path
+#   --early-stopping true|false                     (enable early stopping during training)
+#   --validation-fraction <float>                   (fraction of training set used for validation)
+#   --n-iter-no-change <int>                        (stop training if validation score does not improve for N rounds)
+#   --enable-tuning true|false                      (enable hyperparameter tuning with cross-validation)
 #
-#   Tuning-specific (only when --enable-tuning=true)
-#   --tuning-method random
-#   --cv-folds <int>
-#   --cv-scoring rmse|mae|r2
-#   --cv-n-iter <int>
-#   --cv-n-jobs <int> (parallel jobs; -1 uses all cores)
+# Hyperparameter tuning                         (used when --enable-tuning=true)
+#   --tuning-method random                          (randomized hyperparameter search)
+#   --cv-folds <int>                                (number of cross-validation folds)
+#   --cv-scoring rmse|mae|r2                        (metric used during CV tuning)
+#   --cv-n-iter <int>                               (number of random search iterations)
+#   --cv-n-jobs <int>                               (CV search parallelism; -1 uses all cores)
 # ---------------------------------------------------------------------
 
 # Default values for optional parameters. These can be overridden via CLI.

@@ -68,7 +68,7 @@ from libraries.sklearn_template_utils import parse_max_features as _parse_max_fe
 # ---------------------------------------------------------------------
 # Supported CLI flags (Random Forest Classification)
 #
-# Core run options (auto configured for all ML models generated)
+# Core run options (auto-configured for all ML models generated)
 #   --name <model_name>                             (model name used for registry and artifact folder; default: script filename)
 #   --artifact-name-mode full|short                 (full = timestamp + UUID for unique runs; short = readable name but may overwrite previous runs)
 #   --save-model true|false                         (save trained model and artifacts; false logs metrics only)
@@ -109,14 +109,14 @@ from libraries.sklearn_template_utils import parse_max_features as _parse_max_fe
 
 # NOTE: Adjust these grids to customize search breadth for tuning.
 RANDOM_FOREST_SEARCH_GRID_CONFIG = RandomForestSearchGridConfig(
-	n_estimators_grid=[100, 200, 300, 500],  # number of trees in the forest
-	max_depth_grid=[None, 4, 8, 16, 32],  # None = unlimited depth (trees expand until other stopping rules)
-	max_leaf_nodes_grid=[None, 32, 64, 128],  # None = no limit on number of leaf nodes
-	max_features_grid=[1.0, "sqrt", "log2"],  # number of features considered at each split (1.0 = all features)
-	max_samples_when_bootstrap_grid=[0.5, 0.7, 1.0],  # fraction of rows sampled per tree when bootstrap=True
-	min_weight_fraction_leaf_grid=[0.0, 0.01],  # minimum weighted fraction of samples required at a leaf node
-	min_impurity_decrease_grid=[0.0, 1e-6, 1e-4],  # minimum impurity reduction required to split a node
-	ccp_alpha_grid=[0.0, 1e-5, 1e-4, 1e-3],  # cost-complexity pruning strength (larger values prune more)
+	n_estimators=[100, 200, 300, 500],  # number of trees in the forest
+	max_depth=[None, 4, 8, 16, 32],  # None = unlimited depth (trees expand until other stopping rules)
+	max_leaf_nodes=[None, 32, 64, 128],  # None = no limit on number of leaf nodes
+	max_features=[1.0, "sqrt", "log2"],  # number of features considered at each split (1.0 = all features)
+	max_samples_when_bootstrap=[0.5, 0.7, 1.0],  # fraction of rows sampled per tree when bootstrap=True
+	min_weight_fraction_leaf=[0.0, 0.01],  # minimum weighted fraction of samples required at a leaf node
+	min_impurity_decrease=[0.0, 1e-6, 1e-4],  # minimum impurity reduction required to split a node
+	ccp_alpha=[0.0, 1e-5, 1e-4, 1e-3],  # cost-complexity pruning strength (larger values prune more)
 )
 
 # Default values for optional parameters. These can be overridden via CLI.

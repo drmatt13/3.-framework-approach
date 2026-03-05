@@ -13,9 +13,9 @@ from libraries.logistic_compat import (
 @dataclass(frozen=True)
 class LogisticRegressionSearchGridConfig:
     c_grid: Sequence[float]
-    max_iter_grid: Sequence[int]
-    class_weight_grid: Sequence[Any]
-    elasticnet_l1_ratio_grid: Sequence[float]
+    max_iter: Sequence[int]
+    class_weight: Sequence[Any]
+    elasticnet_l1_ratio: Sequence[float]
     solver_penalty_compat: Mapping[str, Sequence[str]] | None = None
     solver_order: Sequence[str] | None = None
 
@@ -49,9 +49,9 @@ def _resolve_compat(config: LogisticRegressionSearchGridConfig) -> dict[str, lis
 
 def _validate_config(config: LogisticRegressionSearchGridConfig) -> None:
     _as_non_empty_list(config.c_grid, field_name="c_grid")
-    _as_non_empty_list(config.max_iter_grid, field_name="max_iter_grid")
-    _as_non_empty_list(config.class_weight_grid, field_name="class_weight_grid")
-    _as_non_empty_list(config.elasticnet_l1_ratio_grid, field_name="elasticnet_l1_ratio_grid")
+    _as_non_empty_list(config.max_iter, field_name="max_iter")
+    _as_non_empty_list(config.class_weight, field_name="class_weight")
+    _as_non_empty_list(config.elasticnet_l1_ratio, field_name="elasticnet_l1_ratio")
     compat = _resolve_compat(config)
     order = _resolve_solver_order(config, compat)
     if not any(solver in compat for solver in order):
@@ -68,9 +68,9 @@ def build_logistic_regression_search_space(
     _validate_config(config)
 
     c_grid = _as_non_empty_list(config.c_grid, field_name="c_grid")
-    max_iter_grid = _as_non_empty_list(config.max_iter_grid, field_name="max_iter_grid")
-    class_weight_grid = _as_non_empty_list(config.class_weight_grid, field_name="class_weight_grid")
-    elasticnet_l1_ratio_grid = _as_non_empty_list(config.elasticnet_l1_ratio_grid, field_name="elasticnet_l1_ratio_grid")
+    max_iter = _as_non_empty_list(config.max_iter, field_name="max_iter")
+    class_weight = _as_non_empty_list(config.class_weight, field_name="class_weight")
+    elasticnet_l1_ratio = _as_non_empty_list(config.elasticnet_l1_ratio, field_name="elasticnet_l1_ratio")
 
     compat = _resolve_compat(config)
     solver_order = _resolve_solver_order(config, compat)
@@ -101,8 +101,8 @@ def build_logistic_regression_search_space(
                 "classifier__solver": grouped_solvers,
                 "classifier__penalty": list(supported_penalties),
                 "classifier__C": c_grid,
-                "classifier__class_weight": class_weight_grid,
-                "classifier__max_iter": max_iter_grid,
+                "classifier__class_weight": class_weight,
+                "classifier__max_iter": max_iter,
             }
         )
 
@@ -111,10 +111,10 @@ def build_logistic_regression_search_space(
             {
                 "classifier__solver": elasticnet_solvers,
                 "classifier__penalty": ["elasticnet"],
-                "classifier__l1_ratio": elasticnet_l1_ratio_grid,
+                "classifier__l1_ratio": elasticnet_l1_ratio,
                 "classifier__C": c_grid,
-                "classifier__class_weight": class_weight_grid,
-                "classifier__max_iter": max_iter_grid,
+                "classifier__class_weight": class_weight,
+                "classifier__max_iter": max_iter,
             }
         )
 

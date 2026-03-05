@@ -55,7 +55,7 @@ from libraries.serialization_utils import json_safe_best_params as _json_safe_be
 # ---------------------------------------------------------------------
 # Supported CLI flags (Linear Regression)
 #
-# Core run options (auto configured for all ML models generated)
+# Core run options (auto-configured for all ML models generated)
 #   --name <model_name>                             (model name used for registry and artifact folder; default: script filename)
 #   --artifact-name-mode full|short                 (full = timestamp + UUID for unique runs; short = readable name but may overwrite previous runs)
 #   --save-model true|false                         (save trained model and artifacts; false logs metrics only)
@@ -86,13 +86,13 @@ from libraries.serialization_utils import json_safe_best_params as _json_safe_be
 
 # NOTE: Adjust these grids to customize search breadth for tuning.
 LINEAR_REGRESSION_SEARCH_GRID_CONFIG = LinearRegressionSearchGridConfig(
-	fit_intercept_grid=[True, False],  # whether to learn an intercept term (bias)
-	ridge_alpha_grid=[1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0],  # Ridge (L2) regularization strength
-	lasso_alpha_grid=[1e-4, 1e-3, 1e-2, 1e-1, 1.0],  # Lasso (L1) regularization strength
-	lasso_max_iter_grid=[5_000, 10_000, 20_000],  # max optimization iterations for Lasso convergence
-	elasticnet_alpha_grid=[1e-4, 1e-3, 1e-2, 1e-1, 1.0],  # ElasticNet overall regularization strength
-	elasticnet_l1_ratio_grid=[0.1, 0.3, 0.5, 0.7, 0.9],  # ElasticNet mixing parameter (0≈Ridge/L2, 1≈Lasso/L1)
-	elasticnet_max_iter_grid=[5_000, 10_000, 20_000],  # max optimization iterations for ElasticNet convergence
+	fit_intercept=[True, False],  # whether to learn an intercept term (bias)
+	ridge_alpha=[1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0],  # Ridge (L2) regularization strength
+	lasso_alpha=[1e-4, 1e-3, 1e-2, 1e-1, 1.0],  # Lasso (L1) regularization strength
+	lasso_max_iter=[5_000, 10_000, 20_000],  # max optimization iterations for Lasso convergence
+	elasticnet_alpha=[1e-4, 1e-3, 1e-2, 1e-1, 1.0],  # ElasticNet overall regularization strength
+	elasticnet_l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],  # ElasticNet mixing parameter (0≈Ridge/L2, 1≈Lasso/L1)
+	elasticnet_max_iter=[5_000, 10_000, 20_000],  # max optimization iterations for ElasticNet convergence
 )
 
 # Default values for optional parameters. These can be overridden via CLI.

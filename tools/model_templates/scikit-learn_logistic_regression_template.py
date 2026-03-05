@@ -76,7 +76,7 @@ from libraries.logistic_compat import (
 # ---------------------------------------------------------------------
 # Supported CLI flags (Logistic Regression)
 #
-# Core run options (auto configured for all ML models generated)
+# Core run options (auto-configured for all ML models generated)
 #   --name <model_name>                             (model name used for registry and artifact folder; default: script filename)
 #   --artifact-name-mode full|short                 (full = timestamp + UUID for unique runs; short = readable name but may overwrite previous runs)
 #   --save-model true|false                         (save trained model and artifacts; false logs metrics only)
@@ -116,9 +116,9 @@ from libraries.logistic_compat import (
 # NOTE: Adjust these grids to customize search breadth for tuning.
 LOGISTIC_SEARCH_GRID_CONFIG = LogisticRegressionSearchGridConfig(
 	c_grid=[0.01, 0.1, 1.0, 10.0],  # inverse regularization strength (smaller = stronger regularization)
-	max_iter_grid=[500, 1000, 2000],  # maximum optimization iterations allowed for solver convergence
-	class_weight_grid=[None, "balanced"],  # None = uniform weights; "balanced" adjusts weights for class imbalance
-	elasticnet_l1_ratio_grid=[0.2, 0.5, 0.8],  # elasticnet mixing ratio (0≈L2, 1≈L1); only used when penalty="elasticnet"
+	max_iter=[500, 1000, 2000],  # maximum optimization iterations allowed for solver convergence
+	class_weight=[None, "balanced"],  # None = uniform weights; "balanced" adjusts weights for class imbalance
+	elasticnet_l1_ratio=[0.2, 0.5, 0.8],  # elasticnet mixing ratio (0≈L2, 1≈L1); only used when penalty="elasticnet"
 	solver_penalty_compat=_SOLVER_PENALTY_COMPAT,  # mapping of valid solver→penalty combinations to avoid illegal configs
 	solver_order=_NON_AUTO_LOGISTIC_SOLVERS,  # deterministic order of concrete solvers (excluding "auto") for tuning/search
 )
