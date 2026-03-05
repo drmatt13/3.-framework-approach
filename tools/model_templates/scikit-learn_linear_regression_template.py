@@ -53,45 +53,46 @@ from libraries.serialization_utils import json_safe_best_params as _json_safe_be
 # =============================================================
 
 # ---------------------------------------------------------------------
-# Supported CLI flags (Linear Regression template)
+# Supported CLI flags (Linear Regression)
 #
-# Core run options
-#   --name <model_name>
-#   --artifact-name-mode full|short
-#   --save-model true|false
-#   --verbose 0|1|2|auto
-#   --metric-decimals <int>
+# Core run options (auto configured for all ML models generated)
+#   --name <model_name>                             (model name used for registry and artifact folder; default: script filename)
+#   --artifact-name-mode full|short                 (full = timestamp + UUID for unique runs; short = readable name but may overwrite previous runs)
+#   --save-model true|false                         (save trained model and artifacts; false logs metrics only)
+#   --verbose 0|1|2|auto                            (0=silent, 1=training progress, 2=training + tuning progress, auto=adaptive verbosity)
+#   --metric-decimals <int>                         (decimal precision for logged metrics and artifacts)
 #
 # Data split / reproducibility
-#   --random-state <int>
-#   --test-size <float>                  (e.g., 0.2 for 80/20 split)
+#   --random-state <int>                            (random seed for reproducibility)
+#   --test-size <float>                             (test set fraction; e.g., 0.2 = 80/20 split)
 #
-# Model family / regularization
-#   --penalty auto|none|l1|l2|elasticnet
+# Hyperparameter tuning configuration
+#   --enable-tuning true|false                  		(enable hyperparameter tuning with cross-validation)
+# 
+# Direct-fit hyperparameters 										(used when --enable-tuning=false)
+#   --penalty none|l1|l2|elasticnet             		(linear model variant / regularization type to use)
+#   --l1-ratio <float>                              (elasticnet mixing parameter; only used when penalty=elasticnet)
+#   --alpha <float>                                 (regularization strength; used for l1, l2, and elasticnet)
+#   --fit-intercept true|false                      (whether to learn an intercept term)
 #
-# Direct-fit hyperparameters (used when --enable-tuning=false)
-#   --alpha <float>                      (used for l1/l2/elasticnet)
-#   --fit-intercept true|false
-#   --l1-ratio <float>                   (only for penalty=elasticnet)
-#
-# Hyperparameter tuning
-#   --enable-tuning true|false
-#   --tuning-method grid|random
-#   --cv-folds <int>
-#   --cv-scoring rmse|mae|r2
-#   --cv-n-iter <int>                    (random search only)
-#   --cv-n-jobs <int>                    (-1 uses all cores)
+# Hyperparameter tuning 												(used when --enable-tuning=true)
+#   --penalty auto|l1|l2|elasticnet	               	(linear model variant / regularization type to use)
+#   --tuning-method grid|random                     (grid = exhaustive search over grid; random = randomized search over iterations)
+#   --cv-n-iter <int>                               (random search iterations; only used when --tuning-method=random)
+#   --cv-folds <int>                                (number of cross-validation folds)
+#   --cv-scoring rmse|mae|r2                        (metric used during CV tuning)
+#   --cv-n-jobs <int>                               (CV search parallelism; -1 uses all cores)
 # ---------------------------------------------------------------------
 
 # NOTE: Adjust these grids to customize search breadth for tuning.
 LINEAR_REGRESSION_SEARCH_GRID_CONFIG = LinearRegressionSearchGridConfig(
-	fit_intercept_grid=[True, False],
-	ridge_alpha_grid=[1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0],
-	lasso_alpha_grid=[1e-4, 1e-3, 1e-2, 1e-1, 1.0],
-	lasso_max_iter_grid=[5_000, 10_000, 20_000],
-	elasticnet_alpha_grid=[1e-4, 1e-3, 1e-2, 1e-1, 1.0],
-	elasticnet_l1_ratio_grid=[0.1, 0.3, 0.5, 0.7, 0.9],
-	elasticnet_max_iter_grid=[5_000, 10_000, 20_000],
+	fit_intercept_grid=[True, False],  # whether to learn an intercept term (bias)
+	ridge_alpha_grid=[1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0],  # Ridge (L2) regularization strength
+	lasso_alpha_grid=[1e-4, 1e-3, 1e-2, 1e-1, 1.0],  # Lasso (L1) regularization strength
+	lasso_max_iter_grid=[5_000, 10_000, 20_000],  # max optimization iterations for Lasso convergence
+	elasticnet_alpha_grid=[1e-4, 1e-3, 1e-2, 1e-1, 1.0],  # ElasticNet overall regularization strength
+	elasticnet_l1_ratio_grid=[0.1, 0.3, 0.5, 0.7, 0.9],  # ElasticNet mixing parameter (0≈Ridge/L2, 1≈Lasso/L1)
+	elasticnet_max_iter_grid=[5_000, 10_000, 20_000],  # max optimization iterations for ElasticNet convergence
 )
 
 # Default values for optional parameters. These can be overridden via CLI.

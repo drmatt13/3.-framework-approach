@@ -66,53 +66,57 @@ from libraries.sklearn_template_utils import parse_max_features as _parse_max_fe
 # =============================================================
 
 # ---------------------------------------------------------------------
-# Supported CLI flags (Random Forest Classification template)
+# Supported CLI flags (Random Forest Classification)
 #
-# Core run options
-#   --name <model_name>
-#   --artifact-name-mode full|short
-#   --save-model true|false
-#   --verbose 0|1|2|auto
-#   --metric-decimals <int>
+# Core run options (auto configured for all ML models generated)
+#   --name <model_name>                             (model name used for registry and artifact folder; default: script filename)
+#   --artifact-name-mode full|short                 (full = timestamp + UUID for unique runs; short = readable name but may overwrite previous runs)
+#   --save-model true|false                         (save trained model and artifacts; false logs metrics only)
+#   --verbose 0|1|2|auto                            (0=silent, 1=training progress, 2=training + tuning progress, auto=adaptive verbosity)
+#   --metric-decimals <int>                         (decimal precision for logged metrics and artifacts)
 #
-# Task + reproducibility
-#   --task binary_classification|multiclass_classification
-#   --random-state <int>
-#   --test-size <float>                  (e.g., 0.2 for 80/20 split)
+# Task + data split / reproducibility
+#   --task binary_classification|										(task type for metric calculation and logging)
+# 				 multiclass_classification								^
+#   --random-state <int>                           	(random seed for reproducibility)
+#   --test-size <float>                            	(test set fraction; e.g., 0.2 = 80/20 split)
 #
-# Direct-fit model settings (used when --enable-tuning=false)
-#   --n-estimators <int>
-#   --max-depth <int|none>
-#   --min-samples-split <int>
-#   --min-samples-leaf <int>
-#   --min-weight-fraction-leaf <float>
-#   --max-leaf-nodes <int|none>
-#   --min-impurity-decrease <float>
-#   --max-features auto|sqrt|log2|float|none
-#   --bootstrap true|false
-#   --max-samples <int|float|none>       (requires --bootstrap=true; 1.0 uses all rows)
-#   --ccp-alpha <float>
-#   --n-jobs <int|none>                  (estimator parallelism for fit/predict)
+# Hyperparameter tuning configuration
+#   --enable-tuning true|false                  		(enable hyperparameter tuning with cross-validation)
+# 
+# Direct-fit model settings 										(used when --enable-tuning=false)
+#   --n-estimators <int>                           	(number of trees in the forest)
+#   --max-depth <int>                         			(maximum depth of each tree)
+#   --max-leaf-nodes <int|none>                    	(maximum number of leaf nodes)
+#   --min-samples-split <int>                      	(minimum samples required to split an internal node)
+#   --min-samples-leaf <int>                       	(minimum samples required at a leaf node)
+#   --min-impurity-decrease <float>                	(minimum impurity decrease required to split a node)
+#   --min-weight-fraction-leaf <float>             	(minimum weighted fraction of samples required at a leaf node)
+#   --max-features sqrt|log2|auto|none|custom       (number of features considered when selecting each split)
+#   --bootstrap true|false                         	(use bootstrap samples when building trees)
+#   --max-samples <int|float>                 			(requires --bootstrap=true; 1.0 uses entire dataset)
+#   --ccp-alpha <float>                            	(cost-complexity pruning strength)
+#   --n-jobs <int>                            			(estimator parallelism; -1 uses all cores)
 #
-# Hyperparameter tuning
-#   --enable-tuning true|false
-#   --tuning-method grid|random
-#   --cv-folds <int>
-#   --cv-scoring f1_macro|accuracy|roc_auc_ovr
-#   --cv-n-iter <int>                    (random search only)
-#   --cv-n-jobs <int>                    (CV search parallelism; -1 uses all cores)
+# Hyperparameter tuning 												(used when --enable-tuning=true)
+#   --enable-tuning true|false                     	(enable hyperparameter tuning with cross-validation)
+#   --tuning-method grid|random                    	(grid = exhaustive search over grid; random = randomized search over iterations)
+#   --cv-n-iter <int>                              	(random search iterations; only used when --tuning-method=random)
+#   --cv-folds <int>                               	(number of cross-validation folds)
+#   --cv-scoring f1_macro|accuracy|roc_auc_ovr     	(metric used during CV tuning)
+#   --cv-n-jobs <int>                              	(CV search parallelism; -1 uses all cores)
 # ---------------------------------------------------------------------
 
 # NOTE: Adjust these grids to customize search breadth for tuning.
 RANDOM_FOREST_SEARCH_GRID_CONFIG = RandomForestSearchGridConfig(
-	n_estimators_grid=[100, 200, 300, 500],
-	max_depth_when_none_grid=[None, 8, 16, 32],
-	max_leaf_nodes_when_none_grid=[None, 64, 128],
-	max_features_when_none_grid=[None, "sqrt", "log2", 1.0],
-	max_samples_when_bootstrap_and_none_grid=[None, 0.7, 1.0],
-	min_weight_fraction_leaf_grid=[0.0, 0.01],
-	min_impurity_decrease_grid=[0.0, 1e-6, 1e-4],
-	ccp_alpha_grid=[0.0, 1e-4, 1e-3],
+	n_estimators_grid=[100, 200, 300, 500],  # number of trees in the forest
+	max_depth_when_none_grid=[None, 4, 8, 16, 32],  # None = unlimited depth (trees expand until other stopping rules)
+	max_leaf_nodes_when_none_grid=[None, 32, 64, 128],  # None = no limit on number of leaf nodes
+	max_features_when_none_grid=[None, "sqrt", "log2", 1.0],  # None = sklearn default feature sampling for RandomForest
+	max_samples_when_bootstrap_and_none_grid=[None, 0.5, 0.7, 1.0],  # None = when bootstrap=True, each tree trains on all rows
+	min_weight_fraction_leaf_grid=[0.0, 0.01],  # minimum weighted fraction of samples required at a leaf node
+	min_impurity_decrease_grid=[0.0, 1e-6, 1e-4],  # minimum impurity reduction required to split a node
+	ccp_alpha_grid=[0.0, 1e-5, 1e-4, 1e-3],  # cost-complexity pruning strength (larger values prune more)
 )
 
 # Default values for optional parameters. These can be overridden via CLI.

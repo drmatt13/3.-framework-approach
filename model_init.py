@@ -885,6 +885,14 @@ def main() -> int:
 
             if xgb_enable_tuning:
                 xgb_tuning_method = "random"
+                xgb_cv_n_iter = _ask_text(
+                    "Enter random-search iterations (>0):",
+                    default="20",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                )
+                if xgb_cv_n_iter is None:
+                    print("Cancelled.")
+                    return 0
                 xgb_cv_folds = _ask_text(
                     "Enter CV folds (>=2):",
                     default="5",
@@ -898,14 +906,6 @@ def main() -> int:
                     choices=["rmse", "mae", "r2"] if task == "regression" else ["f1_macro", "accuracy", "roc_auc_ovr"],
                 )
                 if xgb_cv_scoring is None:
-                    print("Cancelled.")
-                    return 0
-                xgb_cv_n_iter = _ask_text(
-                    "Enter random-search iterations (>0):",
-                    default="20",
-                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-                )
-                if xgb_cv_n_iter is None:
                     print("Cancelled.")
                     return 0
                 xgb_cv_n_jobs = _ask_text(
@@ -1094,6 +1094,15 @@ def main() -> int:
                 if logistic_tuning_method is None:
                     print("Cancelled.")
                     return 0
+                if logistic_tuning_method == "random":
+                    logistic_cv_n_iter = _ask_text(
+                        "Enter random-search iterations (>0):",
+                        default="20",
+                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                    )
+                    if logistic_cv_n_iter is None:
+                        print("Cancelled.")
+                        return 0
                 logistic_cv_folds = _ask_text(
                     "Enter CV folds (>=2):",
                     default="5",
@@ -1109,15 +1118,6 @@ def main() -> int:
                 if logistic_cv_scoring is None:
                     print("Cancelled.")
                     return 0
-                if logistic_tuning_method == "random":
-                    logistic_cv_n_iter = _ask_text(
-                        "Enter random-search iterations (>0):",
-                        default="20",
-                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-                    )
-                    if logistic_cv_n_iter is None:
-                        print("Cancelled.")
-                        return 0
                 logistic_cv_n_jobs = _ask_text(
                     "Enter cv_n_jobs (integer != 0; -1 for all cores):",
                     default="-1",
@@ -1177,6 +1177,15 @@ def main() -> int:
                 if rf_tuning_method is None:
                     print("Cancelled.")
                     return 0
+                if rf_tuning_method == "random":
+                    rf_cv_n_iter = _ask_text(
+                        "Enter random-search iterations (>0):",
+                        default="20",
+                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                    )
+                    if rf_cv_n_iter is None:
+                        print("Cancelled.")
+                        return 0
                 rf_cv_folds = _ask_text(
                     "Enter CV folds (>=2):",
                     default="5",
@@ -1192,15 +1201,6 @@ def main() -> int:
                 if rf_cv_scoring is None:
                     print("Cancelled.")
                     return 0
-                if rf_tuning_method == "random":
-                    rf_cv_n_iter = _ask_text(
-                        "Enter random-search iterations (>0):",
-                        default="20",
-                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-                    )
-                    if rf_cv_n_iter is None:
-                        print("Cancelled.")
-                        return 0
                 rf_cv_n_jobs = _ask_text(
                     "Enter cv_n_jobs (integer != 0; -1 for all cores):",
                     default="-1",
@@ -1450,19 +1450,19 @@ def main() -> int:
 
         if tf_enable_tuning:
             tf_tuning_method = "random"
-            tf_cv_scoring = _ask_select(
-                "Select tuning scoring metric:",
-                choices=["rmse"] if task == "regression" else ["f1_macro"],
-            )
-            if tf_cv_scoring is None:
-                print("Cancelled.")
-                return 0
             tf_cv_n_iter = _ask_text(
                 "Enter random-search iterations (>0):",
                 default="10",
                 validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
             )
             if tf_cv_n_iter is None:
+                print("Cancelled.")
+                return 0
+            tf_cv_scoring = _ask_select(
+                "Select tuning scoring metric:",
+                choices=["rmse"] if task == "regression" else ["f1_macro"],
+            )
+            if tf_cv_scoring is None:
                 print("Cancelled.")
                 return 0
 
@@ -1532,6 +1532,15 @@ def main() -> int:
                 if lr_tuning_method is None:
                     print("Cancelled.")
                     return 0
+                if lr_tuning_method == "random":
+                    lr_cv_n_iter = _ask_text(
+                        "Enter random-search iterations (>0):",
+                        default="20",
+                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                    )
+                    if lr_cv_n_iter is None:
+                        print("Cancelled.")
+                        return 0
 
                 lr_cv_folds = _ask_text(
                     "Enter CV folds (>=2):",
@@ -1549,16 +1558,6 @@ def main() -> int:
                 if lr_cv_scoring is None:
                     print("Cancelled.")
                     return 0
-
-                if lr_tuning_method == "random":
-                    lr_cv_n_iter = _ask_text(
-                        "Enter random-search iterations (>0):",
-                        default="20",
-                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-                    )
-                    if lr_cv_n_iter is None:
-                        print("Cancelled.")
-                        return 0
 
                 lr_cv_n_jobs = _ask_text(
                     "Enter cv_n_jobs (integer != 0; -1 for all cores):",

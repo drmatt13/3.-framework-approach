@@ -74,45 +74,53 @@ from libraries.logistic_compat import (
 # =============================================================
 
 # ---------------------------------------------------------------------
-# Supported CLI flags (Logistic Regression template)
+# Supported CLI flags (Logistic Regression)
 #
-# Core run options
-#   --name <model_name>
-#   --artifact-name-mode full|short
-#   --save-model true|false
-#   --verbose 0|1|2|auto
-#   --metric-decimals <int>
+# Core run options (auto configured for all ML models generated)
+#   --name <model_name>                             (model name used for registry and artifact folder; default: script filename)
+#   --artifact-name-mode full|short                 (full = timestamp + UUID for unique runs; short = readable name but may overwrite previous runs)
+#   --save-model true|false                         (save trained model and artifacts; false logs metrics only)
+#   --verbose 0|1|2|auto                            (0=silent, 1=training progress, 2=training + tuning progress, auto=adaptive verbosity)
+#   --metric-decimals <int>                         (decimal precision for logged metrics and artifacts)
 #
-# Task + reproducibility
-#   --task binary_classification|multiclass_classification
-#   --random-state <int>
-#   --test-size <float>                  (e.g., 0.2 for 80/20 split)
+# Task + data split / reproducibility
+#   --task binary_classification|										(task type for metric calculation and logging)
+# 				 multiclass_classification								^
+#   --random-state <int>                           	(random seed for reproducibility)
+#   --test-size <float>                            	(test set fraction; e.g., 0.2 = 80/20 split)
 #
-# Direct-fit model settings (used when --enable-tuning=false)
-#   --penalty none|l1|l2|elasticnet
-#   --solver lbfgs|liblinear|newton-cg|newton-cholesky|sag|saga
-#   --c <float>                          (inverse regularization strength)
-#   --class-weight none|balanced
-#   --max-iter <int>
+# Hyperparameter tuning configuration
+#   --enable-tuning true|false                  		(enable hyperparameter tuning with cross-validation)
+# 
+# Direct-fit model settings 										(used when --enable-tuning=false)
+#   --penalty none|l1|l2|elasticnet                 (regularization type applied during training)
+#   --solver lbfgs|liblinear|newton-cg|							^
+# 					 newton-cholesky|sag|saga								(optimization algorithm used to fit the model)
+#   --c <float>                                     (inverse regularization strength; smaller values = stronger regularization)
+#   --class-weight none|balanced                    (adjust class weighting to handle class imbalance)
 #
-# Hyperparameter tuning
-#   --enable-tuning true|false
-#   --penalty auto|l1|l2|elasticnet
-#   --solver auto|lbfgs|liblinear|newton-cg|newton-cholesky|sag|saga
-#   --tuning-method grid|random
-#   --cv-folds <int>
-#   --cv-scoring f1_macro|accuracy|roc_auc_ovr
-#   --cv-n-iter <int>                    (random search only)
-#   --cv-n-jobs <int>                    (-1 uses all cores)
+# Hyperparameter tuning 												(used when --enable-tuning=true)
+#   --penalty auto|l1|l2|elasticnet               	(regularization type to search during tuning; auto lets template select valid combinations)
+#   --solver auto|lbfgs|liblinear|newton-cg|				(solver to search during tuning; auto selects compatible solvers)
+# 					 newton-cholesky|sag|saga  							^
+#   --tuning-method grid|random                     (grid = exhaustive search over grid; random = randomized search over iterations)
+#   --cv-n-iter <int>                               (random search iterations; only used when --tuning-method=random)
+#   --cv-folds <int>                                (number of cross-validation folds)
+#   --cv-scoring f1_macro|accuracy|roc_auc_ovr      (metric used during CV tuning)
+#   --cv-n-jobs <int>                               (CV search parallelism; -1 uses all cores)
+# 
+# Common logistic regression hyperparameters (used in both direct fit and tuning)
+#   --max-iter <int>                                (maximum number of optimization iterations)
 # ---------------------------------------------------------------------
 
+# NOTE: Adjust these grids to customize search breadth for tuning.
 LOGISTIC_SEARCH_GRID_CONFIG = LogisticRegressionSearchGridConfig(
-	c_grid=[0.01, 0.1, 1.0, 10.0],
-	max_iter_grid=[500, 1000, 2000],
-	class_weight_grid=[None, "balanced"],
-	elasticnet_l1_ratio_grid=[0.2, 0.5, 0.8],
-	solver_penalty_compat=_SOLVER_PENALTY_COMPAT,
-	solver_order=_NON_AUTO_LOGISTIC_SOLVERS,
+	c_grid=[0.01, 0.1, 1.0, 10.0],  # inverse regularization strength (smaller = stronger regularization)
+	max_iter_grid=[500, 1000, 2000],  # maximum optimization iterations allowed for solver convergence
+	class_weight_grid=[None, "balanced"],  # None = uniform weights; "balanced" adjusts weights for class imbalance
+	elasticnet_l1_ratio_grid=[0.2, 0.5, 0.8],  # elasticnet mixing ratio (0≈L2, 1≈L1); only used when penalty="elasticnet"
+	solver_penalty_compat=_SOLVER_PENALTY_COMPAT,  # mapping of valid solver→penalty combinations to avoid illegal configs
+	solver_order=_NON_AUTO_LOGISTIC_SOLVERS,  # deterministic order of concrete solvers (excluding "auto") for tuning/search
 )
 
 # Default values for optional parameters. These can be overridden via CLI.
