@@ -110,10 +110,10 @@ from libraries.sklearn_template_utils import parse_max_features as _parse_max_fe
 # NOTE: Adjust these grids to customize search breadth for tuning.
 RANDOM_FOREST_SEARCH_GRID_CONFIG = RandomForestSearchGridConfig(
 	n_estimators_grid=[100, 200, 300, 500],  # number of trees in the forest
-	max_depth_when_none_grid=[None, 4, 8, 16, 32],  # None = unlimited depth (trees expand until other stopping rules)
-	max_leaf_nodes_when_none_grid=[None, 32, 64, 128],  # None = no limit on number of leaf nodes
-	max_features_when_none_grid=[None, "sqrt", "log2", 1.0],  # None = sklearn default feature sampling for RandomForest
-	max_samples_when_bootstrap_and_none_grid=[None, 0.5, 0.7, 1.0],  # None = when bootstrap=True, each tree trains on all rows
+	max_depth_grid=[None, 4, 8, 16, 32],  # None = unlimited depth (trees expand until other stopping rules)
+	max_leaf_nodes_grid=[None, 32, 64, 128],  # None = no limit on number of leaf nodes
+	max_features_grid=[1.0, "sqrt", "log2"],  # number of features considered at each split (1.0 = all features)
+	max_samples_when_bootstrap_grid=[0.5, 0.7, 1.0],  # fraction of rows sampled per tree when bootstrap=True
 	min_weight_fraction_leaf_grid=[0.0, 0.01],  # minimum weighted fraction of samples required at a leaf node
 	min_impurity_decrease_grid=[0.0, 1e-6, 1e-4],  # minimum impurity reduction required to split a node
 	ccp_alpha_grid=[0.0, 1e-5, 1e-4, 1e-3],  # cost-complexity pruning strength (larger values prune more)

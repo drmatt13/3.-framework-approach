@@ -7,10 +7,10 @@ from typing import Any
 @dataclass(frozen=True)
 class RandomForestSearchGridConfig:
 	n_estimators_grid: list[int] = field(default_factory=lambda: [100, 200, 300, 500])
-	max_depth_when_none_grid: list[int | None] = field(default_factory=lambda: [None, 8, 16, 32])
-	max_leaf_nodes_when_none_grid: list[int | None] = field(default_factory=lambda: [None, 64, 128])
-	max_features_when_none_grid: list[str | float | None] = field(default_factory=lambda: [None, "sqrt", "log2", 1.0])
-	max_samples_when_bootstrap_and_none_grid: list[int | float | None] = field(default_factory=lambda: [None, 0.7, 1.0])
+	max_depth_grid: list[int | None] = field(default_factory=lambda: [None, 8, 16, 32])
+	max_leaf_nodes_grid: list[int | None] = field(default_factory=lambda: [None, 64, 128])
+	max_features_grid: list[str | float | None] = field(default_factory=lambda: [None, "sqrt", "log2", 1.0])
+	max_samples_when_bootstrap_grid: list[int | float | None] = field(default_factory=lambda: [None, 0.7, 1.0])
 	min_weight_fraction_leaf_grid: list[float] = field(default_factory=lambda: [0.0, 0.01])
 	min_impurity_decrease_grid: list[float] = field(default_factory=lambda: [0.0, 1e-6, 1e-4])
 	ccp_alpha_grid: list[float] = field(default_factory=lambda: [0.0, 1e-4, 1e-3])
@@ -48,7 +48,7 @@ def build_random_forest_search_space(
 	_ = random_state
 
 	if max_depth is None:
-		max_depth_candidates = list(config.max_depth_when_none_grid)
+		max_depth_candidates = list(config.max_depth_grid)
 	else:
 		max_depth_candidates = _unique_preserve_order([max_depth, max(2, int(max_depth) // 2), int(max_depth) * 2])
 
@@ -58,7 +58,7 @@ def build_random_forest_search_space(
 	min_weight_fraction_leaf_candidates = list(config.min_weight_fraction_leaf_grid)
 
 	if max_leaf_nodes is None:
-		max_leaf_nodes_candidates = list(config.max_leaf_nodes_when_none_grid)
+		max_leaf_nodes_candidates = list(config.max_leaf_nodes_grid)
 	else:
 		max_leaf_nodes_candidates = _unique_preserve_order([None, int(max_leaf_nodes), max(2, int(max_leaf_nodes) * 2)])
 
@@ -66,7 +66,7 @@ def build_random_forest_search_space(
 	min_impurity_decrease_candidates = list(config.min_impurity_decrease_grid)
 
 	if max_features is None:
-		max_features_candidates = list(config.max_features_when_none_grid)
+		max_features_candidates = list(config.max_features_grid)
 	else:
 		max_features_candidates = _unique_preserve_order([max_features, "sqrt", "log2", 1.0])
 
@@ -87,6 +87,6 @@ def build_random_forest_search_space(
 		f"{prefix}bootstrap": [bool(bootstrap)],
 	}
 	if bootstrap:
-		base[f"{prefix}max_samples"] = [max_samples] if max_samples is not None else list(config.max_samples_when_bootstrap_and_none_grid)
+		base[f"{prefix}max_samples"] = [max_samples] if max_samples is not None else list(config.max_samples_when_bootstrap_grid)
 
 	return [base]
