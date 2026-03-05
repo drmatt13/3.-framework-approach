@@ -170,7 +170,7 @@ DEFAULT_XGBOOST_PARAMS_BY_TEMPLATE = {
         "reg_lambda": 1.0,
         "reg_alpha": 0.0,
         "enable_tuning": False,
-        "tuning_method": "random",
+        "tuning_method": "grid",
         "cv_folds": 5,
         "cv_scoring": "f1_macro",
         "cv_n_iter": 20,
@@ -186,7 +186,7 @@ DEFAULT_XGBOOST_PARAMS_BY_TEMPLATE = {
         "reg_lambda": 1.0,
         "reg_alpha": 0.0,
         "enable_tuning": False,
-        "tuning_method": "random",
+        "tuning_method": "grid",
         "cv_folds": 5,
         "cv_scoring": "rmse",
         "cv_n_iter": 20,
@@ -386,6 +386,7 @@ def validate_shared_helper_modules() -> None:
         "search_utils.py",
         "serialization_utils.py",
         "sklearn_template_utils.py",
+        "xgboost_search_space.py",
         "xgboost_template_utils.py",
         "tensorflow_template_utils.py",
     ]
@@ -1223,8 +1224,8 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(
                 "Invalid flags: scikit-learn tuning defaults are not supported for xgboost"
             )
-        if args.default_xgb_tuning_method is not None and args.default_xgb_tuning_method != "random":
-            raise ValueError("Invalid --default-xgb-tuning-method. Allowed: random")
+        if args.default_xgb_tuning_method is not None and args.default_xgb_tuning_method not in {"grid", "random"}:
+            raise ValueError("Invalid --default-xgb-tuning-method. Allowed: grid, random")
         if args.default_xgb_cv_scoring is not None:
             allowed_scoring = REGRESSION_CV_SCORINGS if family == "regression" else CLASSIFICATION_CV_SCORINGS
             if args.default_xgb_cv_scoring not in allowed_scoring:
@@ -1908,7 +1909,7 @@ def main():
     parser.add_argument(
         "--default-xgb-tuning-method",
         required=False,
-        choices=["random"],
+        choices=["grid", "random"],
         help="Default tuning method for xgboost templates",
     )
     parser.add_argument(

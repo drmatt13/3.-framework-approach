@@ -27,7 +27,7 @@ TASKS_BY_LIBRARY_MODEL = {
 }
 
 XGBOOST_BOOSTERS = ["auto", "gbtree", "gblinear", "dart"]
-XGBOOST_DEVICE_DEFAULTS = ["cpu", "gpu"]
+XGBOOST_DEVICE_DEFAULTS = ["auto", "cpu", "gpu"]
 SKLEARN_LOGISTIC_SOLVERS = ["auto", *list(NON_AUTO_LOGISTIC_SOLVERS)]
 
 # Only meaningful for TensorFlow models (gradient-based training)
@@ -849,6 +849,63 @@ def main() -> int:
                 print("Cancelled.")
                 return 0
 
+            device = _ask_select(
+                "Select xgboost device:",
+                choices=XGBOOST_DEVICE_DEFAULTS,
+            )
+            if device is None:
+                print("Cancelled.")
+                return 0
+
+            recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change = _recommended_es_defaults(
+                library,
+                model,
+            )
+            early_stopping = questionary.confirm(
+                "Enable early stopping?",
+                default=bool(recommended_early_stopping),
+                style=CUSTOM_STYLE,
+            ).ask()
+            if early_stopping is None:
+                print("Cancelled.")
+                return 0
+
+            use_recommended_defaults = questionary.confirm(
+                "Use recommended preset values for validation fraction and n_iter_no_change?",
+                default=True,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if use_recommended_defaults is None:
+                print("Cancelled.")
+                return 0
+
+            if use_recommended_defaults:
+                validation_fraction = recommended_validation_fraction
+                n_iter_no_change = recommended_n_iter_no_change
+            else:
+                validation_fraction = _ask_text(
+                    "Enter validation fraction (0 < value < 1):",
+                    default=str(recommended_validation_fraction),
+                    validate_fn=lambda s: True
+                    if (_is_float(s) and 0.0 < float(s) < 1.0)
+                    else "Must be a number where 0 < value < 1",
+                )
+                if validation_fraction is None:
+                    print("Cancelled.")
+                    return 0
+
+                n_iter_no_change = _ask_text(
+                    "Enter n_iter_no_change:",
+                    default=str(recommended_n_iter_no_change),
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                )
+                if n_iter_no_change is None:
+                    print("Cancelled.")
+                    return 0
+
+                validation_fraction = float(validation_fraction)
+                n_iter_no_change = int(n_iter_no_change)
+
             xgb_enable_tuning = questionary.confirm(
                 "Enable hyperparameter tuning by default? (--enable-tuning)",
                 default=False,
@@ -859,6 +916,14 @@ def main() -> int:
                 return 0
 
             if xgb_enable_tuning:
+                xgb_tuning_method = _ask_select(
+                    "Select tuning method:",
+                    choices=["grid", "random"],
+                )
+                if xgb_tuning_method is None:
+                    print("Cancelled.")
+                    return 0
+
                 enable_auto_booster = questionary.confirm(
                     "Allow tuning to search across booster families (--booster auto)?",
                     default=False,
@@ -875,24 +940,16 @@ def main() -> int:
                         f"Note: tuning search will stay within the selected booster family ({booster})."
                     )
 
-            device = _ask_select(
-                "Select xgboost device:",
-                choices=XGBOOST_DEVICE_DEFAULTS,
-            )
-            if device is None:
-                print("Cancelled.")
-                return 0
-
             if xgb_enable_tuning:
-                xgb_tuning_method = "random"
-                xgb_cv_n_iter = _ask_text(
-                    "Enter random-search iterations (>0):",
-                    default="20",
-                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
-                )
-                if xgb_cv_n_iter is None:
-                    print("Cancelled.")
-                    return 0
+                if xgb_tuning_method == "random":
+                    xgb_cv_n_iter = _ask_text(
+                        "Enter random-search iterations (>0):",
+                        default="20",
+                        validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                    )
+                    if xgb_cv_n_iter is None:
+                        print("Cancelled.")
+                        return 0
                 xgb_cv_folds = _ask_text(
                     "Enter CV folds (>=2):",
                     default="5",
@@ -1593,7 +1650,7 @@ def main() -> int:
         else:
             max_iter = int(profile_defaults.get("max_iter", 1000))
 
-    if _supports_early_stopping_defaults(library, model, task):
+    if _supports_early_stopping_defaults(library, model, task) and not (library == "xgboost" and use_custom):
         supports_validation_defaults = _supports_validation_n_iter_defaults(library, model, task)
         if use_custom:
             recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change = _recommended_es_defaults(
@@ -1881,7 +1938,7 @@ def main() -> int:
         cmd.extend(["--default-xgb-cv-folds", str(int(xgb_cv_folds))])
     if xgb_cv_scoring is not None:
         cmd.extend(["--default-xgb-cv-scoring", str(xgb_cv_scoring)])
-    if xgb_cv_n_iter is not None:
+    if xgb_tuning_method == "random" and xgb_cv_n_iter is not None:
         cmd.extend(["--default-xgb-cv-n-iter", str(int(xgb_cv_n_iter))])
     if xgb_cv_n_jobs is not None:
         cmd.extend(["--default-xgb-cv-n-jobs", str(int(xgb_cv_n_jobs))])
