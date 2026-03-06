@@ -254,16 +254,32 @@ DEFAULT_RANDOM_FOREST_PARAMS_BY_TEMPLATE = {
 
 DEFAULT_TENSORFLOW_DENSE_PARAMS_BY_TEMPLATE = {
     ("tensorflow", "dense_nn", "classification"): {
+        "hidden_layers": [128, 64, 32],
+        "dropout": 0.1,
+        "hidden_activation": "relu",
+        "l1": 0.0,
+        "l2": 0.0,
         "enable_tuning": False,
-        "tuning_method": "random",
+        "tuning_method": "grid",
         "cv_scoring": "f1_macro",
         "cv_n_iter": 10,
+        "tuning_optimizer": "auto",
+        "tuning_activation": "auto",
+        "tuning_regularization": "auto",
     },
     ("tensorflow", "dense_nn", "regression"): {
+        "hidden_layers": [128, 64, 32],
+        "dropout": 0.0,
+        "hidden_activation": "relu",
+        "l1": 0.0,
+        "l2": 0.0,
         "enable_tuning": False,
-        "tuning_method": "random",
+        "tuning_method": "grid",
         "cv_scoring": "rmse",
         "cv_n_iter": 10,
+        "tuning_optimizer": "auto",
+        "tuning_activation": "auto",
+        "tuning_regularization": "auto",
     },
 }
 
@@ -473,6 +489,22 @@ def _starter_dataset_for_args(args: argparse.Namespace) -> dict | None:
     if not args.starter_dataset:
         return None
     return STARTER_DATASET_CONFIG[args.starter_dataset]
+
+
+def _parse_hidden_layers_csv(value: str, *, arg_name: str) -> list[int]:
+    tokens = [token.strip() for token in str(value).split(",") if token.strip()]
+    if not tokens:
+        raise ValueError(f"Invalid {arg_name}. Provide comma-separated positive integers, e.g. 128,64,32")
+    hidden_layers: list[int] = []
+    for token in tokens:
+        try:
+            units = int(token)
+        except Exception as exc:
+            raise ValueError(f"Invalid {arg_name}. '{token}' is not an integer") from exc
+        if units <= 0:
+            raise ValueError(f"Invalid {arg_name}. Hidden layer units must be positive")
+        hidden_layers.append(units)
+    return hidden_layers
 
 
 def _task_dataset_dir(task: str) -> str:
@@ -921,10 +953,26 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
 
     if args.library == "tensorflow":
         tf_defaults = DEFAULT_TENSORFLOW_DENSE_PARAMS_BY_TEMPLATE[("tensorflow", "dense_nn", family)]
+        default_hidden_layers = (
+            _parse_hidden_layers_csv(args.default_tf_hidden_layers, arg_name="--default-tf-hidden-layers")
+            if args.default_tf_hidden_layers is not None
+            else tf_defaults["hidden_layers"]
+        )
+        default_dropout = args.default_tf_dropout if args.default_tf_dropout is not None else tf_defaults["dropout"]
+        default_hidden_activation = (
+            args.default_tf_hidden_activation
+            if args.default_tf_hidden_activation is not None
+            else tf_defaults["hidden_activation"]
+        )
+        default_l1 = args.default_tf_l1 if args.default_tf_l1 is not None else tf_defaults["l1"]
+        default_l2 = args.default_tf_l2 if args.default_tf_l2 is not None else tf_defaults["l2"]
         default_enable_tuning = args.default_tf_enable_tuning if args.default_tf_enable_tuning is not None else tf_defaults["enable_tuning"]
         default_tuning_method = args.default_tf_tuning_method if args.default_tf_tuning_method is not None else tf_defaults["tuning_method"]
         default_cv_scoring = args.default_tf_cv_scoring if args.default_tf_cv_scoring is not None else tf_defaults["cv_scoring"]
         default_cv_n_iter = args.default_tf_cv_n_iter if args.default_tf_cv_n_iter is not None else tf_defaults["cv_n_iter"]
+        default_tuning_optimizer = args.default_tf_tuning_optimizer if args.default_tf_tuning_optimizer is not None else tf_defaults["tuning_optimizer"]
+        default_tuning_activation = args.default_tf_tuning_activation if args.default_tf_tuning_activation is not None else tf_defaults["tuning_activation"]
+        default_tuning_regularization = args.default_tf_tuning_regularization if args.default_tf_tuning_regularization is not None else tf_defaults["tuning_regularization"]
         replacements.update(
             {
                 "OPTIMIZER_CTOR": OPTIMIZER_CLASS_MAP[args.optimizer],
@@ -932,10 +980,18 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                 "LEARNING_RATE": str(args.learning_rate),
                 "EPOCHS": str(args.epochs),
                 "BATCH_SIZE": str(args.batch_size),
+                "TF_DEFAULT_HIDDEN_LAYERS": str(default_hidden_layers),
+                "TF_DEFAULT_DROPOUT": str(float(default_dropout)),
+                "TF_DEFAULT_HIDDEN_ACTIVATION": str(default_hidden_activation),
+                "TF_DEFAULT_L1": str(float(default_l1)),
+                "TF_DEFAULT_L2": str(float(default_l2)),
                 "TF_ENABLE_TUNING_DEFAULT": "True" if default_enable_tuning else "False",
                 "TF_TUNING_METHOD_DEFAULT": str(default_tuning_method),
                 "TF_CV_SCORING_DEFAULT": str(default_cv_scoring),
                 "TF_CV_N_ITER_DEFAULT": str(int(default_cv_n_iter)),
+                "TF_TUNING_OPTIMIZER_DEFAULT": str(default_tuning_optimizer),
+                "TF_TUNING_ACTIVATION_DEFAULT": str(default_tuning_activation),
+                "TF_TUNING_REGULARIZATION_DEFAULT": str(default_tuning_regularization),
             }
         )
 
@@ -1129,6 +1185,21 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Invalid --default-xgb-cv-n-jobs. Must be != 0 (use -1 for all cores)")
     if args.default_tf_cv_n_iter is not None and args.default_tf_cv_n_iter <= 0:
         raise ValueError("Invalid --default-tf-cv-n-iter. Must be a positive integer")
+    if args.default_tf_tuning_optimizer is not None and args.default_tf_tuning_optimizer not in TENSORFLOW_OPTIMIZERS:
+        allowed = ", ".join(sorted(TENSORFLOW_OPTIMIZERS))
+        raise ValueError(f"Invalid --default-tf-tuning-optimizer '{args.default_tf_tuning_optimizer}'. Allowed: {allowed}")
+    if args.default_tf_tuning_activation is not None and args.default_tf_tuning_activation not in {"auto", "relu", "gelu", "tanh"}:
+        raise ValueError("Invalid --default-tf-tuning-activation. Allowed: auto, relu, gelu, tanh")
+    if args.default_tf_tuning_regularization is not None and args.default_tf_tuning_regularization not in {"auto", "none", "l1", "l2", "l1_l2"}:
+        raise ValueError("Invalid --default-tf-tuning-regularization. Allowed: auto, none, l1, l2, l1_l2")
+    if args.default_tf_hidden_layers is not None:
+        _parse_hidden_layers_csv(args.default_tf_hidden_layers, arg_name="--default-tf-hidden-layers")
+    if args.default_tf_dropout is not None and not (0.0 <= args.default_tf_dropout < 1.0):
+        raise ValueError("Invalid --default-tf-dropout. Allowed range: 0 <= value < 1")
+    if args.default_tf_l1 is not None and args.default_tf_l1 < 0.0:
+        raise ValueError("Invalid --default-tf-l1. Must be >= 0")
+    if args.default_tf_l2 is not None and args.default_tf_l2 < 0.0:
+        raise ValueError("Invalid --default-tf-l2. Must be >= 0")
 
     if args.starter_dataset is not None:
         allowed = STARTER_DATASETS_BY_FAMILY[args.task]
@@ -1239,9 +1310,17 @@ def validate_args(args: argparse.Namespace) -> None:
             or args.default_tf_tuning_method is not None
             or args.default_tf_cv_scoring is not None
             or args.default_tf_cv_n_iter is not None
+            or args.default_tf_tuning_optimizer is not None
+            or args.default_tf_tuning_activation is not None
+            or args.default_tf_tuning_regularization is not None
+            or args.default_tf_hidden_layers is not None
+            or args.default_tf_hidden_activation is not None
+            or args.default_tf_dropout is not None
+            or args.default_tf_l1 is not None
+            or args.default_tf_l2 is not None
         ):
             raise ValueError(
-                "Invalid flags: --default-tf-enable-tuning/--default-tf-tuning-method/--default-tf-cv-scoring/--default-tf-cv-n-iter are tensorflow-only"
+                "Invalid flags: tensorflow defaults are tensorflow-only"
             )
         return
 
@@ -1468,8 +1547,16 @@ def validate_args(args: argparse.Namespace) -> None:
             or args.default_tf_tuning_method is not None
             or args.default_tf_cv_scoring is not None
             or args.default_tf_cv_n_iter is not None
+            or args.default_tf_tuning_optimizer is not None
+            or args.default_tf_tuning_activation is not None
+            or args.default_tf_tuning_regularization is not None
+            or args.default_tf_hidden_layers is not None
+            or args.default_tf_hidden_activation is not None
+            or args.default_tf_dropout is not None
+            or args.default_tf_l1 is not None
+            or args.default_tf_l2 is not None
         ):
-            raise ValueError("Invalid flags: xgboost/tensorflow tuning defaults are not supported for scikit-learn")
+            raise ValueError("Invalid flags: xgboost/tensorflow defaults are not supported for scikit-learn")
 
         return
 
@@ -1565,6 +1652,8 @@ def validate_args(args: argparse.Namespace) -> None:
                     f"Invalid --default-tf-cv-scoring '{args.default_tf_cv_scoring}' for task '{args.task}'. "
                     f"Allowed: {allowed}"
                 )
+        if args.default_tf_tuning_method is not None and args.default_tf_tuning_method not in {"grid", "random"}:
+            raise ValueError("Invalid --default-tf-tuning-method. Allowed: grid, random")
         return
 
     raise ValueError(f"Unsupported library: {args.library}")
@@ -1945,7 +2034,7 @@ def main():
     parser.add_argument(
         "--default-tf-tuning-method",
         required=False,
-        choices=["random"],
+        choices=["grid", "random"],
         help="Default tuning method for tensorflow dense templates",
     )
     parser.add_argument(
@@ -1959,6 +2048,53 @@ def main():
         type=int,
         required=False,
         help="Default random-search iterations for tensorflow dense templates",
+    )
+    parser.add_argument(
+        "--default-tf-tuning-optimizer",
+        required=False,
+        choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"],
+        help="Default optimizer filter for tensorflow tuning (auto searches all)",
+    )
+    parser.add_argument(
+        "--default-tf-tuning-activation",
+        required=False,
+        choices=["auto", "relu", "gelu", "tanh"],
+        help="Default activation filter for tensorflow tuning (auto searches all)",
+    )
+    parser.add_argument(
+        "--default-tf-tuning-regularization",
+        required=False,
+        choices=["auto", "none", "l1", "l2", "l1_l2"],
+        help="Default regularization filter for tensorflow tuning",
+    )
+    parser.add_argument(
+        "--default-tf-hidden-layers",
+        required=False,
+        help="Default hidden-layer units for non-tuning tensorflow runs (comma-separated, e.g. 128,64,32)",
+    )
+    parser.add_argument(
+        "--default-tf-hidden-activation",
+        required=False,
+        choices=["relu", "gelu", "tanh"],
+        help="Default hidden-layer activation for non-tuning tensorflow runs",
+    )
+    parser.add_argument(
+        "--default-tf-dropout",
+        type=float,
+        required=False,
+        help="Default dropout for non-tuning tensorflow runs (0 <= value < 1)",
+    )
+    parser.add_argument(
+        "--default-tf-l1",
+        type=float,
+        required=False,
+        help="Default L1 regularization for non-tuning tensorflow runs (>= 0)",
+    )
+    parser.add_argument(
+        "--default-tf-l2",
+        type=float,
+        required=False,
+        help="Default L2 regularization for non-tuning tensorflow runs (>= 0)",
     )
     parser.add_argument(
         "--optimizer",

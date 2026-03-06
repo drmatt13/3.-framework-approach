@@ -101,25 +101,39 @@ DENSE_NN_SEARCH_GRID_CONFIG = DenseNNSearchGridConfig(
 	l2=[0.0, 1e-5, 1e-4, 1e-3],
 )
 
+model = tf.keras.Sequential([
+  tf.keras.layers.Dense(128, activation="relu",  # kernel_regularizer=tf.keras.regularizers.l2(1e-4),  # L2 regularization
+    # kernel_regularizer=tf.keras.regularizers.l1(1e-5),  # L1 regularization
+    # kernel_regularizer=tf.keras.regularizers.l1_l2(l1=1e-5, l2=1e-4),  # L1 + L2
+  ),
+  # tf.keras.layers.Dropout(0.2),  # dropout after layer 1
+  tf.keras.layers.Dense(64, activation="relu",  # kernel_regularizer=tf.keras.regularizers.l2(1e-4),
+    # kernel_regularizer=tf.keras.regularizers.l1(1e-5),
+    # kernel_regularizer=tf.keras.regularizers.l1_l2(l1=1e-5, l2=1e-4),
+	),
+    # tf.keras.layers.Dropout(0.2),  # dropout after layer 2
+  tf.keras.layers.Dense(1, activation="linear")  # regression output
+])
+
 # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
 DEFAULT_RANDOM_STATE = 1
-DEFAULT_OPTIMIZER_NAME = "{{OPTIMIZER_NAME}}"
-DEFAULT_LEARNING_RATE = float("{{LEARNING_RATE}}")
-DEFAULT_EPOCHS = int("{{EPOCHS}}")
-DEFAULT_BATCH_SIZE = int("{{BATCH_SIZE}}")
-DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
-DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
-DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
+DEFAULT_OPTIMIZER_NAME = "auto"
+DEFAULT_LEARNING_RATE = float("0.001")
+DEFAULT_EPOCHS = int("100")
+DEFAULT_BATCH_SIZE = int("32")
+DEFAULT_EARLY_STOPPING = "True" == "True"
+DEFAULT_VALIDATION_FRACTION = float("0.1")
+DEFAULT_N_ITER_NO_CHANGE = int("5")
 DEFAULT_VERBOSE = "1"
 DEFAULT_METRIC_DECIMALS = 4
-DEFAULT_ENABLE_TUNING = "{{TF_ENABLE_TUNING_DEFAULT}}" == "True"
-DEFAULT_TUNING_METHOD = "{{TF_TUNING_METHOD_DEFAULT}}"
-DEFAULT_CV_SCORING = "{{TF_CV_SCORING_DEFAULT}}"
-DEFAULT_CV_N_ITER = int("{{TF_CV_N_ITER_DEFAULT}}")
-DEFAULT_TF_TUNING_OPTIMIZER = "{{TF_TUNING_OPTIMIZER_DEFAULT}}"
-DEFAULT_TF_TUNING_ACTIVATION = "{{TF_TUNING_ACTIVATION_DEFAULT}}"
-DEFAULT_TF_TUNING_REGULARIZATION = "{{TF_TUNING_REGULARIZATION_DEFAULT}}"
+DEFAULT_ENABLE_TUNING = "False" == "True"
+DEFAULT_TUNING_METHOD = "grid"
+DEFAULT_CV_SCORING = "rmse"
+DEFAULT_CV_N_ITER = int("10")
+DEFAULT_TF_TUNING_OPTIMIZER = "auto"
+DEFAULT_TF_TUNING_ACTIVATION = "auto"
+DEFAULT_TF_TUNING_REGULARIZATION = "auto"
 
 parser = argparse.ArgumentParser(description="TensorFlow Dense Neural Network Regressor baseline")
 parser.add_argument("--task", choices=["regression"], default="regression")
@@ -183,9 +197,9 @@ _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 # Template injection points:
 #   - DATA_TASK_DIR / DATA_FILE
 #   - READ_CSV_STATEMENT / POST_READ_DATASET_SETUP
-data_path = _project_root() / "data" / "template_data" / "{{DATA_TASK_DIR}}" / "{{DATA_FILE}}"
-{{READ_CSV_STATEMENT}}
-{{POST_READ_DATASET_SETUP}}
+data_path = _project_root() / "data" / "template_data" / "regression" / "ames_housing.csv"
+df = pd.read_csv(data_path)
+
 
 # Drop common CSV index artifacts (e.g., "Unnamed: 0") so they never leak into features.
 df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False)]
@@ -208,15 +222,15 @@ df = _normalize_string_columns(df)
 #   - TARGET_COLUMN
 #   - FEATURE_DROP_COLUMNS
 #   - TARGET_PREPROCESS
-TARGET_COLUMN = "{{TARGET_COLUMN}}"
-FEATURE_DROP_COLUMNS = {{FEATURE_DROP_COLUMNS}}
+TARGET_COLUMN = "SalePrice"
+FEATURE_DROP_COLUMNS = ["SalePrice", "Order", "PID"]
 if TARGET_COLUMN not in df.columns:
 	raise ValueError(f"Target column '{TARGET_COLUMN}' not found in dataset.")
 
 # y is the supervised target; X is the feature space (minus optional drops).
 y = df[TARGET_COLUMN]
 y_original = y.copy()
-{{TARGET_PREPROCESS}} # type: ignore
+y = y.astype("float64") # type: ignore
 X = df.drop(columns=FEATURE_DROP_COLUMNS, errors="ignore")
 
 # ---------------------------------------------------------
@@ -316,11 +330,11 @@ tf.keras.utils.set_random_seed(int(args.random_state))
 # ---------------------------------------------------------------------
 
 # Generated direct-fit defaults (task-specific).
-selected_hidden_layers = {{TF_DEFAULT_HIDDEN_LAYERS}}
-selected_dropout = float("{{TF_DEFAULT_DROPOUT}}")
-selected_activation = "{{TF_DEFAULT_HIDDEN_ACTIVATION}}"
-selected_l1 = float("{{TF_DEFAULT_L1}}")
-selected_l2 = float("{{TF_DEFAULT_L2}}")
+selected_hidden_layers = [128, 64, 32]
+selected_dropout = float("0.0")
+selected_activation = "relu"
+selected_l1 = float("0.0")
+selected_l2 = float("0.0")
 selected_optimizer = "adam" if args.optimizer == "auto" else args.optimizer
 selected_learning_rate = float(args.learning_rate)
 tuning_summary = {
@@ -810,4 +824,3 @@ print("Expected:", expected_y)
 		metrics=metrics,
 	)
 	print(f"Artifacts exported to: {run_dir}")
-

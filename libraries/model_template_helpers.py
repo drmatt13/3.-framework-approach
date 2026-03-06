@@ -280,7 +280,7 @@ def validate_artifact_contract(
 
     expected_run_sections = {
         "run_id",
-        "name",
+        "model_name",
         "timestamp",
         "library",
         "task",
@@ -335,11 +335,22 @@ def write_unified_registry_sqlite(
     connection = sqlite3.connect(db_path)
     try:
         cursor = connection.cursor()
+
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='runs'"
+        )
+        if cursor.fetchone() is not None:
+            raise RuntimeError(
+                "Detected legacy SQLite schema containing 'runs' table. "
+                "This project now uses only classification_metrics and regression_metrics. "
+                "Delete artifacts/model_registry.sqlite to continue."
+            )
+
         cursor.execute(
             """
-            CREATE TABLE IF NOT EXISTS runs (
+            CREATE TABLE IF NOT EXISTS regression_metrics (
                 run_id TEXT PRIMARY KEY,
-                name TEXT,
+                model_name TEXT,
                 timestamp TEXT,
                 library TEXT,
                 task TEXT,
@@ -362,20 +373,12 @@ def write_unified_registry_sqlite(
                 primary_metric_direction TEXT,
                 primary_metric_value REAL,
                 run_dir TEXT,
-                created_at_utc TEXT
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS regression_metrics (
-                run_id TEXT PRIMARY KEY,
+                created_at_utc TEXT,
                 mse REAL,
                 mae REAL,
                 rmse REAL,
                 r2 REAL,
-                max_error REAL,
-                FOREIGN KEY(run_id) REFERENCES runs(run_id)
+                max_error REAL
             )
             """
         )
@@ -383,6 +386,30 @@ def write_unified_registry_sqlite(
             """
             CREATE TABLE IF NOT EXISTS classification_metrics (
                 run_id TEXT PRIMARY KEY,
+                model_name TEXT,
+                timestamp TEXT,
+                library TEXT,
+                task TEXT,
+                algorithm TEXT,
+                estimator_class TEXT,
+                model_id TEXT,
+                dataset_path TEXT,
+                dataset_sha256 TEXT,
+                dataset_rows INTEGER,
+                dataset_columns INTEGER,
+                test_size REAL,
+                random_state INTEGER,
+                n_train INTEGER,
+                n_val INTEGER,
+                n_test INTEGER,
+                tuning_enabled INTEGER,
+                tuning_method TEXT,
+                cv_best_score REAL,
+                primary_metric_name TEXT,
+                primary_metric_direction TEXT,
+                primary_metric_value REAL,
+                run_dir TEXT,
+                created_at_utc TEXT,
                 accuracy REAL,
                 balanced_accuracy REAL,
                 precision_macro REAL,
@@ -393,11 +420,47 @@ def write_unified_registry_sqlite(
                 log_loss REAL,
                 brier_score REAL,
                 support_total INTEGER,
-                support_by_class_json TEXT,
-                FOREIGN KEY(run_id) REFERENCES runs(run_id)
+                support_by_class_json TEXT
             )
             """
         )
+
+        for table_name in ("regression_metrics", "classification_metrics"):
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            columns = {str(row[1]) for row in cursor.fetchall()}
+            expected_common_columns = {
+                "run_id",
+                "model_name",
+                "timestamp",
+                "library",
+                "task",
+                "algorithm",
+                "estimator_class",
+                "model_id",
+                "dataset_path",
+                "dataset_sha256",
+                "dataset_rows",
+                "dataset_columns",
+                "test_size",
+                "random_state",
+                "n_train",
+                "n_val",
+                "n_test",
+                "tuning_enabled",
+                "tuning_method",
+                "cv_best_score",
+                "primary_metric_name",
+                "primary_metric_direction",
+                "primary_metric_value",
+                "run_dir",
+                "created_at_utc",
+            }
+            if not expected_common_columns.issubset(columns):
+                missing_columns = sorted(expected_common_columns - columns)
+                raise RuntimeError(
+                    f"Detected outdated schema for '{table_name}'. Missing columns: {missing_columns}. "
+                    "Delete artifacts/model_registry.sqlite to continue."
+                )
 
         dataset = run_metadata.get("dataset", {}) if isinstance(run_metadata.get("dataset"), dict) else {}
         data_split = run_metadata.get("data_split", {}) if isinstance(run_metadata.get("data_split"), dict) else {}
@@ -405,44 +468,32 @@ def write_unified_registry_sqlite(
         tuning = run_metadata.get("tuning", {}) if isinstance(run_metadata.get("tuning"), dict) else {}
         primary_metric = metrics.get("primary_metric", {}) if isinstance(metrics.get("primary_metric"), dict) else {}
 
-        cursor.execute(
-            """
-            INSERT OR REPLACE INTO runs (
-                run_id, name, timestamp, library, task, algorithm, estimator_class, model_id,
-                dataset_path, dataset_sha256, dataset_rows, dataset_columns,
-                test_size, random_state, n_train, n_val, n_test,
-                tuning_enabled, tuning_method, cv_best_score,
-                primary_metric_name, primary_metric_direction, primary_metric_value,
-                run_dir, created_at_utc
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(run_metadata.get("run_id")),
-                str(run_metadata.get("name")),
-                str(run_metadata.get("timestamp")),
-                str(run_metadata.get("library")),
-                str(run_metadata.get("task")),
-                str(run_metadata.get("algorithm")),
-                str(run_metadata.get("estimator_class")),
-                str(run_metadata.get("model_id")),
-                str(dataset.get("path")) if dataset.get("path") is not None else None,
-                str(dataset.get("sha256")) if dataset.get("sha256") is not None else None,
-                int(dataset.get("rows")) if dataset.get("rows") is not None else None,
-                int(dataset.get("columns")) if dataset.get("columns") is not None else None,
-                float(data_split.get("test_size")) if data_split.get("test_size") is not None else None,
-                int(data_split.get("random_state")) if data_split.get("random_state") is not None else None,
-                int(sizes.get("n_train")) if sizes.get("n_train") is not None else None,
-                int(sizes.get("n_val")) if sizes.get("n_val") is not None else None,
-                int(sizes.get("n_test")) if sizes.get("n_test") is not None else None,
-                1 if bool(tuning.get("enabled")) else 0,
-                str(tuning.get("method")) if tuning.get("method") is not None else None,
-                float(tuning.get("best_score")) if tuning.get("best_score") is not None else None,
-                str(primary_metric.get("name")) if primary_metric.get("name") is not None else None,
-                str(primary_metric.get("direction")) if primary_metric.get("direction") is not None else None,
-                float(primary_metric.get("value")) if primary_metric.get("value") is not None else None,
-                str(run_dir.relative_to(project_root)).replace("\\", "/"),
-                datetime.now(timezone.utc).isoformat(),
-            ),
+        run_insert_common_values = (
+            str(run_metadata.get("run_id")),
+            str(run_metadata.get("model_name")),
+            str(run_metadata.get("timestamp")),
+            str(run_metadata.get("library")),
+            str(run_metadata.get("task")),
+            str(run_metadata.get("algorithm")),
+            str(run_metadata.get("estimator_class")),
+            str(run_metadata.get("model_id")),
+            str(dataset.get("path")) if dataset.get("path") is not None else None,
+            str(dataset.get("sha256")) if dataset.get("sha256") is not None else None,
+            int(dataset.get("rows")) if dataset.get("rows") is not None else None,
+            int(dataset.get("columns")) if dataset.get("columns") is not None else None,
+            float(data_split.get("test_size")) if data_split.get("test_size") is not None else None,
+            int(data_split.get("random_state")) if data_split.get("random_state") is not None else None,
+            int(sizes.get("n_train")) if sizes.get("n_train") is not None else None,
+            int(sizes.get("n_val")) if sizes.get("n_val") is not None else None,
+            int(sizes.get("n_test")) if sizes.get("n_test") is not None else None,
+            1 if bool(tuning.get("enabled")) else 0,
+            str(tuning.get("method")) if tuning.get("method") is not None else None,
+            float(tuning.get("best_score")) if tuning.get("best_score") is not None else None,
+            str(primary_metric.get("name")) if primary_metric.get("name") is not None else None,
+            str(primary_metric.get("direction")) if primary_metric.get("direction") is not None else None,
+            float(primary_metric.get("value")) if primary_metric.get("value") is not None else None,
+            str(run_dir.relative_to(project_root)).replace("\\", "/"),
+            datetime.now(timezone.utc).isoformat(),
         )
 
         task = str(run_metadata.get("task"))
@@ -451,11 +502,17 @@ def write_unified_registry_sqlite(
             cursor.execute(
                 """
                 INSERT OR REPLACE INTO regression_metrics (
-                    run_id, mse, mae, rmse, r2, max_error
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    run_id, model_name, timestamp, library, task, algorithm, estimator_class, model_id,
+                    dataset_path, dataset_sha256, dataset_rows, dataset_columns,
+                    test_size, random_state, n_train, n_val, n_test,
+                    tuning_enabled, tuning_method, cv_best_score,
+                    primary_metric_name, primary_metric_direction, primary_metric_value,
+                    run_dir, created_at_utc,
+                    mse, mae, rmse, r2, max_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    str(run_metadata.get("run_id")),
+                run_insert_common_values
+                + (
                     float(test_metrics.get("mse")) if test_metrics.get("mse") is not None else None,
                     float(test_metrics.get("mae")) if test_metrics.get("mae") is not None else None,
                     float(test_metrics.get("rmse")) if test_metrics.get("rmse") is not None else None,
@@ -473,12 +530,18 @@ def write_unified_registry_sqlite(
             cursor.execute(
                 """
                 INSERT OR REPLACE INTO classification_metrics (
-                    run_id, accuracy, balanced_accuracy, precision_macro, recall_macro, f1_macro,
+                    run_id, model_name, timestamp, library, task, algorithm, estimator_class, model_id,
+                    dataset_path, dataset_sha256, dataset_rows, dataset_columns,
+                    test_size, random_state, n_train, n_val, n_test,
+                    tuning_enabled, tuning_method, cv_best_score,
+                    primary_metric_name, primary_metric_direction, primary_metric_value,
+                    run_dir, created_at_utc,
+                    accuracy, balanced_accuracy, precision_macro, recall_macro, f1_macro,
                     roc_auc_value, pr_auc_value, log_loss, brier_score, support_total, support_by_class_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    str(run_metadata.get("run_id")),
+                run_insert_common_values
+                + (
                     float(test_metrics.get("accuracy")) if test_metrics.get("accuracy") is not None else None,
                     float(test_metrics.get("balanced_accuracy")) if test_metrics.get("balanced_accuracy") is not None else None,
                     float(test_metrics.get("precision_macro")) if test_metrics.get("precision_macro") is not None else None,

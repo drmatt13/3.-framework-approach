@@ -53,6 +53,7 @@ from libraries.model_template_helpers import (
 	round_metric as _round_metric_base,
 	select_estimator_params as _select_estimator_params,
 	validate_etl_outputs as _validate_etl_outputs,
+	write_unified_registry_sqlite as _write_unified_registry_sqlite,
 	write_model_schemas as _write_model_schemas,
 )
 from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
@@ -83,15 +84,15 @@ from libraries.xgboost_template_utils import resolve_xgboost_device as _resolve_
 #
 # Hyperparameter tuning configuration
 #   --enable-tuning true|false                  		(enable hyperparameter tuning with cross-validation)
-
+# 
 # Model configuration (direct-fit)              (used when --enable-tuning=false)
 #   --device auto|cpu|gpu                           (training device selection)
 #   --n-estimators <int>                            (number of boosting rounds)
 #   --learning-rate <float>                         (step size shrinkage used during boosting)
-#   --max-depth <int>                               (tree boosters only)
-#   --subsample <float>                             (tree boosters only)
-#   --colsample-bytree <float>                      (tree boosters only)
-#   --min-child-weight <float>                      (tree boosters only)
+#   --max-depth <int>                               (tree boosters only; gbtree|dart; maximum tree depth for base learners)
+#   --subsample <float>                             (tree boosters only; gbtree|dart; subsample ratio of the training instances)
+#   --colsample-bytree <float>                      (tree boosters only; gbtree|dart; subsample ratio of columns when constructing each tree)
+#   --min-child-weight <float>                      (tree boosters only; gbtree|dart; minimum sum of instance weight needed in a child)
 #   --reg-lambda <float>                            (L2 regularization strength)
 #   --reg-alpha <float>                             (L1 regularization strength)
 #
@@ -111,15 +112,15 @@ from libraries.xgboost_template_utils import resolve_xgboost_device as _resolve_
 
 # NOTE: Adjust these grids to customize search breadth for tuning.
 XGBOOST_SEARCH_GRID_CONFIG = _XGBoostSearchGridConfig(
-	n_estimators=[100, 200],
-	learning_rate=[0.05, 0.1],
-	reg_lambda=[1.0],
-	reg_alpha=[0.0],
-	booster_when_auto=["gbtree", "gblinear"],
-	max_depth=[4, 6],
-	subsample=[0.8, 1.0],
-	colsample_bytree=[0.8, 1.0],
-	min_child_weight=[1.0, 3.0],
+  n_estimators=[200, 400, 800],  # number of boosting rounds (trees added sequentially to correct residual error)
+  learning_rate=[0.3, 0.1, 0.05, 0.03],  # step size shrinkage applied to each tree’s contribution (smaller = slower but often better learning)
+  reg_lambda=[0.0, 1.0, 10.0],  # L2 regularization on leaf weights (larger values reduce overfitting by shrinking weights)
+  reg_alpha=[0.0, 0.001, 0.01, 0.1],  # L1 regularization on leaf weights (encourages sparsity in tree leaf outputs)
+  booster_when_auto=["gbtree", "gblinear"],  # boosters searched when --booster=auto (tree-based gradient boosting vs linear booster)
+  max_depth=[3, 5, 7, 9],  # maximum depth of trees for tree boosters (controls model complexity and interaction depth)
+  subsample=[0.6, 0.8, 1.0],  # fraction of rows sampled for each boosting round (stochastic gradient boosting; helps prevent overfitting)
+  colsample_bytree=[0.6, 0.8, 1.0],  # fraction of features sampled when constructing each tree (similar concept to RF max_features)
+  min_child_weight=[1.0, 3.0, 5.0, 10.0],  # minimum sum of Hessian (approx. sample weight) required in a child node to allow a split
 )
 
 # Default values for optional parameters. These can be overridden via CLI.
@@ -977,7 +978,7 @@ print(results)
 
 	run_metadata = {
 		"run_id": run_id,
-		"name": model_name,
+		"model_name": model_name,
 		"timestamp": timestamp,
 		"library": "xgboost",
 		"task": args.task,
@@ -1102,7 +1103,7 @@ print(results)
 			{
 				"model_id": model_id,
 				"run_id": run_id,
-				"name": model_name,
+				"model_name": model_name,
 				"timestamp": timestamp,
 				"dataset_sha256": data_hash,
 				"dataset_rows": data_rows,
@@ -1141,5 +1142,11 @@ print(results)
 	)
 	registry_df = pd.concat([registry_df, registry_row], ignore_index=True)
 	registry_df.to_csv(registry_path, index=False)
+	_write_unified_registry_sqlite(
+		project_root=_project_root(),
+		run_dir=run_dir,
+		run_metadata=run_metadata,
+		metrics=metrics,
+	)
 
 	print(f"Artifacts exported to: {run_dir}")

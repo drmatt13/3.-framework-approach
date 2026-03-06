@@ -32,6 +32,8 @@ SKLEARN_LOGISTIC_SOLVERS = ["auto", *list(NON_AUTO_LOGISTIC_SOLVERS)]
 
 # Only meaningful for TensorFlow models (gradient-based training)
 TENSORFLOW_OPTIMIZERS = ["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"]
+TENSORFLOW_ACTIVATIONS = ["auto", "relu", "gelu", "tanh"]
+TENSORFLOW_REGULARIZATION_MODES = ["auto", "none", "l1", "l2", "l1_l2"]
 
 STARTER_DATASETS_BY_TASK = {
     "regression": ["ames_housing.csv", "california_housing.csv", "insurance.csv"],
@@ -130,6 +132,18 @@ def _is_rf_max_samples_text(s: str) -> bool:
     return False
 
 
+def _is_hidden_layers_text(s: str) -> bool:
+    tokens = [token.strip() for token in s.split(",") if token.strip()]
+    if not tokens:
+        return False
+    for token in tokens:
+        if not _is_int(token):
+            return False
+        if int(token) <= 0:
+            return False
+    return True
+
+
 def _stringify_setting(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -195,6 +209,9 @@ def _should_omit_resolved_key(key: str, values_by_key: dict[str, object]) -> boo
             "tf_tuning_method",
             "tf_cv_scoring",
             "tf_cv_n_iter",
+            "tf_tuning_optimizer",
+            "tf_tuning_activation",
+            "tf_tuning_regularization",
         ),
     }
 
@@ -243,6 +260,15 @@ def _should_omit_resolved_key(key: str, values_by_key: dict[str, object]) -> boo
             "lr_fit_intercept",
             "lr_l1_ratio",
         ),
+        "tf_enable_tuning": (
+            "tf_learning_rate",
+            "batch_size",
+            "tf_hidden_layers",
+            "tf_hidden_activation",
+            "tf_dropout",
+            "tf_l1",
+            "tf_l2",
+        ),
     }
     for enable_key, direct_keys in direct_defaults_by_enable.items():
         if key in direct_keys and enable_key in values_by_key:
@@ -275,6 +301,14 @@ def _resolved_display_key(key: str) -> str:
         "lr_fit_intercept": "fit_intercept",
         "lr_l1_ratio": "l1_ratio",
         "tf_learning_rate": "learning_rate",
+        "tf_hidden_layers": "hidden_layers",
+        "tf_hidden_activation": "hidden_activation",
+        "tf_dropout": "dropout",
+        "tf_l1": "l1",
+        "tf_l2": "l2",
+        "tf_tuning_optimizer": "tuning_optimizer",
+        "tf_tuning_activation": "tuning_activation",
+        "tf_tuning_regularization": "tuning_regularization",
     }
     if key in explicit_map:
         return explicit_map[key]
@@ -835,6 +869,14 @@ def main() -> int:
     tf_tuning_method = None
     tf_cv_scoring = None
     tf_cv_n_iter = None
+    tf_tuning_optimizer = None
+    tf_tuning_activation = None
+    tf_tuning_regularization = None
+    tf_hidden_layers = None
+    tf_hidden_activation = None
+    tf_dropout = None
+    tf_l1 = None
+    tf_l2 = None
 
     # When a profile provides defaults, use them and skip prompts.
     use_custom = profile == "Custom" or library == "tensorflow"
@@ -1452,38 +1494,13 @@ def main() -> int:
             rf_cv_n_jobs = profile_defaults.get("rf_cv_n_jobs", "-1")
 
     if library == "tensorflow" and model == "dense_nn":
-        tf_enable_tuning = questionary.confirm(
-            "Enable hyperparameter tuning by default? (--enable-tuning)",
-            default=False,
-            style=CUSTOM_STYLE,
-        ).ask()
-        if tf_enable_tuning is None:
-            print("Cancelled.")
-            return 0
-
-        optimizer_choices = ["adam", "auto", "sgd", "rmsprop", "adagrad", "adamw"] if tf_enable_tuning else ["adam", "sgd", "rmsprop", "adagrad", "adamw"]
+        optimizer_choices = TENSORFLOW_OPTIMIZERS
         optimizer = _ask_select(
             "Select optimizer:",
             choices=optimizer_choices,
+            default="auto",
         )
         if optimizer is None:
-            print("Cancelled.")
-            return 0
-
-        if tf_enable_tuning:
-            if optimizer == "auto":
-                print("Note: optimizer=auto lets tuning search across all optimizer families.")
-            else:
-                print(f"Note: tuning will keep optimizer fixed to '{optimizer}'.")
-
-        tf_learning_rate = _ask_text(
-            "Enter learning rate (e.g., 0.001):",
-            default="0.001",
-            validate_fn=lambda s: True
-            if (_is_float(s) and float(s) > 0)
-            else "Must be a positive number",
-        )
-        if tf_learning_rate is None:
             print("Cancelled.")
             return 0
 
@@ -1496,30 +1513,183 @@ def main() -> int:
             print("Cancelled.")
             return 0
 
-        batch_size = _ask_text(
-            "Enter batch size (e.g., 32):",
-            default="32",
-            validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+        recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change = _recommended_es_defaults(
+            library,
+            model,
         )
-        if batch_size is None:
+        early_stopping = questionary.confirm(
+            "Enable early stopping?",
+            default=bool(recommended_early_stopping),
+            style=CUSTOM_STYLE,
+        ).ask()
+        if early_stopping is None:
             print("Cancelled.")
             return 0
 
-        if tf_enable_tuning:
-            tf_tuning_method = "random"
-            tf_cv_n_iter = _ask_text(
-                "Enter random-search iterations (>0):",
-                default="10",
-                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+        use_recommended_defaults = questionary.confirm(
+            "Use recommended preset values for validation fraction and n_iter_no_change?",
+            default=True,
+            style=CUSTOM_STYLE,
+        ).ask()
+        if use_recommended_defaults is None:
+            print("Cancelled.")
+            return 0
+
+        if use_recommended_defaults:
+            validation_fraction = recommended_validation_fraction
+            n_iter_no_change = recommended_n_iter_no_change
+        else:
+            validation_fraction = _ask_text(
+                "Enter validation fraction (0 < value < 1):",
+                default=str(recommended_validation_fraction),
+                validate_fn=lambda s: True
+                if (_is_float(s) and 0.0 < float(s) < 1.0)
+                else "Must be a number where 0 < value < 1",
             )
-            if tf_cv_n_iter is None:
+            if validation_fraction is None:
                 print("Cancelled.")
                 return 0
-            tf_cv_scoring = _ask_select(
-                "Select tuning scoring metric:",
-                choices=["rmse"] if task == "regression" else ["f1_macro"],
+
+            n_iter_no_change = _ask_text(
+                "Enter n_iter_no_change:",
+                default=str(recommended_n_iter_no_change),
+                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
             )
-            if tf_cv_scoring is None:
+            if n_iter_no_change is None:
+                print("Cancelled.")
+                return 0
+
+            validation_fraction = float(validation_fraction)
+            n_iter_no_change = int(n_iter_no_change)
+
+        tf_enable_tuning = questionary.confirm(
+            "Enable hyperparameter tuning by default? (--enable-tuning)",
+            default=False,
+            style=CUSTOM_STYLE,
+        ).ask()
+        if tf_enable_tuning is None:
+            print("Cancelled.")
+            return 0
+
+        tf_learning_rate = "0.001"
+        batch_size = "32"
+
+        if tf_enable_tuning:
+            tf_tuning_method = _ask_select(
+                "Select tuning method:",
+                choices=["grid", "random"],
+            )
+            if tf_tuning_method is None:
+                print("Cancelled.")
+                return 0
+
+            tf_tuning_optimizer = optimizer
+
+            tf_tuning_activation = _ask_select(
+                "Filter activation search:",
+                choices=TENSORFLOW_ACTIVATIONS,
+                default="auto",
+            )
+            if tf_tuning_activation is None:
+                print("Cancelled.")
+                return 0
+
+            tf_tuning_regularization = _ask_select(
+                "Filter regularization search:",
+                choices=TENSORFLOW_REGULARIZATION_MODES,
+                default="auto",
+            )
+            if tf_tuning_regularization is None:
+                print("Cancelled.")
+                return 0
+
+            if tf_tuning_method == "random":
+                tf_cv_n_iter = _ask_text(
+                    "Enter random-search iterations (>0):",
+                    default="10",
+                    validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+                )
+                if tf_cv_n_iter is None:
+                    print("Cancelled.")
+                    return 0
+            scoring_choices = ["rmse"] if task == "regression" else ["f1_macro"]
+            if len(scoring_choices) == 1:
+                tf_cv_scoring = scoring_choices[0]
+            else:
+                tf_cv_scoring = _ask_select(
+                    "Select tuning scoring metric:",
+                    choices=scoring_choices,
+                )
+                if tf_cv_scoring is None:
+                    print("Cancelled.")
+                    return 0
+        else:
+            non_tuning_dropout_default = "0.0" if task == "regression" else "0.1"
+            tf_learning_rate = _ask_text(
+                "Enter learning rate (e.g., 0.001):",
+                default="0.001",
+                validate_fn=lambda s: True
+                if (_is_float(s) and float(s) > 0)
+                else "Must be a positive number",
+            )
+            if tf_learning_rate is None:
+                print("Cancelled.")
+                return 0
+
+            batch_size = _ask_text(
+                "Enter batch size (e.g., 32):",
+                default="32",
+                validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
+            )
+            if batch_size is None:
+                print("Cancelled.")
+                return 0
+
+            tf_hidden_layers = _ask_text(
+                "Enter hidden layer units as comma-separated ints (e.g., 128,64,32):",
+                default="128,64,32",
+                validate_fn=lambda s: True if _is_hidden_layers_text(s) else "Use comma-separated positive integers",
+            )
+            if tf_hidden_layers is None:
+                print("Cancelled.")
+                return 0
+            tf_hidden_layers = [int(token.strip()) for token in tf_hidden_layers.split(",") if token.strip()]
+
+            tf_hidden_activation = _ask_select(
+                "Select hidden-layer activation for non-tuning defaults:",
+                choices=["relu", "gelu", "tanh"],
+                default="relu",
+            )
+            if tf_hidden_activation is None:
+                print("Cancelled.")
+                return 0
+
+            tf_dropout = _ask_text(
+                "Enter dropout for non-tuning defaults (0 <= value < 1):",
+                default=non_tuning_dropout_default,
+                validate_fn=lambda s: True
+                if (_is_float(s) and 0.0 <= float(s) < 1.0)
+                else "Must be a number in range 0 <= value < 1",
+            )
+            if tf_dropout is None:
+                print("Cancelled.")
+                return 0
+
+            tf_l1 = _ask_text(
+                "Enter l1 regularization for non-tuning defaults (>= 0):",
+                default="0.0",
+                validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0.0) else "Must be a non-negative number",
+            )
+            if tf_l1 is None:
+                print("Cancelled.")
+                return 0
+
+            tf_l2 = _ask_text(
+                "Enter l2 regularization for non-tuning defaults (>= 0):",
+                default="0.0",
+                validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0.0) else "Must be a non-negative number",
+            )
+            if tf_l2 is None:
                 print("Cancelled.")
                 return 0
 
@@ -1650,7 +1820,7 @@ def main() -> int:
         else:
             max_iter = int(profile_defaults.get("max_iter", 1000))
 
-    if _supports_early_stopping_defaults(library, model, task) and not (library == "xgboost" and use_custom):
+    if _supports_early_stopping_defaults(library, model, task) and not (library == "xgboost" and use_custom) and not (library == "tensorflow" and model == "dense_nn"):
         supports_validation_defaults = _supports_validation_n_iter_defaults(library, model, task)
         if use_custom:
             recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change = _recommended_es_defaults(
@@ -1785,9 +1955,17 @@ def main() -> int:
         ("lr_cv_n_iter", lr_cv_n_iter),
         ("lr_cv_n_jobs", lr_cv_n_jobs),
         ("tf_enable_tuning", tf_enable_tuning),
+        ("tf_hidden_layers", tf_hidden_layers),
+        ("tf_hidden_activation", tf_hidden_activation),
+        ("tf_dropout", tf_dropout),
+        ("tf_l1", tf_l1),
+        ("tf_l2", tf_l2),
         ("tf_tuning_method", tf_tuning_method),
         ("tf_cv_scoring", tf_cv_scoring),
         ("tf_cv_n_iter", tf_cv_n_iter),
+        ("tf_tuning_optimizer", tf_tuning_optimizer),
+        ("tf_tuning_activation", tf_tuning_activation),
+        ("tf_tuning_regularization", tf_tuning_regularization),
     ]
 
     optional_values_by_key = {key: value for key, value in optional_defaults if value is not None}
@@ -1968,17 +2146,35 @@ def main() -> int:
     if library == "tensorflow":
         # These variables are guaranteed non-None here due to the prompts above.
         cmd.extend(["--optimizer", optimizer])
-        cmd.extend(["--learning_rate", str(float(tf_learning_rate))])
+        if tf_learning_rate is not None:
+            cmd.extend(["--learning_rate", str(float(tf_learning_rate))])
         cmd.extend(["--epochs", str(int(epochs))])
-        cmd.extend(["--batch_size", str(int(batch_size))])
+        if batch_size is not None:
+            cmd.extend(["--batch_size", str(int(batch_size))])
         if tf_enable_tuning is not None:
             cmd.extend(["--default-tf-enable-tuning", "true" if tf_enable_tuning else "false"])
         if tf_tuning_method is not None:
             cmd.extend(["--default-tf-tuning-method", str(tf_tuning_method)])
         if tf_cv_scoring is not None:
             cmd.extend(["--default-tf-cv-scoring", str(tf_cv_scoring)])
-        if tf_cv_n_iter is not None:
+        if tf_tuning_method == "random" and tf_cv_n_iter is not None:
             cmd.extend(["--default-tf-cv-n-iter", str(int(tf_cv_n_iter))])
+        if tf_tuning_optimizer is not None:
+            cmd.extend(["--default-tf-tuning-optimizer", str(tf_tuning_optimizer)])
+        if tf_tuning_activation is not None:
+            cmd.extend(["--default-tf-tuning-activation", str(tf_tuning_activation)])
+        if tf_tuning_regularization is not None:
+            cmd.extend(["--default-tf-tuning-regularization", str(tf_tuning_regularization)])
+        if tf_hidden_layers is not None:
+            cmd.extend(["--default-tf-hidden-layers", ",".join(str(int(v)) for v in tf_hidden_layers)])
+        if tf_hidden_activation is not None:
+            cmd.extend(["--default-tf-hidden-activation", str(tf_hidden_activation)])
+        if tf_dropout is not None:
+            cmd.extend(["--default-tf-dropout", str(float(tf_dropout))])
+        if tf_l1 is not None:
+            cmd.extend(["--default-tf-l1", str(float(tf_l1))])
+        if tf_l2 is not None:
+            cmd.extend(["--default-tf-l2", str(float(tf_l2))])
 
     print("\nRunning:")
     print("  " + " ".join(cmd) + "\n")

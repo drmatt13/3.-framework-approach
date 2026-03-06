@@ -30,6 +30,7 @@ from sklearn.metrics import (
 	roc_auc_score,
 	roc_curve,
 )
+
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import label_binarize
 
@@ -50,9 +51,11 @@ from libraries.model_template_helpers import (
 	round_metric as _round_metric_base,
 	to_dense_float32 as _to_dense_float32,
 	validate_etl_outputs as _validate_etl_outputs,
+	write_unified_registry_sqlite as _write_unified_registry_sqlite,
 	write_model_schemas as _write_model_schemas,
 )
 from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
+from libraries.tensorflow_search_space import DenseNNSearchGridConfig, build_dense_nn_search_candidates as _build_dense_nn_search_candidates
 from libraries.tensorflow_template_utils import (
 	build_dense_classifier as _build_dense_classifier,
 	classification_score as _classification_score,
@@ -92,10 +95,31 @@ from libraries.tensorflow_template_utils import (
 #   --enable-tuning true|false
 #
 #   Tuning-specific (only when --enable-tuning=true)
-#   --tuning-method random
+#   --tuning-method grid|random
 #   --cv-scoring f1_macro
 #   --cv-n-iter <int>
+#   --tuning-optimizer auto|adam|sgd|rmsprop|adagrad|adamw
+#   --tuning-activation auto|relu|gelu|tanh
+#   --tuning-regularization auto|none|l1|l2|l1_l2
 # ---------------------------------------------------------------------
+
+# NOTE: Adjust these grids to customize search breadth for tuning.
+DENSE_NN_SEARCH_GRID_CONFIG = DenseNNSearchGridConfig(
+	hidden_units=[
+		[64],
+		[128],
+		[128, 64],
+		[256, 128],
+		[256, 128, 64],
+	],
+	activation=["relu", "gelu", "tanh"],
+	optimizer=["adam", "rmsprop", "sgd", "adamw"],
+	learning_rate=[1e-2, 3e-3, 1e-3, 3e-4, 1e-4],
+	batch_size=[16, 32, 64, 128],
+	dropout=[0.0, 0.1, 0.2, 0.3],
+	l1=[0.0, 1e-5, 1e-4, 1e-3],
+	l2=[0.0, 1e-5, 1e-4, 1e-3],
+)
 
 # # Default values for optional parameters. These can be overridden via CLI.
 SAVE_MODEL = False
@@ -113,6 +137,9 @@ DEFAULT_ENABLE_TUNING = "{{TF_ENABLE_TUNING_DEFAULT}}" == "True"
 DEFAULT_TUNING_METHOD = "{{TF_TUNING_METHOD_DEFAULT}}"
 DEFAULT_CV_SCORING = "{{TF_CV_SCORING_DEFAULT}}"
 DEFAULT_CV_N_ITER = int("{{TF_CV_N_ITER_DEFAULT}}")
+DEFAULT_TF_TUNING_OPTIMIZER = "{{TF_TUNING_OPTIMIZER_DEFAULT}}"
+DEFAULT_TF_TUNING_ACTIVATION = "{{TF_TUNING_ACTIVATION_DEFAULT}}"
+DEFAULT_TF_TUNING_REGULARIZATION = "{{TF_TUNING_REGULARIZATION_DEFAULT}}"
 
 parser = argparse.ArgumentParser(description="TensorFlow Dense Neural Network Classifier baseline")
 parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
@@ -131,9 +158,12 @@ parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CH
 parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
 parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
 parser.add_argument("--enable-tuning", type=_parse_bool, default=DEFAULT_ENABLE_TUNING)
-parser.add_argument("--tuning-method", choices=["random"], default=DEFAULT_TUNING_METHOD)
+parser.add_argument("--tuning-method", choices=["grid", "random"], default=DEFAULT_TUNING_METHOD)
 parser.add_argument("--cv-scoring", choices=["f1_macro"], default=DEFAULT_CV_SCORING)
 parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
+parser.add_argument("--tuning-optimizer", choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"], default=DEFAULT_TF_TUNING_OPTIMIZER)
+parser.add_argument("--tuning-activation", choices=["auto", "relu", "gelu", "tanh"], default=DEFAULT_TF_TUNING_ACTIVATION)
+parser.add_argument("--tuning-regularization", choices=["auto", "none", "l1", "l2", "l1_l2"], default=DEFAULT_TF_TUNING_REGULARIZATION)
 args = parser.parse_args()
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
@@ -319,28 +349,17 @@ generated_defaults = {"output_units": int("{{OUTPUT_UNITS}}"), "output_activatio
 tf.keras.utils.set_random_seed(int(args.random_state))
 
 # ---------------------------------------------------------------------
-# TENSORFLOW DENSE MODEL TUNING BLOCK
-# Edit this tf.keras.Sequential block to tune layer widths/depth,
-# activations, and regularization for your dataset.
-#
-# Regularization examples (uncomment to enable):
-#   tf.keras.layers.Dense(
-#       128,
-#       activation="relu",
-#       kernel_regularizer=tf.keras.regularizers.l2(1e-4),
-#   )
-#   tf.keras.layers.Dense(
-#       64,
-#       activation="relu",
-#       kernel_regularizer=tf.keras.regularizers.l1_l2(l1=1e-5, l2=1e-4),
-#   )
-#   tf.keras.layers.Dropout(0.2)
+# NON-TUNING ARCHITECTURE DEFAULTS (GENERATED)
+# These defaults are used when --enable-tuning=false.
+# Edit these values directly to customize the direct-fit model.
 # ---------------------------------------------------------------------
 
-# Adjust the architecture and hyperparameters of the model as needed for your dataset/task.
-_ALL_OPTIMIZERS = ["adam", "sgd", "rmsprop", "adagrad", "adamw"]
-selected_hidden_layers = [128, 64, 32]
-selected_dropout = 0.1
+# Generated direct-fit defaults (task-specific).
+selected_hidden_layers = {{TF_DEFAULT_HIDDEN_LAYERS}}
+selected_dropout = float("{{TF_DEFAULT_DROPOUT}}")
+selected_activation = "{{TF_DEFAULT_HIDDEN_ACTIVATION}}"
+selected_l1 = float("{{TF_DEFAULT_L1}}")
+selected_l2 = float("{{TF_DEFAULT_L2}}")
 selected_optimizer = "adam" if args.optimizer == "auto" else args.optimizer
 selected_learning_rate = float(args.learning_rate)
 tuning_summary = {
@@ -359,7 +378,7 @@ tuning_summary = {
 if args.enable_tuning:
 	if phase_logs_enabled:
 		print(
-			f"Training started with tuning: method=random, "
+			f"Training started with tuning: method={args.tuning_method}, "
 			f"scoring={args.cv_scoring}, n_iter={args.cv_n_iter}"
 		)
 	rng = np.random.default_rng(int(args.random_state))
@@ -370,22 +389,24 @@ if args.enable_tuning:
 		random_state=int(args.random_state),
 		stratify=y_train_array,
 	)
-	_tuning_optimizers = _ALL_OPTIMIZERS if args.optimizer == "auto" else [args.optimizer]
-	candidates = [
-		{"optimizer": opt, "learning_rate": lr, "batch_size": bs, "hidden_layers": hl, "dropout": dr}
-		for opt in _tuning_optimizers
-		for lr in [1e-4, 3e-4, 1e-3, 3e-3]
-		for bs in [16, 32, 64]
-		for hl in ([128, 64], [128, 64, 32], [256, 128, 64])
-		for dr in [0.0, 0.1, 0.2]
-	]
-	sampled_indices = rng.choice(len(candidates), size=min(int(args.cv_n_iter), len(candidates)), replace=False)
+	candidates = _build_dense_nn_search_candidates(
+		config=DENSE_NN_SEARCH_GRID_CONFIG,
+		optimizer=args.tuning_optimizer,
+		activation=args.tuning_activation,
+		regularization=args.tuning_regularization,
+	)
+	if len(candidates) == 0:
+		raise ValueError("No TensorFlow tuning candidates remain after applying optimizer/activation/regularization filters.")
+	if args.tuning_method == "random":
+		trial_indices = rng.choice(len(candidates), size=min(int(args.cv_n_iter), len(candidates)), replace=False).tolist()
+	else:
+		trial_indices = list(range(len(candidates)))
 	best_candidate = None
 	best_candidate_score = -np.inf
-	for trial_index, index in enumerate(sampled_indices.tolist(), start=1):
+	for trial_index, index in enumerate(trial_indices, start=1):
 		candidate = candidates[int(index)]
 		if training_verbose >= 2:
-			print(f"Tuning trial {trial_index}/{len(sampled_indices)}: {candidate}")
+			print(f"Tuning trial {trial_index}/{len(trial_indices)}: {candidate}")
 		tf.keras.backend.clear_session()
 		trial_model = _build_dense_classifier(
 			input_dim=int(X_train_processed.shape[1]),
@@ -395,6 +416,9 @@ if args.enable_tuning:
 			learning_rate=float(candidate["learning_rate"]),
 			hidden_layers=list(candidate["hidden_layers"]),
 			dropout=float(candidate["dropout"]),
+			hidden_activation=str(candidate["activation"]),
+			l1=float(candidate["l1"]),
+			l2=float(candidate["l2"]),
 			is_binary=is_binary,
 		)
 		trial_callbacks = [
@@ -424,15 +448,18 @@ if args.enable_tuning:
 		selected_learning_rate = float(best_candidate["learning_rate"])
 		selected_hidden_layers = [int(v) for v in best_candidate["hidden_layers"]]
 		selected_dropout = float(best_candidate["dropout"])
+		selected_activation = str(best_candidate["activation"])
+		selected_l1 = float(best_candidate["l1"])
+		selected_l2 = float(best_candidate["l2"])
 		args.batch_size = int(best_candidate["batch_size"])
 		tuning_summary = {
 			"enabled": True,
-			"method": "random",
+			"method": args.tuning_method,
 			"cv_folds": None,
 			"scoring": args.cv_scoring,
 			"scoring_sklearn": args.cv_scoring,
-			"n_iter": int(args.cv_n_iter),
-			"n_candidates": int(len(sampled_indices)),
+			"n_iter": int(len(trial_indices)) if args.tuning_method == "random" else None,
+			"n_candidates": int(len(trial_indices)),
 			"best_score": _round_metric(best_candidate_score),
 			"best_score_std": None,
 			"best_params": _compact_metadata(_json_safe(best_candidate)),
@@ -447,6 +474,9 @@ keras_model = _build_dense_classifier(
 	learning_rate=float(selected_learning_rate),
 	hidden_layers=selected_hidden_layers,
 	dropout=selected_dropout,
+	hidden_activation=selected_activation,
+	l1=float(selected_l1),
+	l2=float(selected_l2),
 	is_binary=is_binary,
 )
 
@@ -504,7 +534,7 @@ if tuning_summary["enabled"]:
 	training_control = {
 		"enabled": True,
 		"type": "search_cv",
-		"max_steps_configured": int(args.cv_n_iter),
+		"max_steps_configured": int(tuning_summary["n_candidates"]),
 		"steps_completed": int(tuning_summary["n_candidates"]),
 		"patience": None,
 		"monitor_metric": f"cv_{args.cv_scoring}",
@@ -785,7 +815,7 @@ print("Probabilities:", probabilities.tolist())
 
 	run_metadata = {
 		"run_id": run_id,
-		"name": model_name,
+		"model_name": model_name,
 		"timestamp": timestamp,
 		"library": "tensorflow",
 		"task": args.task,
@@ -814,6 +844,9 @@ print("Probabilities:", probabilities.tolist())
 		"params": {
 			"optimizer": selected_optimizer,
 			"learning_rate": float(selected_learning_rate),
+			"activation": selected_activation,
+			"l1": float(selected_l1),
+			"l2": float(selected_l2),
 			"epochs": int(args.epochs),
 			"batch_size": int(args.batch_size),
 			"early_stopping": bool(args.early_stopping),
@@ -823,6 +856,9 @@ print("Probabilities:", probabilities.tolist())
 			"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
 			"cv_scoring": args.cv_scoring if tuning_summary["enabled"] else None,
 			"cv_n_iter": int(args.cv_n_iter) if tuning_summary["enabled"] else None,
+			"tuning_optimizer": args.tuning_optimizer if tuning_summary["enabled"] else None,
+			"tuning_activation": args.tuning_activation if tuning_summary["enabled"] else None,
+			"tuning_regularization": args.tuning_regularization if tuning_summary["enabled"] else None,
 			"random_state": int(args.random_state),
 			"hidden_layers": selected_hidden_layers,
 			"dropout": float(selected_dropout),
@@ -868,13 +904,16 @@ print("Probabilities:", probabilities.tolist())
 		[{
 			"model_id": next_id,
 			"run_id": run_id,
-			"name": model_name,
+			"model_name": model_name,
 			"timestamp": timestamp,
 			"dataset_sha256": data_hash,
 			"dataset_rows": int(len(df)),
 			"dataset_columns": int(df.shape[1]),
 			"optimizer": args.optimizer,
 			"learning_rate": float(selected_learning_rate),
+			"activation": selected_activation,
+			"l1": float(selected_l1),
+			"l2": float(selected_l2),
 			"epochs": int(args.epochs),
 			"batch_size": int(args.batch_size),
 			"random_state": int(args.random_state),
@@ -902,5 +941,11 @@ print("Probabilities:", probabilities.tolist())
 		}]
 	)
 	pd.concat([registry_df, registry_row], ignore_index=True).to_csv(registry_path, index=False)
+	_write_unified_registry_sqlite(
+		project_root=_project_root(),
+		run_dir=run_dir,
+		run_metadata=_compact_metadata(_json_safe(run_metadata)),
+		metrics=metrics,
+	)
 	print(f"Artifacts exported to: {run_dir}")
 

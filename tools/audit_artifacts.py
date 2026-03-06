@@ -40,7 +40,6 @@ def main() -> int:
         "sqlite_registry": {
             "path": "artifacts/model_registry.sqlite",
             "exists": False,
-            "runs_count": None,
             "regression_metrics_count": None,
             "classification_metrics_count": None,
             "error": None,
@@ -49,7 +48,7 @@ def main() -> int:
 
     expected_run_top = {
         "run_id",
-        "name",
+        "model_name",
         "timestamp",
         "library",
         "task",
@@ -232,8 +231,6 @@ def main() -> int:
         try:
             conn = sqlite3.connect(sqlite_path)
             cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM runs")
-            results["sqlite_registry"]["runs_count"] = int(cur.fetchone()[0])
             cur.execute("SELECT COUNT(*) FROM regression_metrics")
             results["sqlite_registry"]["regression_metrics_count"] = int(cur.fetchone()[0])
             cur.execute("SELECT COUNT(*) FROM classification_metrics")

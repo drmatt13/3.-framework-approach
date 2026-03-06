@@ -676,7 +676,7 @@ print(results)
 	}
 	run_metadata = {
 		"run_id": run_id,
-		"name": model_name,
+		"model_name": model_name,
 		"timestamp": timestamp,
 		"library": "scikit-learn",
 		"task": args.task,
@@ -798,7 +798,7 @@ print(results)
 			{
 				"model_id": model_id,
 				"run_id": run_id,
-				"name": model_name,
+				"model_name": model_name,
 				"timestamp": timestamp,
 				"dataset_sha256": data_hash,
 				"dataset_rows": data_rows,
