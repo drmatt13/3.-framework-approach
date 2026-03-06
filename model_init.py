@@ -1949,122 +1949,122 @@ def main() -> int:
         cmd.extend(["--starter-dataset", starter_dataset])
 
     if _supports_early_stopping_defaults(library, model, task):
-        cmd.extend(["--default-early-stopping", "true" if early_stopping else "false"])
+        cmd.extend(["--early-stopping", "true" if early_stopping else "false"])
     if _supports_validation_n_iter_defaults(library, model, task):
-        cmd.extend(["--default-validation-fraction", str(float(validation_fraction))])
-        cmd.extend(["--default-n-iter-no-change", str(int(n_iter_no_change))])
+        cmd.extend(["--validation-fraction", str(float(validation_fraction))])
+        cmd.extend(["--n-iter-no-change", str(int(n_iter_no_change))])
 
     if max_iter is not None:
-        cmd.extend(["--default-max-iter", str(int(max_iter))])
+        cmd.extend(["--max-iter", str(int(max_iter))])
 
     if n_estimators is not None:
-        cmd.extend(["--default-n-estimators", str(int(n_estimators))])
+        cmd.extend(["--n-estimators", str(int(n_estimators))])
     if learning_rate is not None:
-        cmd.extend(["--default-learning-rate", str(float(learning_rate))])
+        cmd.extend(["--learning-rate", str(float(learning_rate))])
     if max_depth is not None:
-        cmd.extend(["--default-max-depth", str(int(max_depth))])
+        cmd.extend(["--max-depth", str(int(max_depth))])
     if subsample is not None:
-        cmd.extend(["--default-subsample", str(float(subsample))])
+        cmd.extend(["--subsample", str(float(subsample))])
     if colsample_bytree is not None:
-        cmd.extend(["--default-colsample-bytree", str(float(colsample_bytree))])
+        cmd.extend(["--colsample-bytree", str(float(colsample_bytree))])
     if xgb_min_child_weight is not None:
-        cmd.extend(["--default-xgb-min-child-weight", str(float(xgb_min_child_weight))])
+        cmd.extend(["--xgb-min-child-weight", str(float(xgb_min_child_weight))])
     if xgb_reg_lambda is not None:
-        cmd.extend(["--default-xgb-reg-lambda", str(float(xgb_reg_lambda))])
+        cmd.extend(["--xgb-reg-lambda", str(float(xgb_reg_lambda))])
     if xgb_reg_alpha is not None:
-        cmd.extend(["--default-xgb-reg-alpha", str(float(xgb_reg_alpha))])
+        cmd.extend(["--xgb-reg-alpha", str(float(xgb_reg_alpha))])
 
     if c is not None:
-        cmd.extend(["--default-c", str(float(c))])
+        cmd.extend(["--c", str(float(c))])
     if solver is not None:
-        cmd.extend(["--default-solver", str(solver)])
+        cmd.extend(["--solver", str(solver)])
     if logistic_penalty is not None:
-        cmd.extend(["--default-logistic-penalty", str(logistic_penalty)])
+        cmd.extend(["--logistic-penalty", str(logistic_penalty)])
     if logistic_class_weight is not None:
-        cmd.extend(["--default-logistic-class-weight", str(logistic_class_weight)])
+        cmd.extend(["--logistic-class-weight", str(logistic_class_weight)])
     if logistic_enable_tuning is not None:
-        cmd.extend(["--default-logistic-enable-tuning", "true" if logistic_enable_tuning else "false"])
+        cmd.extend(["--logistic-enable-tuning", "true" if logistic_enable_tuning else "false"])
     if logistic_tuning_method is not None:
-        cmd.extend(["--default-logistic-tuning-method", str(logistic_tuning_method)])
+        cmd.extend(["--logistic-tuning-method", str(logistic_tuning_method)])
     if logistic_cv_folds is not None:
-        cmd.extend(["--default-logistic-cv-folds", str(int(logistic_cv_folds))])
+        cmd.extend(["--logistic-cv-folds", str(int(logistic_cv_folds))])
     if logistic_cv_scoring is not None:
-        cmd.extend(["--default-logistic-cv-scoring", str(logistic_cv_scoring)])
+        cmd.extend(["--logistic-cv-scoring", str(logistic_cv_scoring)])
     if logistic_tuning_method == "random" and logistic_cv_n_iter is not None:
-        cmd.extend(["--default-logistic-cv-n-iter", str(int(logistic_cv_n_iter))])
+        cmd.extend(["--logistic-cv-n-iter", str(int(logistic_cv_n_iter))])
     if logistic_cv_n_jobs is not None:
-        cmd.extend(["--default-logistic-cv-n-jobs", str(int(logistic_cv_n_jobs))])
+        cmd.extend(["--logistic-cv-n-jobs", str(int(logistic_cv_n_jobs))])
 
     if rf_n_estimators is not None:
-        cmd.extend(["--default-rf-n-estimators", str(int(rf_n_estimators))])
+        cmd.extend(["--rf-n-estimators", str(int(rf_n_estimators))])
     if rf_max_depth is not None:
-        cmd.extend(["--default-rf-max-depth", str(rf_max_depth).strip().lower()])
+        cmd.extend(["--rf-max-depth", str(rf_max_depth).strip().lower()])
     if rf_min_samples_split is not None:
-        cmd.extend(["--default-rf-min-samples-split", str(int(rf_min_samples_split))])
+        cmd.extend(["--rf-min-samples-split", str(int(rf_min_samples_split))])
     if rf_min_samples_leaf is not None:
-        cmd.extend(["--default-rf-min-samples-leaf", str(int(rf_min_samples_leaf))])
+        cmd.extend(["--rf-min-samples-leaf", str(int(rf_min_samples_leaf))])
     if rf_min_weight_fraction_leaf is not None:
-        cmd.extend(["--default-rf-min-weight-fraction-leaf", str(float(rf_min_weight_fraction_leaf))])
+        cmd.extend(["--rf-min-weight-fraction-leaf", str(float(rf_min_weight_fraction_leaf))])
     if rf_max_leaf_nodes is not None:
-        cmd.extend(["--default-rf-max-leaf-nodes", str(rf_max_leaf_nodes).strip().lower()])
+        cmd.extend(["--rf-max-leaf-nodes", str(rf_max_leaf_nodes).strip().lower()])
     if rf_min_impurity_decrease is not None:
-        cmd.extend(["--default-rf-min-impurity-decrease", str(float(rf_min_impurity_decrease))])
+        cmd.extend(["--rf-min-impurity-decrease", str(float(rf_min_impurity_decrease))])
     if rf_max_features is not None:
-        cmd.extend(["--default-rf-max-features", str(rf_max_features).strip().lower()])
+        cmd.extend(["--rf-max-features", str(rf_max_features).strip().lower()])
     if rf_bootstrap is not None:
-        cmd.extend(["--default-rf-bootstrap", "true" if rf_bootstrap else "false"])
+        cmd.extend(["--rf-bootstrap", "true" if rf_bootstrap else "false"])
     if rf_max_samples is not None:
-        cmd.extend(["--default-rf-max-samples", str(rf_max_samples).strip().lower()])
+        cmd.extend(["--rf-max-samples", str(rf_max_samples).strip().lower()])
     if rf_ccp_alpha is not None:
-        cmd.extend(["--default-rf-ccp-alpha", str(float(rf_ccp_alpha))])
+        cmd.extend(["--rf-ccp-alpha", str(float(rf_ccp_alpha))])
     if rf_n_jobs is not None:
-        cmd.extend(["--default-rf-n-jobs", str(rf_n_jobs).strip().lower()])
+        cmd.extend(["--rf-n-jobs", str(rf_n_jobs).strip().lower()])
     if rf_enable_tuning is not None:
-        cmd.extend(["--default-rf-enable-tuning", "true" if rf_enable_tuning else "false"])
+        cmd.extend(["--rf-enable-tuning", "true" if rf_enable_tuning else "false"])
     if rf_tuning_method is not None:
-        cmd.extend(["--default-rf-tuning-method", str(rf_tuning_method)])
+        cmd.extend(["--rf-tuning-method", str(rf_tuning_method)])
     if rf_cv_folds is not None:
-        cmd.extend(["--default-rf-cv-folds", str(int(rf_cv_folds))])
+        cmd.extend(["--rf-cv-folds", str(int(rf_cv_folds))])
     if rf_cv_scoring is not None:
-        cmd.extend(["--default-rf-cv-scoring", str(rf_cv_scoring)])
+        cmd.extend(["--rf-cv-scoring", str(rf_cv_scoring)])
     if rf_tuning_method == "random" and rf_cv_n_iter is not None:
-        cmd.extend(["--default-rf-cv-n-iter", str(int(rf_cv_n_iter))])
+        cmd.extend(["--rf-cv-n-iter", str(int(rf_cv_n_iter))])
     if rf_cv_n_jobs is not None:
-        cmd.extend(["--default-rf-cv-n-jobs", str(int(rf_cv_n_jobs))])
+        cmd.extend(["--rf-cv-n-jobs", str(int(rf_cv_n_jobs))])
 
     if xgb_enable_tuning is not None:
-        cmd.extend(["--default-xgb-enable-tuning", "true" if xgb_enable_tuning else "false"])
+        cmd.extend(["--xgb-enable-tuning", "true" if xgb_enable_tuning else "false"])
     if xgb_tuning_method is not None:
-        cmd.extend(["--default-xgb-tuning-method", str(xgb_tuning_method)])
+        cmd.extend(["--xgb-tuning-method", str(xgb_tuning_method)])
     if xgb_cv_folds is not None:
-        cmd.extend(["--default-xgb-cv-folds", str(int(xgb_cv_folds))])
+        cmd.extend(["--xgb-cv-folds", str(int(xgb_cv_folds))])
     if xgb_cv_scoring is not None:
-        cmd.extend(["--default-xgb-cv-scoring", str(xgb_cv_scoring)])
+        cmd.extend(["--xgb-cv-scoring", str(xgb_cv_scoring)])
     if xgb_tuning_method == "random" and xgb_cv_n_iter is not None:
-        cmd.extend(["--default-xgb-cv-n-iter", str(int(xgb_cv_n_iter))])
+        cmd.extend(["--xgb-cv-n-iter", str(int(xgb_cv_n_iter))])
     if xgb_cv_n_jobs is not None:
-        cmd.extend(["--default-xgb-cv-n-jobs", str(int(xgb_cv_n_jobs))])
+        cmd.extend(["--xgb-cv-n-jobs", str(int(xgb_cv_n_jobs))])
 
     if lr_penalty is not None:
-        cmd.extend(["--default-lr-penalty", str(lr_penalty)])
+        cmd.extend(["--lr-penalty", str(lr_penalty)])
     if lr_alpha is not None:
-        cmd.extend(["--default-lr-alpha", str(float(lr_alpha))])
+        cmd.extend(["--lr-alpha", str(float(lr_alpha))])
     if lr_fit_intercept is not None:
-        cmd.extend(["--default-lr-fit-intercept", "true" if lr_fit_intercept else "false"])
+        cmd.extend(["--lr-fit-intercept", "true" if lr_fit_intercept else "false"])
     if lr_l1_ratio is not None:
-        cmd.extend(["--default-lr-l1-ratio", str(float(lr_l1_ratio))])
+        cmd.extend(["--lr-l1-ratio", str(float(lr_l1_ratio))])
     if lr_enable_tuning is not None:
-        cmd.extend(["--default-lr-enable-tuning", "true" if lr_enable_tuning else "false"])
+        cmd.extend(["--lr-enable-tuning", "true" if lr_enable_tuning else "false"])
     if lr_tuning_method is not None:
-        cmd.extend(["--default-lr-tuning-method", str(lr_tuning_method)])
+        cmd.extend(["--lr-tuning-method", str(lr_tuning_method)])
     if lr_cv_folds is not None:
-        cmd.extend(["--default-lr-cv-folds", str(int(lr_cv_folds))])
+        cmd.extend(["--lr-cv-folds", str(int(lr_cv_folds))])
     if lr_cv_scoring is not None:
-        cmd.extend(["--default-lr-cv-scoring", str(lr_cv_scoring)])
+        cmd.extend(["--lr-cv-scoring", str(lr_cv_scoring)])
     if lr_tuning_method == "random" and lr_cv_n_iter is not None:
-        cmd.extend(["--default-lr-cv-n-iter", str(int(lr_cv_n_iter))])
+        cmd.extend(["--lr-cv-n-iter", str(int(lr_cv_n_iter))])
     if lr_cv_n_jobs is not None:
-        cmd.extend(["--default-lr-cv-n-jobs", str(int(lr_cv_n_jobs))])
+        cmd.extend(["--lr-cv-n-jobs", str(int(lr_cv_n_jobs))])
 
     # Add TensorFlow-only flags where necessary
     if library == "tensorflow":
@@ -2076,19 +2076,19 @@ def main() -> int:
         if batch_size is not None:
             cmd.extend(["--batch_size", str(int(batch_size))])
         if tf_enable_tuning is not None:
-            cmd.extend(["--default-tf-enable-tuning", "true" if tf_enable_tuning else "false"])
+            cmd.extend(["--tf-enable-tuning", "true" if tf_enable_tuning else "false"])
         if tf_tuning_method is not None:
-            cmd.extend(["--default-tf-tuning-method", str(tf_tuning_method)])
+            cmd.extend(["--tf-tuning-method", str(tf_tuning_method)])
         if tf_cv_scoring is not None:
-            cmd.extend(["--default-tf-cv-scoring", str(tf_cv_scoring)])
+            cmd.extend(["--tf-cv-scoring", str(tf_cv_scoring)])
         if tf_tuning_method == "random" and tf_cv_n_iter is not None:
-            cmd.extend(["--default-tf-cv-n-iter", str(int(tf_cv_n_iter))])
+            cmd.extend(["--tf-cv-n-iter", str(int(tf_cv_n_iter))])
         if tf_tuning_optimizer is not None:
-            cmd.extend(["--default-tf-tuning-optimizer", str(tf_tuning_optimizer)])
+            cmd.extend(["--tf-tuning-optimizer", str(tf_tuning_optimizer)])
         if tf_tuning_activation is not None:
-            cmd.extend(["--default-tf-tuning-activation", str(tf_tuning_activation)])
+            cmd.extend(["--tf-tuning-activation", str(tf_tuning_activation)])
         if tf_tuning_regularization is not None:
-            cmd.extend(["--default-tf-tuning-regularization", str(tf_tuning_regularization)])
+            cmd.extend(["--tf-tuning-regularization", str(tf_tuning_regularization)])
 
     print("\nRunning:")
     print("  " + " ".join(cmd) + "\n")
