@@ -84,6 +84,34 @@ from libraries.serialization_utils import json_safe_best_params as _json_safe_be
 #   --cv-n-jobs <int>                               (CV search parallelism; -1 uses all cores)
 # ---------------------------------------------------------------------
 
+# Command-line argument parsing.
+parser = argparse.ArgumentParser(description="Linear Regression with optional hyperparameter tuning")
+parser.add_argument("--name", default=Path(__file__).stem)
+parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
+parser.add_argument("--save-model", type=_parse_bool, default=False)
+parser.add_argument("--random-state", type=int, default=1)
+parser.add_argument("--test-size", type=float, default=0.2)
+parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default="1")
+parser.add_argument("--metric-decimals", type=int, default=4)
+parser.add_argument("--penalty", choices=["auto", "none", "l1", "l2", "elasticnet"], default="{{LR_PENALTY_DEFAULT}}")
+parser.add_argument("--alpha", type=float, default={{LR_ALPHA_DEFAULT}})  # type: ignore
+parser.add_argument("--fit-intercept", type=_parse_bool, default="{{LR_FIT_INTERCEPT_DEFAULT}}" == "True")
+parser.add_argument("--l1-ratio", type=float, default=float("{{LR_L1_RATIO_DEFAULT}}"))
+parser.add_argument("--enable-tuning", type=_parse_bool, default="{{LR_ENABLE_TUNING_DEFAULT}}" == "True")
+parser.add_argument("--tuning-method", choices=["grid", "random"], default="{{LR_TUNING_METHOD_DEFAULT}}")
+parser.add_argument("--cv-folds", type=int, default=int("{{LR_CV_FOLDS_DEFAULT}}"))
+parser.add_argument("--cv-scoring", choices=["rmse", "mae", "r2"], default="{{LR_CV_SCORING_DEFAULT}}")
+parser.add_argument("--cv-n-iter", type=int, default=int("{{LR_CV_N_ITER_DEFAULT}}"))
+parser.add_argument("--cv-n-jobs", type=int, default=int("{{LR_CV_N_JOBS_DEFAULT}}"))
+args = parser.parse_args()
+if args.penalty == "auto" and not args.enable_tuning:
+	raise ValueError("--penalty=auto requires --enable-tuning=true.")
+SAVE_MODEL = args.save_model
+training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
+cv_verbose = 0 if training_verbose <= 1 else 2
+METRIC_DECIMALS = int(args.metric_decimals)
+_round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
+
 # NOTE: Adjust these grids to customize search breadth for tuning.
 LINEAR_REGRESSION_SEARCH_GRID_CONFIG = LinearRegressionSearchGridConfig(
 	fit_intercept=[True, False],  # whether to learn an intercept term (bias)
@@ -94,52 +122,6 @@ LINEAR_REGRESSION_SEARCH_GRID_CONFIG = LinearRegressionSearchGridConfig(
 	elasticnet_l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],  # ElasticNet mixing parameter (0≈Ridge/L2, 1≈Lasso/L1)
 	elasticnet_max_iter=[5_000, 10_000, 20_000],  # max optimization iterations for ElasticNet convergence
 )
-
-# Default values for optional parameters. These can be overridden via CLI.
-SAVE_MODEL = False
-DEFAULT_RANDOM_STATE = 1
-DEFAULT_VERBOSE = "1"
-DEFAULT_METRIC_DECIMALS = 4
-DEFAULT_PENALTY = "{{LR_PENALTY_DEFAULT}}"
-DEFAULT_ALPHA = {{LR_ALPHA_DEFAULT}} # type: ignore
-DEFAULT_FIT_INTERCEPT = "{{LR_FIT_INTERCEPT_DEFAULT}}" == "True"
-DEFAULT_L1_RATIO = float("{{LR_L1_RATIO_DEFAULT}}")
-DEFAULT_ENABLE_TUNING = "{{LR_ENABLE_TUNING_DEFAULT}}" == "True"
-DEFAULT_TUNING_METHOD = "{{LR_TUNING_METHOD_DEFAULT}}"
-DEFAULT_CV_FOLDS = int("{{LR_CV_FOLDS_DEFAULT}}")
-DEFAULT_CV_SCORING = "{{LR_CV_SCORING_DEFAULT}}"
-DEFAULT_CV_N_ITER = int("{{LR_CV_N_ITER_DEFAULT}}")
-DEFAULT_CV_N_JOBS = int("{{LR_CV_N_JOBS_DEFAULT}}")
-
-# Command-line argument parsing.
-parser = argparse.ArgumentParser(description="Linear Regression with optional hyperparameter tuning")
-parser.add_argument("--name", default=Path(__file__).stem)
-parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
-parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
-parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
-parser.add_argument("--test-size", type=float, default=0.2)
-parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
-parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
-parser.add_argument("--penalty", choices=["auto", "none", "l1", "l2", "elasticnet"], default=DEFAULT_PENALTY)
-parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA)
-parser.add_argument("--fit-intercept", type=_parse_bool, default=DEFAULT_FIT_INTERCEPT)
-parser.add_argument("--l1-ratio", type=float, default=DEFAULT_L1_RATIO)
-parser.add_argument("--enable-tuning", type=_parse_bool, default=DEFAULT_ENABLE_TUNING)
-parser.add_argument("--tuning-method", choices=["grid", "random"], default=DEFAULT_TUNING_METHOD)
-parser.add_argument("--cv-folds", type=int, default=DEFAULT_CV_FOLDS)
-parser.add_argument("--cv-scoring", choices=["rmse", "mae", "r2"], default=DEFAULT_CV_SCORING)
-parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
-parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
-args = parser.parse_args()
-
-if args.penalty == "auto" and not args.enable_tuning:
-	raise ValueError("--penalty=auto requires --enable-tuning=true.")
-
-SAVE_MODEL = args.save_model
-training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
-cv_verbose = 0 if training_verbose <= 1 else 2
-METRIC_DECIMALS = int(args.metric_decimals)
-_round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -536,7 +518,6 @@ if SAVE_MODEL:
 		"tuning": tuning_summary,
 	}
 	metrics["training_control"] = training_control
-	metrics["selection"] = training_control
 	metrics["calibration"] = {"source": None, "calibrated": None, "calibration_method": None}
 	metrics["timing"] = {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
@@ -722,7 +703,6 @@ print(results)
 		},
 		"tuning": tuning_summary,
 		"training_control": training_control,
-		"selection": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),

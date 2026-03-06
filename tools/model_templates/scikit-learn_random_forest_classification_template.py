@@ -59,7 +59,11 @@ from libraries.preprocessing_utils import build_tabular_preprocessor as _build_p
 from libraries.random_forest_search_space import RandomForestSearchGridConfig, build_random_forest_search_space
 from libraries.search_utils import cv_scoring_name as _cv_scoring_name, search_space_size as _search_space_size
 from libraries.serialization_utils import json_safe_best_params as _json_safe_best_params
-from libraries.sklearn_template_utils import parse_max_features as _parse_max_features, parse_optional_int as _parse_optional_int
+from libraries.sklearn_template_utils import (
+	parse_max_features as _parse_max_features,
+	parse_optional_int as _parse_optional_int,
+	parse_optional_max_samples as _parse_optional_max_samples,
+)
 
 # =============================================================
 # =============== CONFIGURATION / CLI FLAGS ===================
@@ -107,90 +111,34 @@ from libraries.sklearn_template_utils import parse_max_features as _parse_max_fe
 #   --cv-n-jobs <int>                              	(CV search parallelism; -1 uses all cores)
 # ---------------------------------------------------------------------
 
-# NOTE: Adjust these grids to customize search breadth for tuning.
-RANDOM_FOREST_SEARCH_GRID_CONFIG = RandomForestSearchGridConfig(
-	n_estimators=[100, 200, 300, 500],  # number of trees in the forest
-	max_depth=[None, 4, 8, 16, 32],  # None = unlimited depth (trees expand until other stopping rules)
-	max_leaf_nodes=[None, 32, 64, 128],  # None = no limit on number of leaf nodes
-	max_features=[1.0, "sqrt", "log2"],  # number of features considered at each split (1.0 = all features)
-	max_samples_when_bootstrap=[0.5, 0.7, 1.0],  # fraction of rows sampled per tree when bootstrap=True
-	min_weight_fraction_leaf=[0.0, 0.01],  # minimum weighted fraction of samples required at a leaf node
-	min_impurity_decrease=[0.0, 1e-6, 1e-4],  # minimum impurity reduction required to split a node
-	ccp_alpha=[0.0, 1e-5, 1e-4, 1e-3],  # cost-complexity pruning strength (larger values prune more)
-)
-
-# Default values for optional parameters. These can be overridden via CLI.
-SAVE_MODEL = False
-DEFAULT_RANDOM_STATE = 1
-DEFAULT_N_ESTIMATORS = int("{{RF_N_ESTIMATORS_DEFAULT}}")
-DEFAULT_MAX_DEPTH = _parse_optional_int("{{RF_MAX_DEPTH_DEFAULT}}")
-DEFAULT_MIN_SAMPLES_SPLIT = int("{{RF_MIN_SAMPLES_SPLIT_DEFAULT}}")
-DEFAULT_MIN_SAMPLES_LEAF = int("{{RF_MIN_SAMPLES_LEAF_DEFAULT}}")
-DEFAULT_MIN_WEIGHT_FRACTION_LEAF = float("{{RF_MIN_WEIGHT_FRACTION_LEAF_DEFAULT}}")
-DEFAULT_MAX_LEAF_NODES = _parse_optional_int("{{RF_MAX_LEAF_NODES_DEFAULT}}")
-DEFAULT_MIN_IMPURITY_DECREASE = float("{{RF_MIN_IMPURITY_DECREASE_DEFAULT}}")
-DEFAULT_MAX_FEATURES = "{{RF_MAX_FEATURES_DEFAULT}}"
-DEFAULT_BOOTSTRAP = "{{RF_BOOTSTRAP_DEFAULT}}" == "True"
-DEFAULT_MAX_SAMPLES_TOKEN = "{{RF_MAX_SAMPLES_DEFAULT}}"
-DEFAULT_CCP_ALPHA = float("{{RF_CCP_ALPHA_DEFAULT}}")
-DEFAULT_N_JOBS = _parse_optional_int("{{RF_N_JOBS_DEFAULT}}")
-DEFAULT_VERBOSE = "1"
-DEFAULT_METRIC_DECIMALS = 4
-DEFAULT_ENABLE_TUNING = "{{RF_ENABLE_TUNING_DEFAULT}}" == "True"
-DEFAULT_TUNING_METHOD = "{{RF_TUNING_METHOD_DEFAULT}}"
-DEFAULT_CV_FOLDS = int("{{RF_CV_FOLDS_DEFAULT}}")
-DEFAULT_CV_SCORING = "{{RF_CV_SCORING_DEFAULT}}"
-DEFAULT_CV_N_ITER = int("{{RF_CV_N_ITER_DEFAULT}}")
-DEFAULT_CV_N_JOBS = int("{{RF_CV_N_JOBS_DEFAULT}}")
-
-
-def _parse_optional_max_samples(value: str) -> int | float | None:
-	v = str(value).strip().lower()
-	if v in {"none", "null"}:
-		return None
-	try:
-		if "." in v:
-			parsed_float = float(v)
-			if not (0.0 < parsed_float <= 1.0):
-				raise ValueError("Float max_samples must be in range (0, 1].")
-			return parsed_float
-		parsed_int = int(v)
-		if parsed_int <= 0:
-			raise ValueError("Integer max_samples must be > 0.")
-		return parsed_int
-	except ValueError:
-		raise
-	except Exception as exc:
-		raise argparse.ArgumentTypeError("--max-samples must be int, float in (0,1], or none") from exc
-
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Random Forest Classifier baseline")
 parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
-parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
-parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
+parser.add_argument("--save-model", type=_parse_bool, default=False)
+parser.add_argument("--random-state", type=int, default=1)
 parser.add_argument("--test-size", type=float, default=0.2)
-parser.add_argument("--n-estimators", type=int, default=DEFAULT_N_ESTIMATORS)
-parser.add_argument("--max-depth", type=_parse_optional_int, default=DEFAULT_MAX_DEPTH)
-parser.add_argument("--min-samples-split", type=int, default=DEFAULT_MIN_SAMPLES_SPLIT)
-parser.add_argument("--min-samples-leaf", type=int, default=DEFAULT_MIN_SAMPLES_LEAF)
-parser.add_argument("--min-weight-fraction-leaf", type=float, default=DEFAULT_MIN_WEIGHT_FRACTION_LEAF)
-parser.add_argument("--max-leaf-nodes", type=_parse_optional_int, default=DEFAULT_MAX_LEAF_NODES)
-parser.add_argument("--min-impurity-decrease", type=float, default=DEFAULT_MIN_IMPURITY_DECREASE)
-parser.add_argument("--max-features", type=_parse_max_features, default=DEFAULT_MAX_FEATURES)
-parser.add_argument("--bootstrap", type=_parse_bool, default=DEFAULT_BOOTSTRAP)
-parser.add_argument("--max-samples", type=_parse_optional_max_samples, default=_parse_optional_max_samples(DEFAULT_MAX_SAMPLES_TOKEN))
-parser.add_argument("--ccp-alpha", type=float, default=DEFAULT_CCP_ALPHA)
-parser.add_argument("--n-jobs", type=_parse_optional_int, default=DEFAULT_N_JOBS)
-parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
-parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
-parser.add_argument("--enable-tuning", type=_parse_bool, default=DEFAULT_ENABLE_TUNING)
-parser.add_argument("--tuning-method", choices=["grid", "random"], default=DEFAULT_TUNING_METHOD)
-parser.add_argument("--cv-folds", type=int, default=DEFAULT_CV_FOLDS)
-parser.add_argument("--cv-scoring", choices=["f1_macro", "accuracy", "roc_auc_ovr"], default=DEFAULT_CV_SCORING)
-parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
-parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
+parser.add_argument("--n-estimators", type=int, default=int("{{RF_N_ESTIMATORS_DEFAULT}}"))
+parser.add_argument("--max-depth", type=_parse_optional_int, default=_parse_optional_int("{{RF_MAX_DEPTH_DEFAULT}}"))
+parser.add_argument("--min-samples-split", type=int, default=int("{{RF_MIN_SAMPLES_SPLIT_DEFAULT}}"))
+parser.add_argument("--min-samples-leaf", type=int, default=int("{{RF_MIN_SAMPLES_LEAF_DEFAULT}}"))
+parser.add_argument("--min-weight-fraction-leaf", type=float, default=float("{{RF_MIN_WEIGHT_FRACTION_LEAF_DEFAULT}}"))
+parser.add_argument("--max-leaf-nodes", type=_parse_optional_int, default=_parse_optional_int("{{RF_MAX_LEAF_NODES_DEFAULT}}"))
+parser.add_argument("--min-impurity-decrease", type=float, default=float("{{RF_MIN_IMPURITY_DECREASE_DEFAULT}}"))
+parser.add_argument("--max-features", type=_parse_max_features, default="{{RF_MAX_FEATURES_DEFAULT}}")
+parser.add_argument("--bootstrap", type=_parse_bool, default="{{RF_BOOTSTRAP_DEFAULT}}" == "True")
+parser.add_argument("--max-samples", type=_parse_optional_max_samples, default=_parse_optional_max_samples("{{RF_MAX_SAMPLES_DEFAULT}}"))
+parser.add_argument("--ccp-alpha", type=float, default=float("{{RF_CCP_ALPHA_DEFAULT}}"))
+parser.add_argument("--n-jobs", type=_parse_optional_int, default=_parse_optional_int("{{RF_N_JOBS_DEFAULT}}"))
+parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default="1")
+parser.add_argument("--metric-decimals", type=int, default=4)
+parser.add_argument("--enable-tuning", type=_parse_bool, default="{{RF_ENABLE_TUNING_DEFAULT}}" == "True")
+parser.add_argument("--tuning-method", choices=["grid", "random"], default="{{RF_TUNING_METHOD_DEFAULT}}")
+parser.add_argument("--cv-folds", type=int, default=int("{{RF_CV_FOLDS_DEFAULT}}"))
+parser.add_argument("--cv-scoring", choices=["f1_macro", "accuracy", "roc_auc_ovr"], default="{{RF_CV_SCORING_DEFAULT}}")
+parser.add_argument("--cv-n-iter", type=int, default=int("{{RF_CV_N_ITER_DEFAULT}}"))
+parser.add_argument("--cv-n-jobs", type=int, default=int("{{RF_CV_N_JOBS_DEFAULT}}"))
 args = parser.parse_args()
 
 if int(args.min_samples_split) < 2:
@@ -217,6 +165,18 @@ training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
 cv_verbose = 0 if training_verbose <= 1 else 2
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
+
+# NOTE: Adjust these grids to customize search breadth for tuning.
+RANDOM_FOREST_SEARCH_GRID_CONFIG = RandomForestSearchGridConfig(
+	n_estimators=[100, 200, 300, 500],  # number of trees in the forest
+	max_depth=[None, 4, 8, 16, 32],  # None = unlimited depth (trees expand until other stopping rules)
+	max_leaf_nodes=[None, 32, 64, 128],  # None = no limit on number of leaf nodes
+	max_features=[1.0, "sqrt", "log2"],  # number of features considered at each split (1.0 = all features)
+	max_samples_when_bootstrap=[0.5, 0.7, 1.0],  # fraction of rows sampled per tree when bootstrap=True
+	min_weight_fraction_leaf=[0.0, 0.01],  # minimum weighted fraction of samples required at a leaf node
+	min_impurity_decrease=[0.0, 1e-6, 1e-4],  # minimum impurity reduction required to split a node
+	ccp_alpha=[0.0, 1e-5, 1e-4, 1e-3],  # cost-complexity pruning strength (larger values prune more)
+)
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -661,7 +621,6 @@ if SAVE_MODEL:
 		"training_control": training_control,
 		"tuning": tuning_summary,
 	}
-	metrics["selection"] = training_control
 	metrics["calibration"] = metrics.get("probabilities")
 	metrics["timing"] = {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
@@ -879,7 +838,6 @@ print(results)
 			"cv_n_jobs": int(args.cv_n_jobs) if tuning_summary["enabled"] else None,
 		},
 		"tuning": tuning_summary,
-		"selection": training_control,
 		"training_control": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),

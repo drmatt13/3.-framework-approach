@@ -113,58 +113,31 @@ from libraries.logistic_compat import (
 #   --max-iter <int>                                (maximum number of optimization iterations)
 # ---------------------------------------------------------------------
 
-# NOTE: Adjust these grids to customize search breadth for tuning.
-LOGISTIC_SEARCH_GRID_CONFIG = LogisticRegressionSearchGridConfig(
-	c_grid=[0.01, 0.1, 1.0, 10.0],  # inverse regularization strength (smaller = stronger regularization)
-	max_iter=[500, 1000, 2000],  # maximum optimization iterations allowed for solver convergence
-	class_weight=[None, "balanced"],  # None = uniform weights; "balanced" adjusts weights for class imbalance
-	elasticnet_l1_ratio=[0.2, 0.5, 0.8],  # elasticnet mixing ratio (0≈L2, 1≈L1); only used when penalty="elasticnet"
-	solver_penalty_compat=_SOLVER_PENALTY_COMPAT,  # mapping of valid solver→penalty combinations to avoid illegal configs
-	solver_order=_NON_AUTO_LOGISTIC_SOLVERS,  # deterministic order of concrete solvers (excluding "auto") for tuning/search
-)
-
-# Default values for optional parameters. These can be overridden via CLI.
-SAVE_MODEL = False
-DEFAULT_RANDOM_STATE = 1
-DEFAULT_MAX_ITER = int("{{MAX_ITER_DEFAULT}}")
-DEFAULT_C = float("{{LOGISTIC_C_DEFAULT}}")
-DEFAULT_SOLVER = "{{LOGISTIC_SOLVER_DEFAULT}}"
-DEFAULT_PENALTY = "{{LOGISTIC_PENALTY_DEFAULT}}"
-DEFAULT_CLASS_WEIGHT = "{{LOGISTIC_CLASS_WEIGHT_DEFAULT}}"
 LOGISTIC_SOLVERS = ["auto", *list(_NON_AUTO_LOGISTIC_SOLVERS)]
 LOGISTIC_PENALTIES = ["auto", "none", "l1", "l2", "elasticnet"]
-DEFAULT_VERBOSE = "1"
-DEFAULT_METRIC_DECIMALS = 4
-DEFAULT_ENABLE_TUNING = "{{LOGISTIC_ENABLE_TUNING_DEFAULT}}" == "True"
-DEFAULT_TUNING_METHOD = "{{LOGISTIC_TUNING_METHOD_DEFAULT}}"
-DEFAULT_CV_FOLDS = int("{{LOGISTIC_CV_FOLDS_DEFAULT}}")
-DEFAULT_CV_SCORING = "{{LOGISTIC_CV_SCORING_DEFAULT}}"
-DEFAULT_CV_N_ITER = int("{{LOGISTIC_CV_N_ITER_DEFAULT}}")
-DEFAULT_CV_N_JOBS = int("{{LOGISTIC_CV_N_JOBS_DEFAULT}}")
 
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Logistic Regression baseline")
 parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
 parser.add_argument("--name", default=Path(__file__).stem)
 parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
-parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
-parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
+parser.add_argument("--save-model", type=_parse_bool, default=False)
+parser.add_argument("--random-state", type=int, default=1)
 parser.add_argument("--test-size", type=float, default=0.2)
-parser.add_argument("--max-iter", type=int, default=DEFAULT_MAX_ITER)
-parser.add_argument("--c", type=float, default=DEFAULT_C)
-parser.add_argument("--solver", choices=LOGISTIC_SOLVERS, default=DEFAULT_SOLVER)
-parser.add_argument("--penalty", choices=LOGISTIC_PENALTIES, default=DEFAULT_PENALTY)
-parser.add_argument("--class-weight", choices=["none", "balanced"], default=DEFAULT_CLASS_WEIGHT)
-parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
-parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
-parser.add_argument("--enable-tuning", type=_parse_bool, default=DEFAULT_ENABLE_TUNING)
-parser.add_argument("--tuning-method", choices=["grid", "random"], default=DEFAULT_TUNING_METHOD)
-parser.add_argument("--cv-folds", type=int, default=DEFAULT_CV_FOLDS)
-parser.add_argument("--cv-scoring", choices=["f1_macro", "accuracy", "roc_auc_ovr"], default=DEFAULT_CV_SCORING)
-parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
-parser.add_argument("--cv-n-jobs", type=int, default=DEFAULT_CV_N_JOBS)
+parser.add_argument("--max-iter", type=int, default=int("{{MAX_ITER_DEFAULT}}"))
+parser.add_argument("--c", type=float, default=float("{{LOGISTIC_C_DEFAULT}}"))
+parser.add_argument("--solver", choices=LOGISTIC_SOLVERS, default="{{LOGISTIC_SOLVER_DEFAULT}}")
+parser.add_argument("--penalty", choices=LOGISTIC_PENALTIES, default="{{LOGISTIC_PENALTY_DEFAULT}}")
+parser.add_argument("--class-weight", choices=["none", "balanced"], default="{{LOGISTIC_CLASS_WEIGHT_DEFAULT}}")
+parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default="1")
+parser.add_argument("--metric-decimals", type=int, default=4)
+parser.add_argument("--enable-tuning", type=_parse_bool, default="{{LOGISTIC_ENABLE_TUNING_DEFAULT}}" == "True")
+parser.add_argument("--tuning-method", choices=["grid", "random"], default="{{LOGISTIC_TUNING_METHOD_DEFAULT}}")
+parser.add_argument("--cv-folds", type=int, default=int("{{LOGISTIC_CV_FOLDS_DEFAULT}}"))
+parser.add_argument("--cv-scoring", choices=["f1_macro", "accuracy", "roc_auc_ovr"], default="{{LOGISTIC_CV_SCORING_DEFAULT}}")
+parser.add_argument("--cv-n-iter", type=int, default=int("{{LOGISTIC_CV_N_ITER_DEFAULT}}"))
+parser.add_argument("--cv-n-jobs", type=int, default=int("{{LOGISTIC_CV_N_JOBS_DEFAULT}}"))
 args = parser.parse_args()
-
 if not args.enable_tuning and args.solver == "auto":
 	raise ValueError("--solver=auto requires --enable-tuning=true.")
 if not args.enable_tuning and args.penalty == "auto":
@@ -188,6 +161,16 @@ training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
 cv_verbose = 0 if training_verbose <= 1 else 2
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
+
+# NOTE: Adjust these grids to customize search breadth for tuning.
+LOGISTIC_SEARCH_GRID_CONFIG = LogisticRegressionSearchGridConfig(
+	c_grid=[0.01, 0.1, 1.0, 10.0],  # inverse regularization strength (smaller = stronger regularization)
+	max_iter=[500, 1000, 2000],  # maximum optimization iterations allowed for solver convergence
+	class_weight=[None, "balanced"],  # None = uniform weights; "balanced" adjusts weights for class imbalance
+	elasticnet_l1_ratio=[0.2, 0.5, 0.8],  # elasticnet mixing ratio (0≈L2, 1≈L1); only used when penalty="elasticnet"
+	solver_penalty_compat=_SOLVER_PENALTY_COMPAT,  # mapping of valid solver→penalty combinations to avoid illegal configs
+	solver_order=_NON_AUTO_LOGISTIC_SOLVERS,  # deterministic order of concrete solvers (excluding "auto") for tuning/search
+)
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -635,7 +618,6 @@ if SAVE_MODEL:
 		"training_control": training_control,
 		"tuning": tuning_summary,
 	}
-	metrics["selection"] = training_control
 	metrics["calibration"] = metrics.get("probabilities")
 	metrics["timing"] = {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
@@ -893,7 +875,6 @@ print(results)
 			"cv_n_jobs": int(args.cv_n_jobs) if tuning_summary["enabled"] else None,
 		},
 		"tuning": tuning_summary,
-		"selection": training_control,
 		"training_control": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),

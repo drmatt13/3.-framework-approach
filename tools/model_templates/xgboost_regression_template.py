@@ -706,7 +706,6 @@ if SAVE_MODEL:
 	}
 	
 	metrics["training_control"] = training_control
-	metrics["selection"] = training_control
 	metrics["calibration"] = {"source": None, "calibrated": None, "calibration_method": None}
 	metrics["timing"] = {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
@@ -870,7 +869,6 @@ print(results)
 		},
 		"tuning": tuning_summary,
 		"training_control": training_control,
-		"selection": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),

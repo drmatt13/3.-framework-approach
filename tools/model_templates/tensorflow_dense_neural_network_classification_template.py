@@ -57,9 +57,13 @@ from libraries.model_template_helpers import (
 from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
 from libraries.tensorflow_search_space import DenseNNSearchGridConfig, build_dense_nn_search_candidates as _build_dense_nn_search_candidates
 from libraries.tensorflow_template_utils import (
+	build_optimizer as _build_optimizer,
 	build_dense_classifier as _build_dense_classifier,
+	build_direct_fit_dense_config as _build_direct_fit_dense_config,
 	classification_score as _classification_score,
 	predict_class_probabilities as _predict_class_probabilities,
+	resolve_classification_output_config as _resolve_classification_output_config,
+	summarize_dense_model_metadata as _summarize_dense_model_metadata,
 )
 
 # =============================================================
@@ -67,41 +71,74 @@ from libraries.tensorflow_template_utils import (
 # =============================================================
 
 # ---------------------------------------------------------------------
-# Supported CLI flags (common usage)
+# Supported CLI flags (TensorFlow Classification)
 #
-#   Run + Artifacts + Logging
-#   --name <model_name>
-#   --save-model true|false
-#   --verbose 0|1|2|auto
-#   --metric-decimals <int>
+# Core run options (auto-configured for all ML models generated)
+#   --name <model_name>                             (model name used for registry and artifact folder; default: script filename)
+#   --artifact-name-mode full|short                 (full = timestamp + UUID for unique runs; short = readable name but may overwrite previous runs)
+#   --save-model true|false                         (save trained model and artifacts; false logs metrics only)
+#   --verbose 0|1|2|auto                            (0=silent, 1=training progress, 2=training + tuning progress, auto=adaptive verbosity)
+#   --metric-decimals <int>                         (decimal precision for logged metrics and artifacts)
 #
-#   Reproducibility + Data Split
-#   --task {{TASK_VALUE}}
-#   --random-state <int>
-#   --test-size <float> (e.g., 0.2 for 80/20 split)
+# Reproducibility + data split
+#   --random-state <int>                            (random seed for reproducibility)
+#   --test-size <float>                             (test set fraction; e.g., 0.2 = 80/20 split)
 #
-#   Model Configuration (direct-fit)
-#   --optimizer auto|adam|sgd|rmsprop|adagrad|adamw
-#       auto  — resolves to adam for direct-fit; searches all five during tuning
-#       When tuning: constrains the candidate optimizer list to the selected value.
-#   --learning-rate <float>
-#   --epochs <int>
-#   --batch-size <int>
+# Hyperparameter tuning configuration
+#   --enable-tuning true|false                  		(enable hyperparameter tuning with cross-validation)
+# 
+# Model configuration (direct-fit)              (used when --enable-tuning=false)
+#   --optimizer adam|sgd|rmsprop|										(optimizer used during training)
+# 							adagrad|adamw									 			^
+#   --learning-rate <float>                         (optimizer learning rate)
+#   --epochs <int>                                  (maximum number of training epochs)
+#   --batch-size <int>                              (number of samples processed per gradient update)
 #
-#   Training Path
-#   --early-stopping true|false
-#   --validation-fraction <float>
-#   --n-iter-no-change <int>
-#   --enable-tuning true|false
+# Training path
+#   --early-stopping true|false                     (enable validation-based early stopping)
+#   --validation-fraction <float>                   (fraction of training data reserved for validation)
+#   --n-iter-no-change <int>                        (stop training if validation metric does not improve for N epochs)
 #
-#   Tuning-specific (only when --enable-tuning=true)
-#   --tuning-method grid|random
-#   --cv-scoring f1_macro
-#   --cv-n-iter <int>
+# Hyperparameter tuning                         (used when --enable-tuning=true)
+#   --tuning-method grid|random                     (grid = exhaustive search over candidates; random = random subset)
+#   --cv-scoring rmse                               (metric used to select best model during tuning)
+#   --cv-n-iter <int>                               (number of random search iterations)
 #   --tuning-optimizer auto|adam|sgd|rmsprop|adagrad|adamw
 #   --tuning-activation auto|relu|gelu|tanh
 #   --tuning-regularization auto|none|l1|l2|l1_l2
 # ---------------------------------------------------------------------
+
+# Command-line argument parsing.
+parser = argparse.ArgumentParser(description="TensorFlow Dense Neural Network Classifier baseline")
+parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
+parser.add_argument("--name", default=Path(__file__).stem)
+parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
+parser.add_argument("--save-model", type=_parse_bool, default=False)
+parser.add_argument("--random-state", type=int, default=1)
+parser.add_argument("--test-size", type=float, default=0.2)
+parser.add_argument("--epochs", type=int, default=int("{{EPOCHS}}"))
+parser.add_argument("--batch-size", type=int, default=int("{{BATCH_SIZE}}"))
+parser.add_argument("--early-stopping", type=_parse_bool, default="{{EARLY_STOPPING_DEFAULT}}" == "True")
+parser.add_argument("--validation-fraction", type=float, default=float("{{VALIDATION_FRACTION_DEFAULT}}"))
+parser.add_argument("--n-iter-no-change", type=int, default=int("{{N_ITER_NO_CHANGE_DEFAULT}}"))
+parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default="1")
+parser.add_argument("--metric-decimals", type=int, default=4)
+parser.add_argument("--enable-tuning", type=_parse_bool, default="{{TF_ENABLE_TUNING_DEFAULT}}" == "True")
+parser.add_argument("--tuning-method", choices=["grid", "random"], default="{{TF_TUNING_METHOD_DEFAULT}}")
+parser.add_argument("--cv-scoring", choices=["f1_macro"], default="{{TF_CV_SCORING_DEFAULT}}")
+parser.add_argument("--cv-n-iter", type=int, default=int("{{TF_CV_N_ITER_DEFAULT}}"))
+parser.add_argument("--tuning-optimizer", choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"], default="{{TF_TUNING_OPTIMIZER_DEFAULT}}")
+parser.add_argument("--tuning-activation", choices=["auto", "relu", "gelu", "tanh"], default="{{TF_TUNING_ACTIVATION_DEFAULT}}")
+parser.add_argument("--tuning-regularization", choices=["auto", "none", "l1", "l2", "l1_l2"], default="{{TF_TUNING_REGULARIZATION_DEFAULT}}")
+args = parser.parse_args()
+
+SAVE_MODEL = args.save_model
+training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
+phase_logs_enabled = training_verbose > 0
+keras_fit_verbose = 1 if training_verbose >= 2 else 0
+trial_fit_verbose = 1 if training_verbose >= 2 else 0
+METRIC_DECIMALS = int(args.metric_decimals)
+_round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
 # NOTE: Adjust these grids to customize search breadth for tuning.
 DENSE_NN_SEARCH_GRID_CONFIG = DenseNNSearchGridConfig(
@@ -113,7 +150,7 @@ DENSE_NN_SEARCH_GRID_CONFIG = DenseNNSearchGridConfig(
 		[256, 128, 64],
 	],
 	activation=["relu", "gelu", "tanh"],
-	optimizer=["adam", "rmsprop", "sgd", "adamw"],
+	optimizer=["adam", "rmsprop", "sgd", "adagrad", "adamw"],
 	learning_rate=[1e-2, 3e-3, 1e-3, 3e-4, 1e-4],
 	batch_size=[16, 32, 64, 128],
 	dropout=[0.0, 0.1, 0.2, 0.3],
@@ -121,57 +158,19 @@ DENSE_NN_SEARCH_GRID_CONFIG = DenseNNSearchGridConfig(
 	l2=[0.0, 1e-5, 1e-4, 1e-3],
 )
 
-# # Default values for optional parameters. These can be overridden via CLI.
-SAVE_MODEL = False
-DEFAULT_RANDOM_STATE = 1
-DEFAULT_OPTIMIZER_NAME = "{{OPTIMIZER_NAME}}"
-DEFAULT_LEARNING_RATE = float("{{LEARNING_RATE}}")
-DEFAULT_EPOCHS = int("{{EPOCHS}}")
-DEFAULT_BATCH_SIZE = int("{{BATCH_SIZE}}")
-DEFAULT_EARLY_STOPPING = "{{EARLY_STOPPING_DEFAULT}}" == "True"
-DEFAULT_VALIDATION_FRACTION = float("{{VALIDATION_FRACTION_DEFAULT}}")
-DEFAULT_N_ITER_NO_CHANGE = int("{{N_ITER_NO_CHANGE_DEFAULT}}")
-DEFAULT_VERBOSE = "1"
-DEFAULT_METRIC_DECIMALS = 4
-DEFAULT_ENABLE_TUNING = "{{TF_ENABLE_TUNING_DEFAULT}}" == "True"
-DEFAULT_TUNING_METHOD = "{{TF_TUNING_METHOD_DEFAULT}}"
-DEFAULT_CV_SCORING = "{{TF_CV_SCORING_DEFAULT}}"
-DEFAULT_CV_N_ITER = int("{{TF_CV_N_ITER_DEFAULT}}")
-DEFAULT_TF_TUNING_OPTIMIZER = "{{TF_TUNING_OPTIMIZER_DEFAULT}}"
-DEFAULT_TF_TUNING_ACTIVATION = "{{TF_TUNING_ACTIVATION_DEFAULT}}"
-DEFAULT_TF_TUNING_REGULARIZATION = "{{TF_TUNING_REGULARIZATION_DEFAULT}}"
-
-parser = argparse.ArgumentParser(description="TensorFlow Dense Neural Network Classifier baseline")
-parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
-parser.add_argument("--name", default=Path(__file__).stem)
-parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
-parser.add_argument("--save-model", type=_parse_bool, default=SAVE_MODEL)
-parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
-parser.add_argument("--test-size", type=float, default=0.2)
-parser.add_argument("--optimizer", choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"], default=DEFAULT_OPTIMIZER_NAME)
-parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
-parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
-parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
-parser.add_argument("--early-stopping", type=_parse_bool, default=DEFAULT_EARLY_STOPPING)
-parser.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
-parser.add_argument("--n-iter-no-change", type=int, default=DEFAULT_N_ITER_NO_CHANGE)
-parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default=DEFAULT_VERBOSE)
-parser.add_argument("--metric-decimals", type=int, default=DEFAULT_METRIC_DECIMALS)
-parser.add_argument("--enable-tuning", type=_parse_bool, default=DEFAULT_ENABLE_TUNING)
-parser.add_argument("--tuning-method", choices=["grid", "random"], default=DEFAULT_TUNING_METHOD)
-parser.add_argument("--cv-scoring", choices=["f1_macro"], default=DEFAULT_CV_SCORING)
-parser.add_argument("--cv-n-iter", type=int, default=DEFAULT_CV_N_ITER)
-parser.add_argument("--tuning-optimizer", choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"], default=DEFAULT_TF_TUNING_OPTIMIZER)
-parser.add_argument("--tuning-activation", choices=["auto", "relu", "gelu", "tanh"], default=DEFAULT_TF_TUNING_ACTIVATION)
-parser.add_argument("--tuning-regularization", choices=["auto", "none", "l1", "l2", "l1_l2"], default=DEFAULT_TF_TUNING_REGULARIZATION)
-args = parser.parse_args()
-SAVE_MODEL = args.save_model
-training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
-phase_logs_enabled = training_verbose > 0
-keras_fit_verbose = 1 if training_verbose >= 2 else 0
-trial_fit_verbose = 1 if training_verbose >= 2 else 0
-METRIC_DECIMALS = int(args.metric_decimals)
-_round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
+#  NOTE: This config is used for direct-fit runs when tuning is disabled.
+DIRECT_FIT_CONFIG = _build_direct_fit_dense_config(
+	optimizer_name="adam",
+	learning_rate=float("{{LEARNING_RATE}}"),
+	hidden_layers=[128, 64],
+	activations=["relu", "relu"],
+	dropouts=[0.0, 0.0],
+	l1s=[0.0, 0.0],
+	l2s=[0.0, 0.0],
+	# Output layer is injected by model_init.py for this generated model.
+	output_units=int("{{OUTPUT_UNITS}}"),
+	output_activation="{{OUTPUT_ACTIVATION}}",
+)
 
 # =============================================================
 # ================== MODEL CODE STARTS HERE ===================
@@ -332,14 +331,16 @@ X_test_processed = _to_dense_float32(preprocessor.transform(X_test))
 # Derive class metadata from training labels.
 classes = np.sort(np.unique(y_train_array))
 num_classes = int(len(classes))
-if num_classes < 2:
-	raise ValueError("Need at least 2 classes in the training split.")
-is_binary = num_classes == 2
-
-output_units = 1 if is_binary else num_classes
-output_activation = "sigmoid" if is_binary else "softmax"
-loss_fn = "binary_crossentropy" if is_binary else "sparse_categorical_crossentropy"
-generated_defaults = {"output_units": int("{{OUTPUT_UNITS}}"), "output_activation": "{{OUTPUT_ACTIVATION}}", "loss_fn": "{{LOSS_FN}}"}
+classification_output_config = _resolve_classification_output_config(num_classes)
+is_binary = bool(classification_output_config["is_binary"])
+output_units = int(classification_output_config["output_units"])
+output_activation = str(classification_output_config["output_activation"])
+loss_fn = str(classification_output_config["loss_fn"])
+generated_defaults = {
+	"output_units": output_units,
+	"output_activation": output_activation,
+	"loss_fn": loss_fn,
+}
 
 # =============================================================
 # ================= BUILD MODEL PIPELINE ======================
@@ -348,20 +349,6 @@ generated_defaults = {"output_units": int("{{OUTPUT_UNITS}}"), "output_activatio
 # Set random seed for reproducibility
 tf.keras.utils.set_random_seed(int(args.random_state))
 
-# ---------------------------------------------------------------------
-# NON-TUNING ARCHITECTURE DEFAULTS (GENERATED)
-# These defaults are used when --enable-tuning=false.
-# Edit these values directly to customize the direct-fit model.
-# ---------------------------------------------------------------------
-
-# Generated direct-fit defaults (task-specific).
-selected_hidden_layers = {{TF_DEFAULT_HIDDEN_LAYERS}}
-selected_dropout = float("{{TF_DEFAULT_DROPOUT}}")
-selected_activation = "{{TF_DEFAULT_HIDDEN_ACTIVATION}}"
-selected_l1 = float("{{TF_DEFAULT_L1}}")
-selected_l2 = float("{{TF_DEFAULT_L2}}")
-selected_optimizer = "adam" if args.optimizer == "auto" else args.optimizer
-selected_learning_rate = float(args.learning_rate)
 tuning_summary = {
 	"enabled": False,
 	"method": None,
@@ -401,6 +388,7 @@ if args.enable_tuning:
 		trial_indices = rng.choice(len(candidates), size=min(int(args.cv_n_iter), len(candidates)), replace=False).tolist()
 	else:
 		trial_indices = list(range(len(candidates)))
+
 	best_candidate = None
 	best_candidate_score = -np.inf
 	for trial_index, index in enumerate(trial_indices, start=1):
@@ -443,42 +431,117 @@ if args.enable_tuning:
 		if score > best_candidate_score:
 			best_candidate_score = score
 			best_candidate = candidate
-	if best_candidate is not None:
-		selected_optimizer = str(best_candidate["optimizer"])
-		selected_learning_rate = float(best_candidate["learning_rate"])
-		selected_hidden_layers = [int(v) for v in best_candidate["hidden_layers"]]
-		selected_dropout = float(best_candidate["dropout"])
-		selected_activation = str(best_candidate["activation"])
-		selected_l1 = float(best_candidate["l1"])
-		selected_l2 = float(best_candidate["l2"])
-		args.batch_size = int(best_candidate["batch_size"])
-		tuning_summary = {
-			"enabled": True,
-			"method": args.tuning_method,
-			"cv_folds": None,
-			"scoring": args.cv_scoring,
-			"scoring_sklearn": args.cv_scoring,
-			"n_iter": int(len(trial_indices)) if args.tuning_method == "random" else None,
-			"n_candidates": int(len(trial_indices)),
-			"best_score": _round_metric(best_candidate_score),
-			"best_score_std": None,
-			"best_params": _compact_metadata(_json_safe(best_candidate)),
-		}
 
-tf.keras.backend.clear_session()
-keras_model = _build_dense_classifier(
-	input_dim=int(X_train_processed.shape[1]),
-	output_units=output_units,
-	output_activation=output_activation,
-	optimizer_name=selected_optimizer,
-	learning_rate=float(selected_learning_rate),
-	hidden_layers=selected_hidden_layers,
-	dropout=selected_dropout,
-	hidden_activation=selected_activation,
-	l1=float(selected_l1),
-	l2=float(selected_l2),
-	is_binary=is_binary,
+	if best_candidate is None:
+		raise ValueError("Tuning did not find a valid TensorFlow candidate.")
+
+	selected_optimizer = str(best_candidate["optimizer"])
+	selected_learning_rate = float(best_candidate["learning_rate"])
+	selected_hidden_layers = [int(v) for v in best_candidate["hidden_layers"]]
+	selected_dropout = float(best_candidate["dropout"])
+	selected_activation = str(best_candidate["activation"])
+	selected_l1 = float(best_candidate["l1"])
+	selected_l2 = float(best_candidate["l2"])
+	args.batch_size = int(best_candidate["batch_size"])
+	best_candidate_for_artifacts = {
+		**best_candidate,
+		"optimizer_when_auto": best_candidate.get("optimizer"),
+		"activation_when_auto": best_candidate.get("activation"),
+	}
+	tuning_summary = {
+		"enabled": True,
+		"method": args.tuning_method,
+		"cv_folds": None,
+		"scoring": args.cv_scoring,
+		"scoring_sklearn": args.cv_scoring,
+		"n_iter": int(len(trial_indices)) if args.tuning_method == "random" else None,
+		"n_candidates": int(len(trial_indices)),
+		"best_score": _round_metric(best_candidate_score),
+		"best_score_std": None,
+		"best_params": _compact_metadata(_json_safe(best_candidate_for_artifacts)),
+	}
+
+	tf.keras.backend.clear_session()
+	keras_model = _build_dense_classifier(
+		input_dim=int(X_train_processed.shape[1]),
+		output_units=output_units,
+		output_activation=output_activation,
+		optimizer_name=selected_optimizer,
+		learning_rate=float(selected_learning_rate),
+		hidden_layers=selected_hidden_layers,
+		dropout=selected_dropout,
+		hidden_activation=selected_activation,
+		l1=float(selected_l1),
+		l2=float(selected_l2),
+		is_binary=is_binary,
+	)
+else:
+	tf.keras.backend.clear_session()
+	selected_optimizer = str(DIRECT_FIT_CONFIG["optimizer"])
+	selected_learning_rate = float(DIRECT_FIT_CONFIG["learning_rate"])
+	selected_hidden_layers = [int(v) for v in DIRECT_FIT_CONFIG["hidden_layers"]]
+	selected_activations = [str(v) for v in DIRECT_FIT_CONFIG["activations"]]
+	selected_dropouts = [float(v) for v in DIRECT_FIT_CONFIG["dropouts"]]
+	selected_l1s = [float(v) for v in DIRECT_FIT_CONFIG["l1s"]]
+	selected_l2s = [float(v) for v in DIRECT_FIT_CONFIG["l2s"]]
+	selected_output_units = int(
+		DIRECT_FIT_CONFIG["output_units"] if DIRECT_FIT_CONFIG["output_units"] is not None else output_units
+	)
+	selected_output_activation = str(
+		DIRECT_FIT_CONFIG["output_activation"] if DIRECT_FIT_CONFIG["output_activation"] is not None else output_activation
+	)
+	direct_fit_loss_fn = (
+		"binary_crossentropy"
+		if (selected_output_units == 1 and selected_output_activation.lower() == "sigmoid")
+		else "sparse_categorical_crossentropy"
+	)
+
+	layers: list[tf.keras.layers.Layer] = [tf.keras.layers.Input(shape=(int(X_train_processed.shape[1]),))]
+	for units, activation, dropout_rate, l1_value, l2_value in zip(
+		selected_hidden_layers,
+		selected_activations,
+		selected_dropouts,
+		selected_l1s,
+		selected_l2s,
+	):
+		layer_regularizer = None
+		if float(l1_value) > 0.0 or float(l2_value) > 0.0:
+			layer_regularizer = tf.keras.regularizers.l1_l2(l1=float(l1_value), l2=float(l2_value))
+		layers.append(
+			tf.keras.layers.Dense(
+				int(units),
+				activation=str(activation),
+				kernel_regularizer=layer_regularizer,
+			)
+		)
+		if float(dropout_rate) > 0.0:
+			layers.append(tf.keras.layers.Dropout(float(dropout_rate)))
+
+	layers.append(tf.keras.layers.Dense(selected_output_units, activation=selected_output_activation))
+	keras_model = tf.keras.Sequential(layers)
+	keras_model.compile(
+		optimizer=_build_optimizer(selected_optimizer, float(selected_learning_rate)),
+		loss=direct_fit_loss_fn,
+		metrics=[
+			tf.keras.metrics.BinaryAccuracy(name="accuracy")
+			if (selected_output_units == 1 and selected_output_activation.lower() == "sigmoid")
+			else tf.keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
+		],
+	)
+
+model_metadata = _summarize_dense_model_metadata(
+	keras_model,
+	fallback_optimizer_name=selected_optimizer,
+	fallback_learning_rate=float(selected_learning_rate),
 )
+selected_optimizer = str(model_metadata["optimizer"])
+selected_learning_rate = float(model_metadata["learning_rate"] if model_metadata["learning_rate"] is not None else selected_learning_rate)
+selected_hidden_layers = [int(v) for v in model_metadata["hidden_layers"]]
+selected_activation = str(model_metadata["activation"])
+selected_dropout = float(model_metadata["dropout"])
+selected_l1 = float(model_metadata["l1"])
+selected_l2 = float(model_metadata["l2"])
+selected_architecture = model_metadata["architecture"]
 
 # =============================================================
 # ===================== TRAIN MODEL ===========================
@@ -721,7 +784,6 @@ if SAVE_MODEL:
 		"tuning": tuning_summary,
 		"timing": {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)},
 	}
-	metrics["selection"] = training_control
 	metrics["calibration"] = metrics.get("probabilities")
 	rounded_history = {
 		k: [_round_metric(v) if isinstance(v, (int, float, np.floating, np.integer)) else v for v in values]
@@ -862,6 +924,7 @@ print("Probabilities:", probabilities.tolist())
 			"random_state": int(args.random_state),
 			"hidden_layers": selected_hidden_layers,
 			"dropout": float(selected_dropout),
+			"architecture": selected_architecture,
 			"output_units": output_units,
 			"output_activation": output_activation,
 			"loss_fn": loss_fn,
@@ -869,7 +932,6 @@ print("Probabilities:", probabilities.tolist())
 		},
 		"tuning": tuning_summary,
 		"preprocessing": {"feature_count": {"raw": int(X.shape[1]), "post_transform": _post_transform_feature_count(preprocessor, X_train.iloc[:1])}},
-		"selection": training_control,
 		"training_control": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
@@ -909,7 +971,7 @@ print("Probabilities:", probabilities.tolist())
 			"dataset_sha256": data_hash,
 			"dataset_rows": int(len(df)),
 			"dataset_columns": int(df.shape[1]),
-			"optimizer": args.optimizer,
+			"optimizer": selected_optimizer,
 			"learning_rate": float(selected_learning_rate),
 			"activation": selected_activation,
 			"l1": float(selected_l1),

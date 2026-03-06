@@ -1,3 +1,6 @@
+import argparse
+
+
 def parse_optional_int(value: str | int | None) -> int | None:
 	if value is None:
 		return None
@@ -22,6 +25,28 @@ def parse_max_features(value: str) -> str | float | None:
 		return text
 	except ValueError:
 		return text
+
+
+def parse_optional_max_samples(value: str | int | float | None) -> int | float | None:
+	if value is None:
+		return None
+	v = str(value).strip().lower()
+	if v in {"none", "null", ""}:
+		return None
+	try:
+		if "." in v:
+			parsed_float = float(v)
+			if not (0.0 < parsed_float <= 1.0):
+				raise ValueError("Float max_samples must be in range (0, 1].")
+			return parsed_float
+		parsed_int = int(v)
+		if parsed_int <= 0:
+			raise ValueError("Integer max_samples must be > 0.")
+		return parsed_int
+	except ValueError:
+		raise
+	except Exception as exc:
+		raise argparse.ArgumentTypeError("--max-samples must be int, float in (0,1], or none") from exc
 
 
 def resolved_n_iter(model_step) -> int | None:

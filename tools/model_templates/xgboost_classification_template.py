@@ -831,7 +831,6 @@ if SAVE_MODEL:
 		"training_control": training_control,
 		"tuning": tuning_summary,
 	}
-	metrics["selection"] = training_control
 	metrics["calibration"] = metrics.get("probabilities")
 	metrics["timing"] = {"fit_seconds": _round_metric(fit_time_seconds), "predict_seconds": _round_metric(predict_time_seconds)}
 	with (eval_dir / "metrics.json").open("w", encoding="utf-8") as metrics_file:
@@ -1051,7 +1050,6 @@ print(results)
 			"cv_n_jobs": int(args.cv_n_jobs) if tuning_summary["enabled"] else None,
 		},
 		"tuning": tuning_summary,
-		"selection": training_control,
 		"training_control": training_control,
 		"fit_summary": {
 			"fit_time_seconds": _round_metric(fit_time_seconds),
