@@ -2,6 +2,8 @@ import argparse
 from pathlib import Path
 import sys
 
+import pandas as pd
+
 _current_file = Path(__file__).resolve()
 for _candidate in [_current_file.parent, *_current_file.parents]:
     if (_candidate / "libraries").is_dir():
@@ -153,6 +155,11 @@ DEFAULT_N_ITER_NO_CHANGE_BY_TEMPLATE = {
     ("xgboost", None, "regression"): 20,
     ("tensorflow", "dense_nn", "classification"): 5,
     ("tensorflow", "dense_nn", "regression"): 5,
+}
+
+DEFAULT_MIN_DELTA_BY_TEMPLATE = {
+    ("tensorflow", "dense_nn", "classification"): 0.0,
+    ("tensorflow", "dense_nn", "regression"): 0.0,
 }
 
 DEFAULT_MAX_ITER_BY_TEMPLATE = {
@@ -410,6 +417,10 @@ def task_family(task: str) -> str:
     return "classification" if task in {"binary_classification", "multiclass_classification"} else "regression"
 
 
+def _normalize_choice_token(value: str) -> str:
+    return str(value).strip().lower()
+
+
 def _parse_optional_int_token(value: str | int | None, *, arg_name: str) -> int | None:
     if value is None:
         return None
@@ -479,6 +490,53 @@ def _starter_dataset_for_args(args: argparse.Namespace) -> dict | None:
     if not args.starter_dataset:
         return None
     return STARTER_DATASET_CONFIG[args.starter_dataset]
+
+
+def _load_starter_dataset_frame(starter_dataset: dict) -> pd.DataFrame:
+    project_root = Path(__file__).resolve().parent.parent
+    task_dir = str(starter_dataset.get("task_dir") or "")
+    if not task_dir:
+        data_file = str(starter_dataset["data_file"])
+        if data_file in STARTER_DATASETS_BY_FAMILY["regression"]:
+            task_dir = "regression"
+        elif data_file in STARTER_DATASETS_BY_FAMILY["binary_classification"]:
+            task_dir = "binary_classification"
+        elif data_file in STARTER_DATASETS_BY_FAMILY["multiclass_classification"]:
+            task_dir = "multiclass_classification"
+        else:
+            raise ValueError(f"Unsupported starter dataset for class inference: {data_file}")
+
+    data_path = project_root / "data" / "template_data" / task_dir / str(starter_dataset["data_file"])
+    if not data_path.exists():
+        raise ValueError(f"Starter dataset file not found for class inference: {data_path}")
+
+    read_csv_extra_args = str(starter_dataset.get("read_csv_extra_args") or "")
+    if "header=None" in read_csv_extra_args.replace(" ", ""):
+        frame = pd.read_csv(data_path, header=None)
+    else:
+        frame = pd.read_csv(data_path)
+
+    header_names = starter_dataset.get("header_names")
+    if header_names is not None:
+        frame.columns = list(header_names)
+    return frame
+
+
+def _infer_multiclass_output_units(starter_dataset: dict) -> int:
+    target_column = str(starter_dataset["target_column"])
+    frame = _load_starter_dataset_frame(starter_dataset)
+    if target_column not in frame.columns:
+        raise ValueError(
+            f"Target column '{target_column}' not found in starter dataset '{starter_dataset['data_file']}'."
+        )
+
+    target = frame[target_column]
+    class_count = int(target.dropna().astype("category").cat.categories.size)
+    if class_count < 2:
+        raise ValueError(
+            f"Starter dataset '{starter_dataset['data_file']}' resolved to {class_count} class(es); expected at least 2."
+        )
+    return class_count
 
 
 def _task_dataset_dir(task: str) -> str:
@@ -626,6 +684,13 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
                 "N_ITER_NO_CHANGE_DEFAULT": str(n_iter_no_change_default),
             }
         )
+
+    if args.library == "tensorflow" and args.model == "dense_nn":
+        key = (args.library, args.model, family)
+        min_delta_default = args.default_min_delta
+        if min_delta_default is None:
+            min_delta_default = DEFAULT_MIN_DELTA_BY_TEMPLATE[key]
+        replacements.update({"MIN_DELTA_DEFAULT": str(float(min_delta_default))})
 
     if _supports_max_iter_default(args):
         key = ("scikit-learn", "logistic_regression", family)
@@ -973,7 +1038,10 @@ def template_replacements(args: argparse.Namespace) -> dict[str, str]:
 
         if family == "classification":
             if starter_dataset is not None:
-                output_units = "1" if args.task == "binary_classification" else "3"
+                if args.task == "binary_classification":
+                    output_units = "1"
+                else:
+                    output_units = str(_infer_multiclass_output_units(starter_dataset))
                 output_activation = "sigmoid" if args.task == "binary_classification" else "softmax"
                 loss_fn = "binary_crossentropy" if args.task == "binary_classification" else "sparse_categorical_crossentropy"
                 replacements.update(
@@ -1051,6 +1119,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Invalid --validation-fraction. Allowed range: 0 < value < 1")
     if args.default_n_iter_no_change is not None and args.default_n_iter_no_change <= 0:
         raise ValueError("Invalid --n-iter-no-change. Must be a positive integer")
+    if args.default_min_delta is not None and args.default_min_delta < 0.0:
+        raise ValueError("Invalid --min-delta. Must be >= 0")
     if args.default_max_iter is not None and args.default_max_iter <= 0:
         raise ValueError("Invalid --max-iter. Must be a positive integer")
     if args.default_n_estimators is not None and args.default_n_estimators <= 0:
@@ -1165,6 +1235,7 @@ def validate_args(args: argparse.Namespace) -> None:
             args.default_n_iter_no_change,
         )
     )
+    min_delta_default_provided = args.default_min_delta is not None
 
     max_iter_default_provided = args.default_max_iter is not None
 
@@ -1185,6 +1256,8 @@ def validate_args(args: argparse.Namespace) -> None:
                 "Invalid flags: --early-stopping/--validation-fraction/"
                 "--n-iter-no-change are not supported for this template"
             )
+        if min_delta_default_provided:
+            raise ValueError("Invalid flag: --min-delta is tensorflow-only")
         if max_iter_default_provided:
             raise ValueError("Invalid flag: --max-iter is not supported for xgboost")
         if args.default_c is not None or args.default_solver is not None:
@@ -1289,6 +1362,8 @@ def validate_args(args: argparse.Namespace) -> None:
                 "Invalid flags: --early-stopping/--validation-fraction/"
                 "--n-iter-no-change are not supported for this template"
             )
+        if min_delta_default_provided:
+            raise ValueError("Invalid flag: --min-delta is tensorflow-only")
         if max_iter_default_provided and not _supports_max_iter_default(args):
             raise ValueError(
                 "Invalid flag: --max-iter is only supported for scikit-learn logistic_regression classification templates"
@@ -1606,6 +1681,7 @@ def main():
     parser.add_argument(
         "--library",
         required=True,
+        type=_normalize_choice_token,
         choices=["scikit-learn", "xgboost", "tensorflow"],
         help="Which ML library/framework to generate for",
     )
@@ -1617,18 +1693,21 @@ def main():
     parser.add_argument(
         "--task",
         required=True,
+        type=_normalize_choice_token,
         choices=["regression", "binary_classification", "multiclass_classification"],
         help="ML task type",
     )
     parser.add_argument(
         "--booster",
         required=False,
+        type=_normalize_choice_token,
         choices=["auto", "gbtree", "gblinear", "dart"],
         help="xgboost booster (optional; xgboost only)",
     )
     parser.add_argument(
         "--device",
         required=False,
+        type=_normalize_choice_token,
         choices=["auto", "cpu", "gpu"],
         help="xgboost device (optional; xgboost only)",
     )
@@ -1650,6 +1729,7 @@ def main():
         "--solver",
         dest="default_solver",
         required=False,
+        type=_normalize_choice_token,
         choices=["auto", "lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"],
         help="Default value injected into generated logistic classification template --solver flag",
     )
@@ -1789,9 +1869,17 @@ def main():
         help="Default value injected into generated template --n-iter-no-change flag",
     )
     parser.add_argument(
+        "--min-delta",
+        dest="default_min_delta",
+        type=float,
+        required=False,
+        help="Default value injected into generated tensorflow template --min-delta flag",
+    )
+    parser.add_argument(
         "--lr-penalty",
         dest="default_lr_penalty",
         required=False,
+        type=_normalize_choice_token,
         choices=["auto", "none", "l1", "l2", "elasticnet"],
         help="Default regularization penalty for linear regression template",
     )
@@ -1827,6 +1915,7 @@ def main():
         "--lr-tuning-method",
         dest="default_lr_tuning_method",
         required=False,
+        type=_normalize_choice_token,
         choices=["grid", "random"],
         help="Default tuning method for linear regression template",
     )
@@ -1841,6 +1930,7 @@ def main():
         "--lr-cv-scoring",
         dest="default_lr_cv_scoring",
         required=False,
+        type=_normalize_choice_token,
         choices=["rmse", "mae", "r2"],
         help="Default CV scoring for linear regression template",
     )
@@ -1862,6 +1952,7 @@ def main():
         "--logistic-penalty",
         dest="default_logistic_penalty",
         required=False,
+        type=_normalize_choice_token,
         choices=["auto", "none", "l1", "l2", "elasticnet"],
         help="Default penalty for logistic regression template",
     )
@@ -1869,6 +1960,7 @@ def main():
         "--logistic-class-weight",
         dest="default_logistic_class_weight",
         required=False,
+        type=_normalize_choice_token,
         choices=["none", "balanced"],
         help="Default class_weight for logistic regression template",
     )
@@ -1883,6 +1975,7 @@ def main():
         "--logistic-tuning-method",
         dest="default_logistic_tuning_method",
         required=False,
+        type=_normalize_choice_token,
         choices=["grid", "random"],
         help="Default tuning method for logistic regression template",
     )
@@ -1897,6 +1990,7 @@ def main():
         "--logistic-cv-scoring",
         dest="default_logistic_cv_scoring",
         required=False,
+        type=_normalize_choice_token,
         choices=["f1_macro", "accuracy", "roc_auc_ovr"],
         help="Default CV scoring for logistic regression template",
     )
@@ -1925,6 +2019,7 @@ def main():
         "--rf-tuning-method",
         dest="default_rf_tuning_method",
         required=False,
+        type=_normalize_choice_token,
         choices=["grid", "random"],
         help="Default tuning method for random forest templates",
     )
@@ -1939,6 +2034,7 @@ def main():
         "--rf-cv-scoring",
         dest="default_rf_cv_scoring",
         required=False,
+        type=_normalize_choice_token,
         choices=["f1_macro", "accuracy", "roc_auc_ovr", "rmse", "mae", "r2"],
         help="Default CV scoring for random forest templates",
     )
@@ -1988,6 +2084,7 @@ def main():
         "--xgb-tuning-method",
         dest="default_xgb_tuning_method",
         required=False,
+        type=_normalize_choice_token,
         choices=["grid", "random"],
         help="Default tuning method for xgboost templates",
     )
@@ -2002,6 +2099,7 @@ def main():
         "--xgb-cv-scoring",
         dest="default_xgb_cv_scoring",
         required=False,
+        type=_normalize_choice_token,
         choices=["f1_macro", "accuracy", "roc_auc_ovr", "rmse", "mae", "r2"],
         help="Default CV scoring for xgboost templates",
     )
@@ -2030,6 +2128,7 @@ def main():
         "--tf-tuning-method",
         dest="default_tf_tuning_method",
         required=False,
+        type=_normalize_choice_token,
         choices=["grid", "random"],
         help="Default tuning method for tensorflow dense templates",
     )
@@ -2037,6 +2136,7 @@ def main():
         "--tf-cv-scoring",
         dest="default_tf_cv_scoring",
         required=False,
+        type=_normalize_choice_token,
         choices=["f1_macro", "rmse"],
         help="Default tuning scoring for tensorflow dense templates",
     )
@@ -2051,6 +2151,7 @@ def main():
         "--tf-tuning-optimizer",
         dest="default_tf_tuning_optimizer",
         required=False,
+        type=_normalize_choice_token,
         choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"],
         help="Default optimizer filter for tensorflow tuning (auto searches all)",
     )
@@ -2058,6 +2159,7 @@ def main():
         "--tf-tuning-activation",
         dest="default_tf_tuning_activation",
         required=False,
+        type=_normalize_choice_token,
         choices=["auto", "relu", "gelu", "tanh"],
         help="Default activation filter for tensorflow tuning (auto searches all)",
     )
@@ -2065,12 +2167,14 @@ def main():
         "--tf-tuning-regularization",
         dest="default_tf_tuning_regularization",
         required=False,
+        type=_normalize_choice_token,
         choices=["auto", "none", "l1", "l2", "l1_l2"],
         help="Default regularization filter for tensorflow tuning",
     )
     parser.add_argument(
         "--optimizer",
         required=False,
+        type=_normalize_choice_token,
         choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"],
         help="tensorflow optimizer",
     )
@@ -2112,6 +2216,10 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.model is not None:
+        args.model = _normalize_choice_token(args.model)
+    if args.starter_dataset is not None:
+        args.starter_dataset = _normalize_choice_token(args.starter_dataset)
 
     try:
         validate_shared_helper_modules()

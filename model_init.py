@@ -146,6 +146,10 @@ def _is_truthy(value) -> bool:
     return bool(value)
 
 
+def _normalize_choice_token(value: object) -> str:
+    return str(value).strip().lower()
+
+
 def _should_omit_resolved_key(key: str, values_by_key: dict[str, object]) -> bool:
     # Hide random-search iteration settings when tuning is disabled or method is grid.
     n_iter_by_method: tuple[tuple[str, str], ...] = (
@@ -326,12 +330,12 @@ def _supports_max_iter(library: str, model: str | None, task: str) -> bool:
     }
 
 
-def _recommended_es_defaults(library: str, model: str | None) -> tuple[bool, float, int]:
+def _recommended_es_defaults(library: str, model: str | None) -> tuple[bool, float, int, float]:
     if library == "xgboost":
-        return True, 0.1, 20
+        return True, 0.1, 20, 0.0
     if library == "tensorflow" and model == "dense_nn":
-        return True, 0.1, 5
-    return True, 0.1, 5
+        return True, 0.1, 5, 0.0
+    return True, 0.1, 5, 0.0
 
 
 def _xgb_booster_uses_tree_params(booster: str | None) -> bool:
@@ -787,6 +791,7 @@ def main() -> int:
     early_stopping = None
     validation_fraction = None
     n_iter_no_change = None
+    min_delta = None
     max_iter = None
     n_estimators = None
     learning_rate = None
@@ -869,7 +874,7 @@ def main() -> int:
                 print("Cancelled.")
                 return 0
 
-            recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change = _recommended_es_defaults(
+            recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change, _ = _recommended_es_defaults(
                 library,
                 model,
             )
@@ -1473,7 +1478,7 @@ def main() -> int:
             print("Cancelled.")
             return 0
 
-        recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change = _recommended_es_defaults(
+        recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change, recommended_min_delta = _recommended_es_defaults(
             library,
             model,
         )
@@ -1487,7 +1492,7 @@ def main() -> int:
             return 0
 
         use_recommended_defaults = questionary.confirm(
-            "Use recommended preset values for validation fraction and n_iter_no_change?",
+            "Use recommended preset values for validation fraction, n_iter_no_change, and min_delta?",
             default=True,
             style=CUSTOM_STYLE,
         ).ask()
@@ -1498,6 +1503,7 @@ def main() -> int:
         if use_recommended_defaults:
             validation_fraction = recommended_validation_fraction
             n_iter_no_change = recommended_n_iter_no_change
+            min_delta = recommended_min_delta
         else:
             validation_fraction = _ask_text(
                 "Enter validation fraction (0 < value < 1):",
@@ -1519,8 +1525,18 @@ def main() -> int:
                 print("Cancelled.")
                 return 0
 
+            min_delta = _ask_text(
+                "Enter min_delta (>= 0):",
+                default=str(recommended_min_delta),
+                validate_fn=lambda s: True if (_is_float(s) and float(s) >= 0.0) else "Must be a number >= 0",
+            )
+            if min_delta is None:
+                print("Cancelled.")
+                return 0
+
             validation_fraction = float(validation_fraction)
             n_iter_no_change = int(n_iter_no_change)
+            min_delta = float(min_delta)
 
         tf_enable_tuning = questionary.confirm(
             "Enable hyperparameter tuning by default? (--enable-tuning)",
@@ -1752,7 +1768,7 @@ def main() -> int:
     if _supports_early_stopping_defaults(library, model, task) and not (library == "xgboost" and use_custom) and not (library == "tensorflow" and model == "dense_nn"):
         supports_validation_defaults = _supports_validation_n_iter_defaults(library, model, task)
         if use_custom:
-            recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change = _recommended_es_defaults(
+            recommended_early_stopping, recommended_validation_fraction, recommended_n_iter_no_change, _ = _recommended_es_defaults(
                 library,
                 model,
             )
@@ -1806,7 +1822,7 @@ def main() -> int:
                     n_iter_no_change = int(n_iter_no_change)
         else:
             # Profile provides ES defaults
-            recommended_early_stopping, _, _ = _recommended_es_defaults(library, model)
+            recommended_early_stopping, _, _, _ = _recommended_es_defaults(library, model)
             early_stopping = profile_defaults.get("early_stopping", recommended_early_stopping)
             if supports_validation_defaults:
                 validation_fraction = profile_defaults.get("validation_fraction", 0.1)
@@ -1830,6 +1846,7 @@ def main() -> int:
         ("early_stopping", early_stopping),
         ("validation_fraction", validation_fraction),
         ("n_iter_no_change", n_iter_no_change),
+        ("min_delta", min_delta),
         ("max_iter", max_iter),
         ("n_estimators", n_estimators),
         ("learning_rate", learning_rate),
@@ -1942,8 +1959,8 @@ def main() -> int:
         cmd.extend(["--model", model])
 
     if library == "xgboost":
-        cmd.extend(["--booster", booster])
-        cmd.extend(["--device", device])
+        cmd.extend(["--booster", _normalize_choice_token(booster)])
+        cmd.extend(["--device", _normalize_choice_token(device)])
 
     if starter_dataset is not None:
         cmd.extend(["--starter-dataset", starter_dataset])
@@ -1953,6 +1970,8 @@ def main() -> int:
     if _supports_validation_n_iter_defaults(library, model, task):
         cmd.extend(["--validation-fraction", str(float(validation_fraction))])
         cmd.extend(["--n-iter-no-change", str(int(n_iter_no_change))])
+    if library == "tensorflow" and model == "dense_nn" and min_delta is not None:
+        cmd.extend(["--min-delta", str(float(min_delta))])
 
     if max_iter is not None:
         cmd.extend(["--max-iter", str(int(max_iter))])
@@ -1977,19 +1996,19 @@ def main() -> int:
     if c is not None:
         cmd.extend(["--c", str(float(c))])
     if solver is not None:
-        cmd.extend(["--solver", str(solver)])
+        cmd.extend(["--solver", _normalize_choice_token(solver)])
     if logistic_penalty is not None:
-        cmd.extend(["--logistic-penalty", str(logistic_penalty)])
+        cmd.extend(["--logistic-penalty", _normalize_choice_token(logistic_penalty)])
     if logistic_class_weight is not None:
-        cmd.extend(["--logistic-class-weight", str(logistic_class_weight)])
+        cmd.extend(["--logistic-class-weight", _normalize_choice_token(logistic_class_weight)])
     if logistic_enable_tuning is not None:
         cmd.extend(["--logistic-enable-tuning", "true" if logistic_enable_tuning else "false"])
     if logistic_tuning_method is not None:
-        cmd.extend(["--logistic-tuning-method", str(logistic_tuning_method)])
+        cmd.extend(["--logistic-tuning-method", _normalize_choice_token(logistic_tuning_method)])
     if logistic_cv_folds is not None:
         cmd.extend(["--logistic-cv-folds", str(int(logistic_cv_folds))])
     if logistic_cv_scoring is not None:
-        cmd.extend(["--logistic-cv-scoring", str(logistic_cv_scoring)])
+        cmd.extend(["--logistic-cv-scoring", _normalize_choice_token(logistic_cv_scoring)])
     if logistic_tuning_method == "random" and logistic_cv_n_iter is not None:
         cmd.extend(["--logistic-cv-n-iter", str(int(logistic_cv_n_iter))])
     if logistic_cv_n_jobs is not None:
@@ -2022,11 +2041,11 @@ def main() -> int:
     if rf_enable_tuning is not None:
         cmd.extend(["--rf-enable-tuning", "true" if rf_enable_tuning else "false"])
     if rf_tuning_method is not None:
-        cmd.extend(["--rf-tuning-method", str(rf_tuning_method)])
+        cmd.extend(["--rf-tuning-method", _normalize_choice_token(rf_tuning_method)])
     if rf_cv_folds is not None:
         cmd.extend(["--rf-cv-folds", str(int(rf_cv_folds))])
     if rf_cv_scoring is not None:
-        cmd.extend(["--rf-cv-scoring", str(rf_cv_scoring)])
+        cmd.extend(["--rf-cv-scoring", _normalize_choice_token(rf_cv_scoring)])
     if rf_tuning_method == "random" and rf_cv_n_iter is not None:
         cmd.extend(["--rf-cv-n-iter", str(int(rf_cv_n_iter))])
     if rf_cv_n_jobs is not None:
@@ -2035,18 +2054,18 @@ def main() -> int:
     if xgb_enable_tuning is not None:
         cmd.extend(["--xgb-enable-tuning", "true" if xgb_enable_tuning else "false"])
     if xgb_tuning_method is not None:
-        cmd.extend(["--xgb-tuning-method", str(xgb_tuning_method)])
+        cmd.extend(["--xgb-tuning-method", _normalize_choice_token(xgb_tuning_method)])
     if xgb_cv_folds is not None:
         cmd.extend(["--xgb-cv-folds", str(int(xgb_cv_folds))])
     if xgb_cv_scoring is not None:
-        cmd.extend(["--xgb-cv-scoring", str(xgb_cv_scoring)])
+        cmd.extend(["--xgb-cv-scoring", _normalize_choice_token(xgb_cv_scoring)])
     if xgb_tuning_method == "random" and xgb_cv_n_iter is not None:
         cmd.extend(["--xgb-cv-n-iter", str(int(xgb_cv_n_iter))])
     if xgb_cv_n_jobs is not None:
         cmd.extend(["--xgb-cv-n-jobs", str(int(xgb_cv_n_jobs))])
 
     if lr_penalty is not None:
-        cmd.extend(["--lr-penalty", str(lr_penalty)])
+        cmd.extend(["--lr-penalty", _normalize_choice_token(lr_penalty)])
     if lr_alpha is not None:
         cmd.extend(["--lr-alpha", str(float(lr_alpha))])
     if lr_fit_intercept is not None:
@@ -2056,11 +2075,11 @@ def main() -> int:
     if lr_enable_tuning is not None:
         cmd.extend(["--lr-enable-tuning", "true" if lr_enable_tuning else "false"])
     if lr_tuning_method is not None:
-        cmd.extend(["--lr-tuning-method", str(lr_tuning_method)])
+        cmd.extend(["--lr-tuning-method", _normalize_choice_token(lr_tuning_method)])
     if lr_cv_folds is not None:
         cmd.extend(["--lr-cv-folds", str(int(lr_cv_folds))])
     if lr_cv_scoring is not None:
-        cmd.extend(["--lr-cv-scoring", str(lr_cv_scoring)])
+        cmd.extend(["--lr-cv-scoring", _normalize_choice_token(lr_cv_scoring)])
     if lr_tuning_method == "random" and lr_cv_n_iter is not None:
         cmd.extend(["--lr-cv-n-iter", str(int(lr_cv_n_iter))])
     if lr_cv_n_jobs is not None:
@@ -2069,7 +2088,7 @@ def main() -> int:
     # Add TensorFlow-only flags where necessary
     if library == "tensorflow":
         # These variables are guaranteed non-None here due to the prompts above.
-        cmd.extend(["--optimizer", optimizer])
+        cmd.extend(["--optimizer", _normalize_choice_token(optimizer)])
         if tf_learning_rate is not None:
             cmd.extend(["--learning_rate", str(float(tf_learning_rate))])
         cmd.extend(["--epochs", str(int(epochs))])
@@ -2078,17 +2097,17 @@ def main() -> int:
         if tf_enable_tuning is not None:
             cmd.extend(["--tf-enable-tuning", "true" if tf_enable_tuning else "false"])
         if tf_tuning_method is not None:
-            cmd.extend(["--tf-tuning-method", str(tf_tuning_method)])
+            cmd.extend(["--tf-tuning-method", _normalize_choice_token(tf_tuning_method)])
         if tf_cv_scoring is not None:
-            cmd.extend(["--tf-cv-scoring", str(tf_cv_scoring)])
+            cmd.extend(["--tf-cv-scoring", _normalize_choice_token(tf_cv_scoring)])
         if tf_tuning_method == "random" and tf_cv_n_iter is not None:
             cmd.extend(["--tf-cv-n-iter", str(int(tf_cv_n_iter))])
         if tf_tuning_optimizer is not None:
-            cmd.extend(["--tf-tuning-optimizer", str(tf_tuning_optimizer)])
+            cmd.extend(["--tf-tuning-optimizer", _normalize_choice_token(tf_tuning_optimizer)])
         if tf_tuning_activation is not None:
-            cmd.extend(["--tf-tuning-activation", str(tf_tuning_activation)])
+            cmd.extend(["--tf-tuning-activation", _normalize_choice_token(tf_tuning_activation)])
         if tf_tuning_regularization is not None:
-            cmd.extend(["--tf-tuning-regularization", str(tf_tuning_regularization)])
+            cmd.extend(["--tf-tuning-regularization", _normalize_choice_token(tf_tuning_regularization)])
 
     print("\nRunning:")
     print("  " + " ".join(cmd) + "\n")

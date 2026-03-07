@@ -10,6 +10,10 @@ from libraries.logistic_compat import (
 )
 
 
+def _penalty_for_sklearn(penalty: str) -> str | None:
+    return None if penalty == "none" else penalty
+
+
 @dataclass(frozen=True)
 class LogisticRegressionSearchGridConfig:
     c_grid: Sequence[float]
@@ -99,7 +103,7 @@ def build_logistic_regression_search_space(
         all_grids.append(
             {
                 "classifier__solver": grouped_solvers,
-                "classifier__penalty": list(supported_penalties),
+                "classifier__penalty": [_penalty_for_sklearn(candidate) for candidate in supported_penalties],
                 "classifier__C": c_grid,
                 "classifier__class_weight": class_weight,
                 "classifier__max_iter": max_iter,
@@ -129,7 +133,8 @@ def build_logistic_regression_search_space(
                 continue
 
         if penalty != "auto":
-            grid_penalties = [candidate for candidate in grid_penalties if candidate == penalty]
+            penalty_filter = _penalty_for_sklearn(penalty)
+            grid_penalties = [candidate for candidate in grid_penalties if candidate == penalty_filter]
             if not grid_penalties:
                 continue
 

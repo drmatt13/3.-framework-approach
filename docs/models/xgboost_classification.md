@@ -90,15 +90,15 @@ Device note: if `--device=gpu` is requested, the template emits a single warning
 
 When tuning is enabled (`--enable-tuning=true`):
 
--   `--tuning-method` (`random`)
+-   `--tuning-method` (`grid|random`)
 -   `--cv-folds` (int)
 -   `--cv-scoring` (`f1_macro|accuracy|roc_auc_ovr`)
 -   `--cv-n-iter` (int, number of randomized trials)
 -   `--cv-n-jobs` (int, `-1` uses all cores)
 
-Tuning uses randomized candidate trials evaluated via cross-validation.
-The best-performing configuration is then refit on the full training
-data before final test evaluation.
+Tuning uses either exhaustive grid search or randomized candidate trials
+evaluated via cross-validation. The best-performing configuration is
+then refit on the full training data before final test evaluation.
 
 Example:
 

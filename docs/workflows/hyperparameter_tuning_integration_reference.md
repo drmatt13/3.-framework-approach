@@ -61,6 +61,17 @@ Changed non-CNN templates to use replacement placeholders for tuning defaults an
 Why:
 - Without placeholders, generator-level tuning defaults cannot affect generated model files.
 
+### 4) Cross-Template Artifact Consistency Alignment
+
+Applied consistency improvements across all non-CNN template families:
+- Shared run context bootstrap (`initialize_artifact_run`) for timestamp/run-id/hash + artifact directory creation
+- Consistent `validate_artifact_contract(...)` usage for scikit-learn, xgboost, and tensorflow dense templates
+- TensorFlow dense tuning now skips non-finite trials and safely falls back to direct-fit when no valid trial remains
+
+Why:
+- Removes redundant logic and reduces drift between library-specific templates.
+- Keeps artifact export robust under unstable tuning candidates.
+
 ## Generic Rollout Checklist for Other Models
 
 Use this checklist when adding tuning support to another model template:

@@ -1,6 +1,9 @@
 from pathlib import Path
+import hashlib
 import json
+import random
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 
 import numpy as np
@@ -74,6 +77,114 @@ def artifact_map(base_dir: Path, artifacts: dict[str, Path]) -> dict[str, str]:
         if path.exists():
             resolved[key] = str(path.relative_to(base_dir))
     return resolved
+
+
+def initialize_artifact_run(
+    *,
+    project_root: Path,
+    model_name: str,
+    artifact_name_mode: str,
+    data_path: Path,
+) -> dict[str, object]:
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    run_id = str(uuid.uuid4())
+    data_hash = hashlib.sha256(data_path.read_bytes()).hexdigest()
+
+    model_root_dir = project_root / "artifacts" / "models" / model_name
+    if artifact_name_mode == "short":
+        run_label = f"{timestamp}_{model_name[:24]}_{run_id.split('-')[0]}"
+    else:
+        run_label = f"{timestamp}_{model_name}"
+    run_dir = model_root_dir / run_label
+
+    model_dir = run_dir / "model"
+    preprocess_dir = run_dir / "preprocess"
+    eval_dir = run_dir / "eval"
+    data_dir = run_dir / "data"
+    inference_dir = run_dir / "inference"
+    for directory in (model_dir, preprocess_dir, eval_dir, data_dir, inference_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    return {
+        "timestamp": timestamp,
+        "run_id": run_id,
+        "data_hash": data_hash,
+        "model_root_dir": model_root_dir,
+        "run_dir": run_dir,
+        "model_dir": model_dir,
+        "preprocess_dir": preprocess_dir,
+        "eval_dir": eval_dir,
+        "data_dir": data_dir,
+        "inference_dir": inference_dir,
+    }
+
+
+def set_deterministic_seeds(random_state: int, *, tf_module=None) -> dict[str, object]:
+    seed = int(random_state)
+    random.seed(seed)
+    np.random.seed(seed)
+
+    tensorflow_seeded = False
+    if tf_module is not None:
+        tf_module.keras.utils.set_random_seed(seed)
+        tensorflow_seeded = True
+
+    return {
+        "seed": seed,
+        "python_random_seeded": True,
+        "numpy_seeded": True,
+        "tensorflow_seeded": tensorflow_seeded,
+    }
+
+
+def initialize_tuning_summary() -> dict[str, object]:
+    return {
+        "enabled": False,
+        "method": None,
+        "cv_folds": None,
+        "scoring": None,
+        "scoring_sklearn": None,
+        "n_iter": None,
+        "n_candidates": None,
+        "best_score": None,
+        "best_score_std": None,
+        "best_params": None,
+    }
+
+
+def build_tuning_summary(**overrides) -> dict[str, object]:
+    summary = initialize_tuning_summary()
+    summary.update(overrides)
+    return summary
+
+
+def build_training_control(
+    *,
+    enabled: bool,
+    control_type: str,
+    max_steps_configured,
+    steps_completed,
+    patience,
+    monitor_metric,
+    monitor_split,
+    monitor_direction,
+    best_step,
+    best_score,
+    stopped_early,
+) -> dict[str, object]:
+    return {
+        "enabled": bool(enabled),
+        "type": control_type,
+        "max_steps_configured": max_steps_configured,
+        "steps_completed": steps_completed,
+        "patience": patience,
+        "monitor_metric": monitor_metric,
+        "monitor_split": monitor_split,
+        "monitor_direction": monitor_direction,
+        "best_step": best_step,
+        "best_score": best_score,
+        "stopped_early": bool(stopped_early),
+    }
 
 
 def compact_metadata(value):

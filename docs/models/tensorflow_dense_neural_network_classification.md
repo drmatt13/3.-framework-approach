@@ -82,11 +82,12 @@ Example (direct configuration, no tuning):
 
 When tuning is enabled (`--enable-tuning=true`):
 
--   `--tuning-method` (`random`)
--   `--cv-scoring` (`f1_macro|accuracy|loss`)
+-   `--tuning-method` (`grid|random`)
+-   `--cv-scoring` (`f1_macro`)
 -   `--cv-n-iter` (int, number of randomized trials)
 
-Tuning uses randomized candidate trials evaluated on the validation
+Tuning uses either exhaustive candidate search (`grid`) or randomized
+candidate trials (`random`) evaluated on a train-derived validation
 split. The best-performing configuration is then refit on the full
 training data before final test evaluation.
 
@@ -113,7 +114,7 @@ With `--save-model=true`, the run exports:
 -   `preprocess/preprocessor.pkl`
 -   `eval/metrics.json`
 -   `eval/confusion_matrix.csv`
--   `eval/roc_curve.csv`
+-   `eval/roc_curve.csv` (binary classification only)
 -   `eval/training_history.json`
 -   `data/input_schema.json`
 -   `data/target_mapping_schema.json`

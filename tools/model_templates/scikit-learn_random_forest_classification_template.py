@@ -44,12 +44,17 @@ for _candidate in [_current_file.parent, *_current_file.parents]:
 
 from libraries.model_template_helpers import (
 	artifact_map as _artifact_map,
+	build_training_control as _build_training_control,
+	build_tuning_summary as _build_tuning_summary,
 	compact_metadata as _compact_metadata,
 	find_project_root as _project_root,
+	initialize_artifact_run as _initialize_artifact_run,
+	initialize_tuning_summary as _initialize_tuning_summary,
 	parse_bool_flag as _parse_bool,
 	post_transform_feature_count as _post_transform_feature_count,
 	round_metric as _round_metric_base,
 	select_estimator_params as _select_estimator_params,
+	set_deterministic_seeds as _set_deterministic_seeds,
 	validate_artifact_contract as _validate_artifact_contract,
 	validate_etl_outputs as _validate_etl_outputs,
 	write_unified_registry_sqlite as _write_unified_registry_sqlite,
@@ -59,6 +64,7 @@ from libraries.preprocessing_utils import build_tabular_preprocessor as _build_p
 from libraries.random_forest_search_space import RandomForestSearchGridConfig, build_random_forest_search_space
 from libraries.search_utils import cv_scoring_name as _cv_scoring_name, search_space_size as _search_space_size
 from libraries.serialization_utils import json_safe_best_params as _json_safe_best_params
+from libraries.cli_helpers import lower_token as _lower_token
 from libraries.sklearn_template_utils import (
 	parse_max_features as _parse_max_features,
 	parse_optional_int as _parse_optional_int,
@@ -113,9 +119,9 @@ from libraries.sklearn_template_utils import (
 
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="Random Forest Classifier baseline")
-parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
+parser.add_argument("--task", type=_lower_token, choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
 parser.add_argument("--name", default=Path(__file__).stem)
-parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
+parser.add_argument("--artifact-name-mode", type=_lower_token, choices=["full", "short"], default="full")
 parser.add_argument("--save-model", type=_parse_bool, default=False)
 parser.add_argument("--random-state", type=int, default=1)
 parser.add_argument("--test-size", type=float, default=0.2)
@@ -131,12 +137,12 @@ parser.add_argument("--bootstrap", type=_parse_bool, default="{{RF_BOOTSTRAP_DEF
 parser.add_argument("--max-samples", type=_parse_optional_max_samples, default=_parse_optional_max_samples("{{RF_MAX_SAMPLES_DEFAULT}}"))
 parser.add_argument("--ccp-alpha", type=float, default=float("{{RF_CCP_ALPHA_DEFAULT}}"))
 parser.add_argument("--n-jobs", type=_parse_optional_int, default=_parse_optional_int("{{RF_N_JOBS_DEFAULT}}"))
-parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default="1")
+parser.add_argument("--verbose", type=_lower_token, choices=["0", "1", "2", "auto"], default="2")
 parser.add_argument("--metric-decimals", type=int, default=4)
 parser.add_argument("--enable-tuning", type=_parse_bool, default="{{RF_ENABLE_TUNING_DEFAULT}}" == "True")
-parser.add_argument("--tuning-method", choices=["grid", "random"], default="{{RF_TUNING_METHOD_DEFAULT}}")
+parser.add_argument("--tuning-method", type=_lower_token, choices=["grid", "random"], default="{{RF_TUNING_METHOD_DEFAULT}}")
 parser.add_argument("--cv-folds", type=int, default=int("{{RF_CV_FOLDS_DEFAULT}}"))
-parser.add_argument("--cv-scoring", choices=["f1_macro", "accuracy", "roc_auc_ovr"], default="{{RF_CV_SCORING_DEFAULT}}")
+parser.add_argument("--cv-scoring", type=_lower_token, choices=["f1_macro", "accuracy", "roc_auc_ovr"], default="{{RF_CV_SCORING_DEFAULT}}")
 parser.add_argument("--cv-n-iter", type=int, default=int("{{RF_CV_N_ITER_DEFAULT}}"))
 parser.add_argument("--cv-n-jobs", type=int, default=int("{{RF_CV_N_JOBS_DEFAULT}}"))
 args = parser.parse_args()
@@ -165,6 +171,7 @@ training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
 cv_verbose = 0 if training_verbose <= 1 else 2
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
+seed_control = _set_deterministic_seeds(int(args.random_state))
 
 # NOTE: Adjust these grids to customize search breadth for tuning.
 RANDOM_FOREST_SEARCH_GRID_CONFIG = RandomForestSearchGridConfig(
@@ -330,18 +337,7 @@ selected_cv_scoring = _cv_scoring_name(
 	args.cv_scoring,
 	{"f1_macro": "f1_macro", "accuracy": "accuracy", "roc_auc_ovr": "roc_auc_ovr"},
 )
-tuning_summary = {
-	"enabled": False,
-	"method": None,
-	"cv_folds": None,
-	"scoring": None,
-	"scoring_sklearn": None,
-	"n_iter": None,
-	"n_candidates": None,
-	"best_score": None,
-	"best_score_std": None,
-	"best_params": None,
-}
+tuning_summary = _initialize_tuning_summary()
 
 fit_started_at = time.perf_counter()
 if training_verbose > 0:
@@ -405,18 +401,24 @@ if args.enable_tuning:
 	if hasattr(search, "cv_results_") and "std_test_score" in search.cv_results_:
 		best_std = float(search.cv_results_["std_test_score"][search.best_index_])
 	n_candidates = int(len(search.cv_results_["params"])) if hasattr(search, "cv_results_") else None
-	tuning_summary = {
-		"enabled": True,
-		"method": args.tuning_method,
-		"cv_folds": int(args.cv_folds),
-		"scoring": args.cv_scoring,
-		"scoring_sklearn": selected_cv_scoring,
-			"n_iter": int(search.n_iter) if args.tuning_method == "random" else None,
-		"n_candidates": n_candidates,
-		"best_score": _round_metric(float(search.best_score_)),
-		"best_score_std": _round_metric(best_std) if best_std is not None else None,
-		"best_params": _compact_metadata(best_params_for_artifacts),
-	}
+	tuning_summary = _build_tuning_summary(
+		enabled=True,
+		method=args.tuning_method,
+		cv_folds=int(args.cv_folds),
+		scoring=args.cv_scoring,
+		scoring_sklearn=selected_cv_scoring,
+		n_iter=int(search.n_iter) if args.tuning_method == "random" else None,
+		n_candidates=n_candidates,
+		best_score=_round_metric(float(search.best_score_)),
+		best_score_std=_round_metric(best_std) if best_std is not None else None,
+		best_params=_compact_metadata(best_params_for_artifacts),
+	)
+	if training_verbose >= 2:
+		print(
+			f"Tuning completed: candidates={tuning_summary['n_candidates']}, "
+			f"best_{args.cv_scoring}={tuning_summary['best_score']}"
+		)
+		print(f"Tuning best params: {tuning_summary['best_params']}")
 else:
 	model.fit(X_train, y_train)
 
@@ -424,19 +426,19 @@ fit_time_seconds = float(time.perf_counter() - fit_started_at)
 if training_verbose > 0:
 	print(f"Training completed in {fit_time_seconds:.3f}s: RandomForestClassifier")
 
-training_control = {
-	"enabled": bool(tuning_summary["enabled"]),
-	"type": f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
-	"max_steps_configured": tuning_summary["n_candidates"] if args.tuning_method == "grid" else (int(tuning_summary["n_iter"]) if tuning_summary["enabled"] and tuning_summary["n_iter"] is not None else None),
-	"steps_completed": int(args.cv_folds) * int(tuning_summary["n_candidates"]) if tuning_summary["enabled"] and tuning_summary["n_candidates"] is not None else None,
-	"patience": None,
-	"monitor_metric": f"cv_{args.cv_scoring}" if tuning_summary["enabled"] else None,
-	"monitor_split": "cv" if tuning_summary["enabled"] else None,
-	"monitor_direction": "max" if tuning_summary["enabled"] else None,
-	"best_step": None,
-	"best_score": tuning_summary["best_score"],
-	"stopped_early": False,
-}
+training_control = _build_training_control(
+	enabled=bool(tuning_summary["enabled"]),
+	control_type=f"{args.tuning_method}_search_cv" if tuning_summary["enabled"] else None,
+	max_steps_configured=tuning_summary["n_candidates"] if args.tuning_method == "grid" else (int(tuning_summary["n_iter"]) if tuning_summary["enabled"] and tuning_summary["n_iter"] is not None else None),
+	steps_completed=int(args.cv_folds) * int(tuning_summary["n_candidates"]) if tuning_summary["enabled"] and tuning_summary["n_candidates"] is not None else None,
+	patience=None,
+	monitor_metric=f"cv_{args.cv_scoring}" if tuning_summary["enabled"] else None,
+	monitor_split="cv" if tuning_summary["enabled"] else None,
+	monitor_direction="max" if tuning_summary["enabled"] else None,
+	best_step=None,
+	best_score=tuning_summary["best_score"],
+	stopped_early=False,
+)
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
@@ -548,26 +550,24 @@ print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding true va
 # Artifact export and registry logging.
 if SAVE_MODEL:
 	model_name = args.name.strip() or Path(__file__).stem
-	model_root_dir = _project_root() / "artifacts" / "models" / model_name
-	timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-	run_id = str(uuid.uuid4())
-	data_hash = hashlib.sha256(data_path.read_bytes()).hexdigest()
+	run_context = _initialize_artifact_run(
+		project_root=_project_root(),
+		model_name=model_name,
+		artifact_name_mode=args.artifact_name_mode,
+		data_path=data_path,
+	)
+	model_root_dir = run_context["model_root_dir"]
+	timestamp = str(run_context["timestamp"])
+	run_id = str(run_context["run_id"])
+	data_hash = str(run_context["data_hash"])
+	run_dir = run_context["run_dir"]
+	model_dir = run_context["model_dir"]
+	preprocess_dir = run_context["preprocess_dir"]
+	eval_dir = run_context["eval_dir"]
+	data_dir = run_context["data_dir"]
+	inference_dir = run_context["inference_dir"]
 	data_rows = int(len(df))
 	data_columns = int(df.shape[1])
-	if args.artifact_name_mode == "short":
-		run_label = f"{timestamp}_{model_name[:24]}_{run_id.split('-')[0]}"
-	else:
-		run_label = f"{timestamp}_{model_name}"
-	run_dir = model_root_dir / run_label
-
-	model_dir = run_dir / "model"
-	preprocess_dir = run_dir / "preprocess"
-	eval_dir = run_dir / "eval"
-	data_dir = run_dir / "data"
-	inference_dir = run_dir / "inference"
-
-	for directory in (model_dir, preprocess_dir, eval_dir, data_dir, inference_dir):
-		directory.mkdir(parents=True, exist_ok=True)
 
 	with (model_dir / "model.pkl").open("wb") as model_file:
 		pickle.dump(model, model_file)
@@ -843,6 +843,7 @@ print(results)
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),
 			"random_state_effective": int(args.random_state),
+			"seed_control": seed_control,
 			"n_jobs": classifier_params.get("n_jobs"),
 		},
 		"artifacts": _artifact_map(run_dir, artifacts_for_map),

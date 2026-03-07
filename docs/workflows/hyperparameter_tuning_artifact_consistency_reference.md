@@ -39,6 +39,13 @@ Changes:
    - Added `model.fit(X_train, y_train)` when `--enable-tuning=false`
 4. Standardized metadata blocks:
    - `training_control`, `selection`, and `tuning` consistently written to `metrics.json` and `run.json`
+5. Consolidated run directory/bootstrap logic:
+   - shared `initialize_artifact_run(...)` helper now drives timestamp/run-id/data-hash + artifact directories across templates
+6. Expanded artifact-contract validation parity:
+   - TensorFlow and XGBoost templates now run `validate_artifact_contract(...)` in addition to scikit-learn templates
+7. Added TensorFlow tuning resilience:
+   - non-finite candidate predictions/scores are skipped
+   - if no valid TensorFlow candidate remains, runs automatically fall back to direct-fit defaults and still export artifacts
 
 ## Artifact Contract Expectations for Tuning
 
@@ -89,6 +96,7 @@ When adding tuning to any template:
 - [ ] Model trains and predicts with `--save-model=true` in non-tuned mode
 - [ ] Model trains and predicts with tuned grid search
 - [ ] Model trains and predicts with tuned random search
+- [ ] Non-finite tuning candidates are handled without crashing artifact export
 - [ ] `metrics.json` writes successfully
 - [ ] `run.json` writes successfully
 - [ ] `best_params` contains JSON-safe values only

@@ -43,19 +43,26 @@ for _candidate in [_current_file.parent, *_current_file.parents]:
 
 from libraries.model_template_helpers import (
 	artifact_map as _artifact_map,
+	build_training_control as _build_training_control,
+	build_tuning_summary as _build_tuning_summary,
 	compact_metadata as _compact_metadata,
 	find_project_root as _project_root,
+	initialize_artifact_run as _initialize_artifact_run,
+	initialize_tuning_summary as _initialize_tuning_summary,
 	json_safe as _json_safe,
 	parse_bool_flag as _parse_bool,
 	post_transform_feature_count as _post_transform_feature_count,
 	round_metric as _round_metric_base,
+	set_deterministic_seeds as _set_deterministic_seeds,
 	to_dense_float32 as _to_dense_float32,
+	validate_artifact_contract as _validate_artifact_contract,
 	validate_etl_outputs as _validate_etl_outputs,
 	write_unified_registry_sqlite as _write_unified_registry_sqlite,
 	write_model_schemas as _write_model_schemas,
 )
 from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
 from libraries.tensorflow_search_space import DenseNNSearchGridConfig, build_dense_nn_search_candidates as _build_dense_nn_search_candidates
+from libraries.cli_helpers import lower_token as _lower_token
 from libraries.tensorflow_template_utils import (
 	build_optimizer as _build_optimizer,
 	build_dense_classifier as _build_dense_classifier,
@@ -98,6 +105,7 @@ from libraries.tensorflow_template_utils import (
 #   --early-stopping true|false                     (enable validation-based early stopping)
 #   --validation-fraction <float>                   (fraction of training data reserved for validation)
 #   --n-iter-no-change <int>                        (stop training if validation metric does not improve for N epochs)
+#   --min-delta <float>                             (minimum absolute val_loss improvement required to reset early-stopping patience)
 #
 # Hyperparameter tuning                         (used when --enable-tuning=true)
 #   --tuning-method grid|random                     (grid = exhaustive search over candidates; random = random subset)
@@ -110,33 +118,36 @@ from libraries.tensorflow_template_utils import (
 
 # Command-line argument parsing.
 parser = argparse.ArgumentParser(description="TensorFlow Dense Neural Network Classifier baseline")
-parser.add_argument("--task", choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
+parser.add_argument("--task", type=_lower_token, choices=["{{TASK_VALUE}}"], default="{{TASK_VALUE}}")
 parser.add_argument("--name", default=Path(__file__).stem)
-parser.add_argument("--artifact-name-mode", choices=["full", "short"], default="full")
+parser.add_argument("--artifact-name-mode", type=_lower_token, choices=["full", "short"], default="full")
 parser.add_argument("--save-model", type=_parse_bool, default=False)
 parser.add_argument("--random-state", type=int, default=1)
 parser.add_argument("--test-size", type=float, default=0.2)
+parser.add_argument("--optimizer", type=_lower_token, choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"], default="{{OPTIMIZER_NAME}}")
+parser.add_argument("--learning-rate", type=float, default=float("{{LEARNING_RATE}}"))
 parser.add_argument("--epochs", type=int, default=int("{{EPOCHS}}"))
 parser.add_argument("--batch-size", type=int, default=int("{{BATCH_SIZE}}"))
 parser.add_argument("--early-stopping", type=_parse_bool, default="{{EARLY_STOPPING_DEFAULT}}" == "True")
 parser.add_argument("--validation-fraction", type=float, default=float("{{VALIDATION_FRACTION_DEFAULT}}"))
 parser.add_argument("--n-iter-no-change", type=int, default=int("{{N_ITER_NO_CHANGE_DEFAULT}}"))
-parser.add_argument("--verbose", choices=["0", "1", "2", "auto"], default="1")
+parser.add_argument("--min-delta", type=float, default=float("{{MIN_DELTA_DEFAULT}}"))
+parser.add_argument("--verbose", type=_lower_token, choices=["0", "1", "2", "auto"], default="1")
 parser.add_argument("--metric-decimals", type=int, default=4)
 parser.add_argument("--enable-tuning", type=_parse_bool, default="{{TF_ENABLE_TUNING_DEFAULT}}" == "True")
-parser.add_argument("--tuning-method", choices=["grid", "random"], default="{{TF_TUNING_METHOD_DEFAULT}}")
-parser.add_argument("--cv-scoring", choices=["f1_macro"], default="{{TF_CV_SCORING_DEFAULT}}")
+parser.add_argument("--tuning-method", type=_lower_token, choices=["grid", "random"], default="{{TF_TUNING_METHOD_DEFAULT}}")
+parser.add_argument("--cv-scoring", type=_lower_token, choices=["f1_macro"], default="{{TF_CV_SCORING_DEFAULT}}")
 parser.add_argument("--cv-n-iter", type=int, default=int("{{TF_CV_N_ITER_DEFAULT}}"))
-parser.add_argument("--tuning-optimizer", choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"], default="{{TF_TUNING_OPTIMIZER_DEFAULT}}")
-parser.add_argument("--tuning-activation", choices=["auto", "relu", "gelu", "tanh"], default="{{TF_TUNING_ACTIVATION_DEFAULT}}")
-parser.add_argument("--tuning-regularization", choices=["auto", "none", "l1", "l2", "l1_l2"], default="{{TF_TUNING_REGULARIZATION_DEFAULT}}")
+parser.add_argument("--tuning-optimizer", type=_lower_token, choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"], default="{{TF_TUNING_OPTIMIZER_DEFAULT}}")
+parser.add_argument("--tuning-activation", type=_lower_token, choices=["auto", "relu", "gelu", "tanh"], default="{{TF_TUNING_ACTIVATION_DEFAULT}}")
+parser.add_argument("--tuning-regularization", type=_lower_token, choices=["auto", "none", "l1", "l2", "l1_l2"], default="{{TF_TUNING_REGULARIZATION_DEFAULT}}")
 args = parser.parse_args()
 
 SAVE_MODEL = args.save_model
 training_verbose = 1 if args.verbose == "auto" else int(args.verbose)
 phase_logs_enabled = training_verbose > 0
 keras_fit_verbose = 1 if training_verbose >= 2 else 0
-trial_fit_verbose = 1 if training_verbose >= 2 else 0
+trial_fit_verbose = 2 if training_verbose >= 2 else 0
 METRIC_DECIMALS = int(args.metric_decimals)
 _round_metric = partial(_round_metric_base, decimals=METRIC_DECIMALS)
 
@@ -160,8 +171,8 @@ DENSE_NN_SEARCH_GRID_CONFIG = DenseNNSearchGridConfig(
 
 #  NOTE: This config is used for direct-fit runs when tuning is disabled.
 DIRECT_FIT_CONFIG = _build_direct_fit_dense_config(
-	optimizer_name="adam",
-	learning_rate=float("{{LEARNING_RATE}}"),
+	optimizer_name=("adam" if args.optimizer == "auto" else args.optimizer),
+	learning_rate=float(args.learning_rate),
 	hidden_layers=[128, 64],
 	activations=["relu", "relu"],
 	dropouts=[0.0, 0.0],
@@ -347,20 +358,9 @@ generated_defaults = {
 # =============================================================
 
 # Set random seed for reproducibility
-tf.keras.utils.set_random_seed(int(args.random_state))
+seed_control = _set_deterministic_seeds(int(args.random_state), tf_module=tf)
 
-tuning_summary = {
-	"enabled": False,
-	"method": None,
-	"cv_folds": None,
-	"scoring": None,
-	"scoring_sklearn": None,
-	"n_iter": None,
-	"n_candidates": None,
-	"best_score": None,
-	"best_score_std": None,
-	"best_params": None,
-}
+tuning_summary = _initialize_tuning_summary()
 
 if args.enable_tuning:
 	if phase_logs_enabled:
@@ -413,6 +413,7 @@ if args.enable_tuning:
 			tf.keras.callbacks.EarlyStopping(
 				monitor="val_loss",
 				patience=max(2, int(args.n_iter_no_change)),
+				min_delta=float(args.min_delta),
 				mode="min",
 				restore_best_weights=True,
 			)
@@ -427,39 +428,69 @@ if args.enable_tuning:
 			verbose=trial_fit_verbose,
 		)
 		trial_probabilities = _predict_class_probabilities(trial_model, X_tune_val, is_binary)
+		if not np.isfinite(trial_probabilities).all():
+			if training_verbose >= 1:
+				print(f"Skipping tuning trial {trial_index}: non-finite validation probabilities")
+			continue
 		score = _classification_score(y_tune_val, trial_probabilities, is_binary, args.cv_scoring)
+		if not np.isfinite(score):
+			if training_verbose >= 1:
+				print(f"Skipping tuning trial {trial_index}: non-finite score")
+			continue
+		if training_verbose >= 2:
+			print(f"Tuning trial {trial_index} {args.cv_scoring}={_round_metric(score)}")
 		if score > best_candidate_score:
 			best_candidate_score = score
 			best_candidate = candidate
+			if training_verbose >= 2:
+				print(f"New best trial at {trial_index}: score={_round_metric(best_candidate_score)}")
 
 	if best_candidate is None:
-		raise ValueError("Tuning did not find a valid TensorFlow candidate.")
-
-	selected_optimizer = str(best_candidate["optimizer"])
-	selected_learning_rate = float(best_candidate["learning_rate"])
-	selected_hidden_layers = [int(v) for v in best_candidate["hidden_layers"]]
-	selected_dropout = float(best_candidate["dropout"])
-	selected_activation = str(best_candidate["activation"])
-	selected_l1 = float(best_candidate["l1"])
-	selected_l2 = float(best_candidate["l2"])
-	args.batch_size = int(best_candidate["batch_size"])
-	best_candidate_for_artifacts = {
-		**best_candidate,
-		"optimizer_when_auto": best_candidate.get("optimizer"),
-		"activation_when_auto": best_candidate.get("activation"),
-	}
-	tuning_summary = {
-		"enabled": True,
-		"method": args.tuning_method,
-		"cv_folds": None,
-		"scoring": args.cv_scoring,
-		"scoring_sklearn": args.cv_scoring,
-		"n_iter": int(len(trial_indices)) if args.tuning_method == "random" else None,
-		"n_candidates": int(len(trial_indices)),
-		"best_score": _round_metric(best_candidate_score),
-		"best_score_std": None,
-		"best_params": _compact_metadata(_json_safe(best_candidate_for_artifacts)),
-	}
+		if phase_logs_enabled:
+			print("No valid TensorFlow tuning candidates found; falling back to direct-fit configuration.")
+		tuning_summary = _build_tuning_summary(
+			enabled=False,
+			requested=True,
+			method=args.tuning_method,
+			cv_folds=None,
+			scoring=args.cv_scoring,
+			scoring_sklearn=args.cv_scoring,
+			n_iter=int(len(trial_indices)) if args.tuning_method == "random" else None,
+			n_candidates=int(len(trial_indices)),
+			best_score=None,
+			best_score_std=None,
+			best_params=None,
+			fallback_reason="no_valid_candidates",
+		)
+		args.enable_tuning = False
+	else:
+		selected_optimizer = str(best_candidate["optimizer"])
+		selected_learning_rate = float(best_candidate["learning_rate"])
+		selected_hidden_layers = [int(v) for v in best_candidate["hidden_layers"]]
+		selected_dropout = float(best_candidate["dropout"])
+		selected_activation = str(best_candidate["activation"])
+		selected_l1 = float(best_candidate["l1"])
+		selected_l2 = float(best_candidate["l2"])
+		args.batch_size = int(best_candidate["batch_size"])
+		best_candidate_for_artifacts = {
+			**best_candidate,
+			"optimizer_when_auto": best_candidate.get("optimizer"),
+			"activation_when_auto": best_candidate.get("activation"),
+		}
+		tuning_summary = _build_tuning_summary(
+			enabled=True,
+			requested=True,
+			method=args.tuning_method,
+			cv_folds=None,
+			scoring=args.cv_scoring,
+			scoring_sklearn=args.cv_scoring,
+			n_iter=int(len(trial_indices)) if args.tuning_method == "random" else None,
+			n_candidates=int(len(trial_indices)),
+			best_score=_round_metric(best_candidate_score),
+			best_score_std=None,
+			best_params=_compact_metadata(_json_safe(best_candidate_for_artifacts)),
+			fallback_reason=None,
+		)
 
 	tf.keras.backend.clear_session()
 	keras_model = _build_dense_classifier(
@@ -484,6 +515,16 @@ else:
 	selected_dropouts = [float(v) for v in DIRECT_FIT_CONFIG["dropouts"]]
 	selected_l1s = [float(v) for v in DIRECT_FIT_CONFIG["l1s"]]
 	selected_l2s = [float(v) for v in DIRECT_FIT_CONFIG["l2s"]]
+	if not (
+		len(selected_hidden_layers)
+		== len(selected_activations)
+		== len(selected_dropouts)
+		== len(selected_l1s)
+		== len(selected_l2s)
+	):
+		raise ValueError(
+			"Direct-fit dense configuration length mismatch: hidden_layers, activations, dropouts, l1s, and l2s must match."
+		)
 	selected_output_units = int(
 		DIRECT_FIT_CONFIG["output_units"] if DIRECT_FIT_CONFIG["output_units"] is not None else output_units
 	)
@@ -556,6 +597,7 @@ if args.early_stopping:
 	early_stopping_callback = tf.keras.callbacks.EarlyStopping(
 		monitor="val_loss",
 		patience=int(args.n_iter_no_change),
+		min_delta=float(args.min_delta),
 		mode="min",
 		restore_best_weights=True,
 	)
@@ -594,33 +636,33 @@ if args.early_stopping:
 		best_score_raw = float(validation_loss_history[best_index])
 
 if tuning_summary["enabled"]:
-	training_control = {
-		"enabled": True,
-		"type": "search_cv",
-		"max_steps_configured": int(tuning_summary["n_candidates"]),
-		"steps_completed": int(tuning_summary["n_candidates"]),
-		"patience": None,
-		"monitor_metric": f"cv_{args.cv_scoring}",
-		"monitor_split": "cv",
-		"monitor_direction": "max",
-		"best_step": None,
-		"best_score": tuning_summary["best_score"],
-		"stopped_early": False,
-	}
+	training_control = _build_training_control(
+		enabled=True,
+		control_type="search_holdout",
+		max_steps_configured=int(tuning_summary["n_candidates"]),
+		steps_completed=int(tuning_summary["n_candidates"]),
+		patience=None,
+		monitor_metric=args.cv_scoring,
+		monitor_split="val",
+		monitor_direction="max",
+		best_step=None,
+		best_score=tuning_summary["best_score"],
+		stopped_early=False,
+	)
 else:
-	training_control = {
-		"enabled": bool(args.early_stopping),
-		"type": "epochs",
-		"max_steps_configured": int(args.epochs),
-		"steps_completed": history_epochs,
-		"patience": int(args.n_iter_no_change),
-		"monitor_metric": "val_loss" if args.early_stopping else None,
-		"monitor_split": "val" if args.early_stopping else None,
-		"monitor_direction": "min" if args.early_stopping else None,
-		"best_step": int(best_step) if best_step is not None else None,
-		"best_score": _round_metric(best_score_raw),
-		"stopped_early": bool(args.early_stopping and history_epochs < int(args.epochs)),
-	}
+	training_control = _build_training_control(
+		enabled=bool(args.early_stopping),
+		control_type="epochs",
+		max_steps_configured=int(args.epochs),
+		steps_completed=history_epochs,
+		patience=int(args.n_iter_no_change),
+		monitor_metric="val_loss" if args.early_stopping else None,
+		monitor_split="val" if args.early_stopping else None,
+		monitor_direction="min" if args.early_stopping else None,
+		best_step=int(best_step) if best_step is not None else None,
+		best_score=_round_metric(best_score_raw),
+		stopped_early=bool(args.early_stopping and history_epochs < int(args.epochs)),
+	)
 
 # =============================================================
 # ==================== EVALUATE MODEL =========================
@@ -718,23 +760,22 @@ print("First 5 true values:", y_test.iloc[:5].tolist())  # Corresponding ground-
 # Artifact export and registry logging.
 if SAVE_MODEL:
 	model_name = args.name.strip() or Path(__file__).stem
-	model_root_dir = _project_root() / "artifacts" / "models" / model_name
-	timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-	run_id = str(uuid.uuid4())
-	data_hash = hashlib.sha256(data_path.read_bytes()).hexdigest()
-	if args.artifact_name_mode == "short":
-		run_label = f"{timestamp}_{model_name[:24]}_{run_id.split('-')[0]}"
-	else:
-		run_label = f"{timestamp}_{model_name}"
-	run_dir = model_root_dir / run_label
-
-	model_dir = run_dir / "model"
-	preprocess_dir = run_dir / "preprocess"
-	eval_dir = run_dir / "eval"
-	data_dir = run_dir / "data"
-	inference_dir = run_dir / "inference"
-	for directory in (model_dir, preprocess_dir, eval_dir, data_dir, inference_dir):
-		directory.mkdir(parents=True, exist_ok=True)
+	run_context = _initialize_artifact_run(
+		project_root=_project_root(),
+		model_name=model_name,
+		artifact_name_mode=args.artifact_name_mode,
+		data_path=data_path,
+	)
+	model_root_dir = run_context["model_root_dir"]
+	timestamp = str(run_context["timestamp"])
+	run_id = str(run_context["run_id"])
+	data_hash = str(run_context["data_hash"])
+	run_dir = run_context["run_dir"]
+	model_dir = run_context["model_dir"]
+	preprocess_dir = run_context["preprocess_dir"]
+	eval_dir = run_context["eval_dir"]
+	data_dir = run_context["data_dir"]
+	inference_dir = run_context["inference_dir"]
 
 	# Save TensorFlow model and fitted preprocessor.
 	keras_model.save(model_dir / "model.keras")
@@ -875,6 +916,21 @@ print("Probabilities:", probabilities.tolist())
 		y_original=y_original,
 	)
 
+	artifacts_for_map = {
+		"model": model_dir / "model.keras",
+		"preprocess": preprocess_dir / "preprocessor.pkl",
+		"eval_metrics": eval_dir / "metrics.json",
+		"eval_training_history": eval_dir / "training_history.json",
+		"eval_confusion_matrix": eval_dir / "confusion_matrix.csv",
+		"eval_confusion_matrix_plot": eval_dir / "confusion_matrix.png",
+		"eval_roc_curve_plot": eval_dir / "roc_curve.png",
+		"eval_predictions_preview": eval_dir / "predictions_preview.csv",
+		**schema_artifacts,
+		"inference_example": inference_dir / "inference_example.py",
+	}
+	if roc_curve_points is not None:
+		artifacts_for_map["eval_roc_curve"] = eval_dir / "roc_curve.csv"
+
 	run_metadata = {
 		"run_id": run_id,
 		"model_name": model_name,
@@ -914,6 +970,7 @@ print("Probabilities:", probabilities.tolist())
 			"early_stopping": bool(args.early_stopping),
 			"validation_fraction": float(args.validation_fraction),
 			"n_iter_no_change": int(args.n_iter_no_change),
+			"min_delta": float(args.min_delta),
 			"enable_tuning": bool(tuning_summary["enabled"]),
 			"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
 			"cv_scoring": args.cv_scoring if tuning_summary["enabled"] else None,
@@ -937,27 +994,32 @@ print("Probabilities:", probabilities.tolist())
 			"fit_time_seconds": _round_metric(fit_time_seconds),
 			"predict_time_seconds": _round_metric(predict_time_seconds),
 			"random_state_effective": int(args.random_state),
+			"seed_control": seed_control,
 			"n_jobs": None,
 		},
-		"artifacts": _artifact_map(
-			run_dir,
-			{
-				"model": model_dir / "model.keras",
-				"preprocess": preprocess_dir / "preprocessor.pkl",
-				"eval_metrics": eval_dir / "metrics.json",
-				"eval_training_history": eval_dir / "training_history.json",
-				"eval_confusion_matrix": eval_dir / "confusion_matrix.csv",
-				"eval_confusion_matrix_plot": eval_dir / "confusion_matrix.png",
-				"eval_roc_curve": eval_dir / "roc_curve.csv",
-				"eval_roc_curve_plot": eval_dir / "roc_curve.png",
-				"eval_predictions_preview": eval_dir / "predictions_preview.csv",
-				**schema_artifacts,
-				"inference_example": inference_dir / "inference_example.py",
-			},
-		),
+		"artifacts": _artifact_map(run_dir, artifacts_for_map),
 		"versions": {"python": platform.python_version(), "pandas": pd.__version__, "scikit-learn": sklearn.__version__, "tensorflow": tf.__version__},
 	}
-	(run_dir / "run.json").write_text(json.dumps(_compact_metadata(_json_safe(run_metadata)), indent=2), encoding="utf-8")
+	run_metadata = _compact_metadata(_json_safe(run_metadata))
+	(run_dir / "run.json").write_text(json.dumps(run_metadata, indent=2), encoding="utf-8")
+	artifact_warnings = _validate_artifact_contract(
+		run_dir=run_dir,
+		artifact_files=artifacts_for_map,
+		run_metadata=run_metadata,
+		metrics=metrics,
+		required_artifact_keys=[
+			"model",
+			"preprocess",
+			"eval_metrics",
+			"eval_predictions_preview",
+			"input_schema",
+			"target_mapping_schema",
+			"inference_example",
+		],
+		warn_only=True,
+	)
+	if artifact_warnings:
+		print(f"Artifact validation warnings: {artifact_warnings}")
 
 	registry_path = model_root_dir / "registry.csv"
 	registry_df = pd.read_csv(registry_path) if registry_path.exists() else pd.DataFrame()
@@ -1006,7 +1068,7 @@ print("Probabilities:", probabilities.tolist())
 	_write_unified_registry_sqlite(
 		project_root=_project_root(),
 		run_dir=run_dir,
-		run_metadata=_compact_metadata(_json_safe(run_metadata)),
+		run_metadata=run_metadata,
 		metrics=metrics,
 	)
 	print(f"Artifacts exported to: {run_dir}")

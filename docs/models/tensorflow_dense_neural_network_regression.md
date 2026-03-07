@@ -82,13 +82,14 @@ Example (direct configuration, no tuning):
 
 When tuning is enabled (`--enable-tuning=true`):
 
--   `--tuning-method` (`random`)
--   `--cv-scoring` (`rmse|mae|r2`)
+-   `--tuning-method` (`grid|random`)
+-   `--cv-scoring` (`rmse`)
 -   `--cv-n-iter` (int, number of randomized trials)
 
-Tuning uses randomized candidate trials scored on validation RMSE (or
-selected regression metric). The best-performing configuration is then
-refit on the full training data before final test evaluation.
+Tuning uses either exhaustive candidate search (`grid`) or randomized
+candidate trials (`random`) scored on validation RMSE. If no valid
+candidate is found (for example, non-finite trial outputs), the run
+falls back to direct-fit defaults and continues artifact export.
 
 Example:
 
