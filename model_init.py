@@ -1554,7 +1554,7 @@ def main() -> int:
             optimizer = _ask_select(
                 "Select optimizer:",
                 choices=TENSORFLOW_OPTIMIZERS,
-                default="auto",
+                # default="auto",
             )
             if optimizer is None:
                 print("Cancelled.")
@@ -1573,7 +1573,7 @@ def main() -> int:
             tf_tuning_activation = _ask_select(
                 "Filter activation search:",
                 choices=TENSORFLOW_ACTIVATIONS,
-                default="auto",
+                # default="auto",
             )
             if tf_tuning_activation is None:
                 print("Cancelled.")
@@ -1582,7 +1582,7 @@ def main() -> int:
             tf_tuning_regularization = _ask_select(
                 "Filter regularization search:",
                 choices=TENSORFLOW_REGULARIZATION_MODES,
-                default="auto",
+                # default="auto",
             )
             if tf_tuning_regularization is None:
                 print("Cancelled.")
@@ -1612,7 +1612,7 @@ def main() -> int:
             optimizer = _ask_select(
                 "Select optimizer for non-tuning defaults:",
                 choices=["adam", "sgd", "rmsprop", "adagrad", "adamw"],
-                default="adam",
+                # default="adam",
             )
             if optimizer is None:
                 print("Cancelled.")
