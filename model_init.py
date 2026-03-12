@@ -935,7 +935,7 @@ def main() -> int:
             if xgb_enable_tuning:
                 xgb_tuning_method = _ask_select(
                     "Select tuning method:",
-                    choices=["grid", "random"],
+                    choices=["grid", "random", "bayesian"],
                 )
                 if xgb_tuning_method is None:
                     print("Cancelled.")
@@ -958,9 +958,9 @@ def main() -> int:
                     )
 
             if xgb_enable_tuning:
-                if xgb_tuning_method == "random":
+                if xgb_tuning_method in {"random", "bayesian"}:
                     xgb_cv_n_iter = _ask_text(
-                        "Enter random-search iterations (>0):",
+                        "Enter tuning iterations/trials (>0):",
                         default="20",
                         validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                     )
@@ -1163,14 +1163,14 @@ def main() -> int:
             if logistic_enable_tuning:
                 logistic_tuning_method = _ask_select(
                     "Select tuning method:",
-                    choices=["grid", "random"],
+                    choices=["grid", "random", "bayesian"],
                 )
                 if logistic_tuning_method is None:
                     print("Cancelled.")
                     return 0
-                if logistic_tuning_method == "random":
+                if logistic_tuning_method in {"random", "bayesian"}:
                     logistic_cv_n_iter = _ask_text(
-                        "Enter random-search iterations (>0):",
+                        "Enter tuning iterations/trials (>0):",
                         default="20",
                         validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                     )
@@ -1246,14 +1246,14 @@ def main() -> int:
             if rf_enable_tuning:
                 rf_tuning_method = _ask_select(
                     "Select tuning method:",
-                    choices=["grid", "random"],
+                    choices=["grid", "random", "bayesian"],
                 )
                 if rf_tuning_method is None:
                     print("Cancelled.")
                     return 0
-                if rf_tuning_method == "random":
+                if rf_tuning_method in {"random", "bayesian"}:
                     rf_cv_n_iter = _ask_text(
-                        "Enter random-search iterations (>0):",
+                        "Enter tuning iterations/trials (>0):",
                         default="20",
                         validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                     )
@@ -1562,7 +1562,7 @@ def main() -> int:
 
             tf_tuning_method = _ask_select(
                 "Select tuning method:",
-                choices=["grid", "random"],
+                choices=["grid", "random", "bayesian"],
             )
             if tf_tuning_method is None:
                 print("Cancelled.")
@@ -1588,9 +1588,9 @@ def main() -> int:
                 print("Cancelled.")
                 return 0
 
-            if tf_tuning_method == "random":
+            if tf_tuning_method in {"random", "bayesian"}:
                 tf_cv_n_iter = _ask_text(
-                    "Enter random-search iterations (>0):",
+                    "Enter tuning iterations/trials (>0):",
                     default="10",
                     validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                 )
@@ -1699,14 +1699,14 @@ def main() -> int:
             if lr_enable_tuning:
                 lr_tuning_method = _ask_select(
                     "Select tuning method:",
-                    choices=["grid", "random"],
+                    choices=["grid", "random", "bayesian"],
                 )
                 if lr_tuning_method is None:
                     print("Cancelled.")
                     return 0
-                if lr_tuning_method == "random":
+                if lr_tuning_method in {"random", "bayesian"}:
                     lr_cv_n_iter = _ask_text(
-                        "Enter random-search iterations (>0):",
+                        "Enter tuning iterations/trials (>0):",
                         default="20",
                         validate_fn=lambda s: True if (_is_int(s) and int(s) > 0) else "Must be a positive integer",
                     )
@@ -2009,7 +2009,7 @@ def main() -> int:
         cmd.extend(["--logistic-cv-folds", str(int(logistic_cv_folds))])
     if logistic_cv_scoring is not None:
         cmd.extend(["--logistic-cv-scoring", _normalize_choice_token(logistic_cv_scoring)])
-    if logistic_tuning_method == "random" and logistic_cv_n_iter is not None:
+    if logistic_tuning_method in {"random", "bayesian"} and logistic_cv_n_iter is not None:
         cmd.extend(["--logistic-cv-n-iter", str(int(logistic_cv_n_iter))])
     if logistic_cv_n_jobs is not None:
         cmd.extend(["--logistic-cv-n-jobs", str(int(logistic_cv_n_jobs))])
@@ -2046,7 +2046,7 @@ def main() -> int:
         cmd.extend(["--rf-cv-folds", str(int(rf_cv_folds))])
     if rf_cv_scoring is not None:
         cmd.extend(["--rf-cv-scoring", _normalize_choice_token(rf_cv_scoring)])
-    if rf_tuning_method == "random" and rf_cv_n_iter is not None:
+    if rf_tuning_method in {"random", "bayesian"} and rf_cv_n_iter is not None:
         cmd.extend(["--rf-cv-n-iter", str(int(rf_cv_n_iter))])
     if rf_cv_n_jobs is not None:
         cmd.extend(["--rf-cv-n-jobs", str(int(rf_cv_n_jobs))])
@@ -2059,7 +2059,7 @@ def main() -> int:
         cmd.extend(["--xgb-cv-folds", str(int(xgb_cv_folds))])
     if xgb_cv_scoring is not None:
         cmd.extend(["--xgb-cv-scoring", _normalize_choice_token(xgb_cv_scoring)])
-    if xgb_tuning_method == "random" and xgb_cv_n_iter is not None:
+    if xgb_tuning_method in {"random", "bayesian"} and xgb_cv_n_iter is not None:
         cmd.extend(["--xgb-cv-n-iter", str(int(xgb_cv_n_iter))])
     if xgb_cv_n_jobs is not None:
         cmd.extend(["--xgb-cv-n-jobs", str(int(xgb_cv_n_jobs))])
@@ -2080,7 +2080,7 @@ def main() -> int:
         cmd.extend(["--lr-cv-folds", str(int(lr_cv_folds))])
     if lr_cv_scoring is not None:
         cmd.extend(["--lr-cv-scoring", _normalize_choice_token(lr_cv_scoring)])
-    if lr_tuning_method == "random" and lr_cv_n_iter is not None:
+    if lr_tuning_method in {"random", "bayesian"} and lr_cv_n_iter is not None:
         cmd.extend(["--lr-cv-n-iter", str(int(lr_cv_n_iter))])
     if lr_cv_n_jobs is not None:
         cmd.extend(["--lr-cv-n-jobs", str(int(lr_cv_n_jobs))])
@@ -2100,7 +2100,7 @@ def main() -> int:
             cmd.extend(["--tf-tuning-method", _normalize_choice_token(tf_tuning_method)])
         if tf_cv_scoring is not None:
             cmd.extend(["--tf-cv-scoring", _normalize_choice_token(tf_cv_scoring)])
-        if tf_tuning_method == "random" and tf_cv_n_iter is not None:
+        if tf_tuning_method in {"random", "bayesian"} and tf_cv_n_iter is not None:
             cmd.extend(["--tf-cv-n-iter", str(int(tf_cv_n_iter))])
         if tf_tuning_optimizer is not None:
             cmd.extend(["--tf-tuning-optimizer", _normalize_choice_token(tf_tuning_optimizer)])

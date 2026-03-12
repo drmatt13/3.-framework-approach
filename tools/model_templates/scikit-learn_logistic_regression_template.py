@@ -12,8 +12,10 @@ from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import optuna
 import pandas as pd
 import sklearn
+from sklearn.base import clone
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
 	ConfusionMatrixDisplay,
@@ -30,7 +32,7 @@ from sklearn.metrics import (
 	roc_auc_score,
 	roc_curve,
 )
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import label_binarize
 
@@ -62,7 +64,7 @@ from libraries.model_template_helpers import (
 	write_model_schemas as _write_model_schemas,
 )
 from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
-from libraries.search_utils import cv_scoring_name as _cv_scoring_name, search_space_size as _search_space_size
+from libraries.search_utils import cv_scoring_name as _cv_scoring_name, enumerate_search_candidates as _enumerate_search_candidates, search_space_size as _search_space_size
 from libraries.serialization_utils import json_safe_best_params as _json_safe_best_params
 from libraries.sklearn_template_utils import resolved_n_iter as _resolved_n_iter
 from libraries.cli_helpers import lower_token as _lower_token
@@ -109,8 +111,8 @@ from libraries.logistic_compat import (
 #   --penalty auto|l1|l2|elasticnet               	(regularization type to search during tuning; auto lets template select valid combinations)
 #   --solver auto|lbfgs|liblinear|newton-cg|				(solver to search during tuning; auto selects compatible solvers)
 # 					 newton-cholesky|sag|saga  							^
-#   --tuning-method grid|random                     (grid = exhaustive search over grid; random = randomized search over iterations)
-#   --cv-n-iter <int>                               (random search iterations; only used when --tuning-method=random)
+#   --tuning-method grid|random|bayesian            (grid = exhaustive search over grid; random = randomized search; bayesian = Optuna-guided search)
+#   --cv-n-iter <int>                               (search iterations/trials for random and bayesian tuning)
 #   --cv-folds <int>                                (number of cross-validation folds)
 #   --cv-scoring f1_macro|accuracy|roc_auc_ovr      (metric used during CV tuning)
 #   --cv-n-jobs <int>                               (CV search parallelism; -1 uses all cores)
@@ -138,7 +140,7 @@ parser.add_argument("--class-weight", type=_lower_token, choices=["none", "balan
 parser.add_argument("--verbose", type=_lower_token, choices=["0", "1", "2", "auto"], default="2")
 parser.add_argument("--metric-decimals", type=int, default=4)
 parser.add_argument("--enable-tuning", type=_parse_bool, default="{{LOGISTIC_ENABLE_TUNING_DEFAULT}}" == "True")
-parser.add_argument("--tuning-method", type=_lower_token, choices=["grid", "random"], default="{{LOGISTIC_TUNING_METHOD_DEFAULT}}")
+parser.add_argument("--tuning-method", type=_lower_token, choices=["grid", "random", "bayesian"], default="{{LOGISTIC_TUNING_METHOD_DEFAULT}}")
 parser.add_argument("--cv-folds", type=int, default=int("{{LOGISTIC_CV_FOLDS_DEFAULT}}"))
 parser.add_argument("--cv-scoring", type=_lower_token, choices=["f1_macro", "accuracy", "roc_auc_ovr"], default="{{LOGISTIC_CV_SCORING_DEFAULT}}")
 parser.add_argument("--cv-n-iter", type=int, default=int("{{LOGISTIC_CV_N_ITER_DEFAULT}}"))
@@ -362,7 +364,7 @@ if args.enable_tuning:
 			verbose=cv_verbose,
 			refit=False,
 		)
-	else:
+	elif args.tuning_method == "random":
 		n_iter = int(args.cv_n_iter)
 		n_candidates_upper = _search_space_size(search_space)
 		if n_candidates_upper > 0:
@@ -378,25 +380,65 @@ if args.enable_tuning:
 			refit=False,
 			random_state=int(args.random_state),
 		)
+		search.fit(X_train, y_train)
+		best_params = dict(search.best_params_)
+		best_params_for_artifacts = _json_safe_best_params(best_params)
+		model.set_params(**best_params)
+		model.fit(X_train, y_train)
 
-	search.fit(X_train, y_train)
-	best_params = dict(search.best_params_)
-	best_params_for_artifacts = _json_safe_best_params(best_params)
-	model.set_params(**best_params)
-	model.fit(X_train, y_train)
+		best_score = float(search.best_score_)
+		best_std = None
+		if hasattr(search, "cv_results_") and "std_test_score" in search.cv_results_:
+			best_std = float(search.cv_results_["std_test_score"][search.best_index_])
+		n_candidates = int(len(search.cv_results_["params"])) if hasattr(search, "cv_results_") else None
+	else:
+		optuna.logging.set_verbosity(optuna.logging.WARNING)
+		candidate_params = _enumerate_search_candidates(search_space)
+		if len(candidate_params) == 0:
+			raise ValueError("No tuning candidates available for bayesian optimization.")
+		n_trials = int(args.cv_n_iter)
+		n_candidates_upper = len(candidate_params)
+		if n_candidates_upper > 0:
+			n_trials = min(n_trials, n_candidates_upper)
 
-	best_score = float(search.best_score_)
-	best_std = None
-	if hasattr(search, "cv_results_") and "std_test_score" in search.cv_results_:
-		best_std = float(search.cv_results_["std_test_score"][search.best_index_])
-	n_candidates = int(len(search.cv_results_["params"])) if hasattr(search, "cv_results_") else None
+		def _objective(trial: optuna.Trial) -> float:
+			index = int(trial.suggest_int("candidate_index", 0, len(candidate_params) - 1))
+			params = candidate_params[index]
+			estimator = clone(model)
+			estimator.set_params(**params)
+			scores = cross_val_score(
+				estimator,
+				X_train,
+				y_train,
+				scoring=selected_cv_scoring,
+				cv=int(args.cv_folds),
+				n_jobs=int(args.cv_n_jobs),
+			)
+			trial.set_user_attr("score_std", float(np.std(scores, ddof=1)) if len(scores) > 1 else 0.0)
+			trial.set_user_attr("params", _json_safe_best_params(params))
+			return float(np.mean(scores))
+
+		study = optuna.create_study(
+			direction="maximize",
+			sampler=optuna.samplers.TPESampler(seed=int(args.random_state)),
+		)
+		study.optimize(_objective, n_trials=int(n_trials), n_jobs=1, show_progress_bar=False)
+		best_trial = study.best_trial
+		best_index = int(best_trial.params["candidate_index"])
+		best_params = dict(candidate_params[best_index])
+		best_params_for_artifacts = _json_safe_best_params(best_params)
+		model.set_params(**best_params)
+		model.fit(X_train, y_train)
+		best_score = float(best_trial.value)
+		best_std = float(best_trial.user_attrs.get("score_std")) if best_trial.user_attrs.get("score_std") is not None else None
+		n_candidates = int(n_candidates_upper)
 	tuning_summary = _build_tuning_summary(
 		enabled=True,
 		method=args.tuning_method,
 		cv_folds=int(args.cv_folds),
 		scoring=args.cv_scoring,
 		scoring_sklearn=selected_cv_scoring,
-		n_iter=int(search.n_iter) if args.tuning_method == "random" else None,
+		n_iter=int(args.cv_n_iter) if args.tuning_method in {"random", "bayesian"} else None,
 		n_candidates=n_candidates,
 		best_score=_round_metric(best_score),
 		best_score_std=_round_metric(best_std) if best_std is not None else None,
@@ -872,7 +914,7 @@ print(results)
 			"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
 			"cv_folds": int(args.cv_folds) if tuning_summary["enabled"] else None,
 			"cv_scoring": args.cv_scoring if tuning_summary["enabled"] else None,
-			"cv_n_iter": int(args.cv_n_iter) if tuning_summary["enabled"] and args.tuning_method == "random" else None,
+			"cv_n_iter": int(args.cv_n_iter) if tuning_summary["enabled"] and args.tuning_method in {"random", "bayesian"} else None,
 			"cv_n_jobs": int(args.cv_n_jobs) if tuning_summary["enabled"] else None,
 		},
 		"tuning": tuning_summary,

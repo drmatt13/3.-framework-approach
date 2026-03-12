@@ -49,8 +49,8 @@ Selecting `scikit-learn` + `random_forest` (classification):
 -   When tuning is enabled in Custom mode, direct-fit estimator
     defaults are auto-defaulted and omitted from the resolved-default
     summary.
--   In Custom mode, `--cv-n-iter` is prompted only when tuning method is
-    `random`.
+-   In Custom mode, `--cv-n-iter` is prompted when tuning method is
+    `random` or `bayesian`.
 
 ------------------------------------------------------------------------
 
@@ -83,10 +83,10 @@ Example (direct configuration, no tuning):
 When tuning is enabled (`--enable-tuning=true`), configure search
 behavior with:
 
--   `--tuning-method` (`grid|random`)
+-   `--tuning-method` (`grid|random|bayesian`)
 -   `--cv-folds` (int)
 -   `--cv-scoring` (`f1_macro|accuracy|roc_auc_ovr`)
--   `--cv-n-iter` (int, random search only)
+-   `--cv-n-iter` (int, iterations/trials for `random` and `bayesian`)
 -   `--cv-n-jobs` (int, CV search parallelism, `-1` uses all cores)
 
 Example (grid search):
@@ -96,6 +96,10 @@ Example (grid search):
 Example (random search):
 
     python .\models\model-1.py --enable-tuning=true --tuning-method=random --cv-folds=5 --cv-scoring=accuracy --cv-n-iter=25 --cv-n-jobs=-1
+
+Example (bayesian search):
+
+    python .\models\model-1.py --enable-tuning=true --tuning-method=bayesian --cv-folds=5 --cv-scoring=accuracy --cv-n-iter=25 --cv-n-jobs=-1
 
 ------------------------------------------------------------------------
 

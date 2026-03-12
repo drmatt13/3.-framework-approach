@@ -1,4 +1,5 @@
 import numpy as np
+from itertools import product
 
 
 def cv_scoring_name(name: str, mapping: dict[str, str], option_label: str = "--cv-scoring") -> str:
@@ -18,3 +19,16 @@ def search_space_size(search_space: dict[str, list] | list[dict[str, list]]) -> 
 		lengths = [len(values) for values in space.values() if isinstance(values, list)]
 		total += int(np.prod(lengths)) if lengths else 0
 	return total
+
+
+def enumerate_search_candidates(search_space: dict[str, list] | list[dict[str, list]]) -> list[dict[str, object]]:
+	spaces = [search_space] if isinstance(search_space, dict) else list(search_space)
+	results: list[dict[str, object]] = []
+	for space in spaces:
+		keys = [key for key, values in space.items() if isinstance(values, list)]
+		if not keys:
+			continue
+		value_lists = [list(space[key]) for key in keys]
+		for combo in product(*value_lists):
+			results.append({key: value for key, value in zip(keys, combo)})
+	return results

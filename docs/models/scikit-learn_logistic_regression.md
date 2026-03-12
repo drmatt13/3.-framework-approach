@@ -52,8 +52,8 @@ When generating via `python .\model_init.py` for `scikit-learn` +
 -   When tuning is enabled in Custom mode, direct-fit estimator
     defaults are auto-defaulted and omitted from the resolved-default
     summary.
--   In Custom mode, `--cv-n-iter` is asked only when tuning method is
-    `random`.
+-   In Custom mode, `--cv-n-iter` is asked when tuning method is
+    `random` or `bayesian`.
 -   In Custom mode, when tuning is enabled, `penalty=none` is not
     offered.
 -   If you pick a `penalty` that is incompatible with the chosen
@@ -88,7 +88,7 @@ via cross-validation.
 When tuning is enabled (`--enable-tuning=true`), configure search
 behavior with:
 
--   `--tuning-method` (`grid|random`)
+-   `--tuning-method` (`grid|random|bayesian`)
 -   `--penalty=none` is not allowed when `--enable-tuning=true`.
 -   `--cv-folds` (int, number of CV folds)
 -   `--cv-scoring` (`accuracy|f1|f1_macro|roc_auc`)
@@ -97,7 +97,7 @@ behavior with:
     -   `f1_macro` -\> `f1_macro`
     -   `roc_auc` -\> `roc_auc` (binary only unless using a multiclass
         variant)
--   `--cv-n-iter` (int, number of iterations; random search only)
+-   `--cv-n-iter` (int, number of iterations/trials for `random` and `bayesian`)
 -   `--cv-n-jobs` (int, parallel workers; `-1` uses all cores)
 
 When tuning is enabled, single-value estimator flags are treated as
@@ -114,6 +114,12 @@ Example (random search):
 
 ``` powershell
 python .\models\model-1.py --enable-tuning=true --tuning-method=random --task=binary_classification --cv-folds=5 --cv-scoring=roc_auc --cv-n-iter=30 --cv-n-jobs=-1
+```
+
+Example (bayesian search):
+
+``` powershell
+python .\models\model-1.py --enable-tuning=true --tuning-method=bayesian --task=binary_classification --cv-folds=5 --cv-scoring=roc_auc --cv-n-iter=30 --cv-n-jobs=-1
 ```
 
 ## Data Leakage Guardrail

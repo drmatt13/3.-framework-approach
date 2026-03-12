@@ -59,8 +59,8 @@ Selecting `xgboost` + classification:
 -   When tuning is enabled in Custom mode, direct-fit estimator
     defaults are auto-defaulted and omitted from the resolved-default
     summary.
--   Random search iteration count (`--cv-n-iter`) is requested only when
-    tuning is enabled.
+-   Search iteration/trial count (`--cv-n-iter`) is requested when
+    tuning is enabled and method is `random` or `bayesian`.
 
 ------------------------------------------------------------------------
 
@@ -90,19 +90,23 @@ Device note: if `--device=gpu` is requested, the template emits a single warning
 
 When tuning is enabled (`--enable-tuning=true`):
 
--   `--tuning-method` (`grid|random`)
+-   `--tuning-method` (`grid|random|bayesian`)
 -   `--cv-folds` (int)
 -   `--cv-scoring` (`f1_macro|accuracy|roc_auc_ovr`)
--   `--cv-n-iter` (int, number of randomized trials)
+-   `--cv-n-iter` (int, number of randomized trials or bayesian trials)
 -   `--cv-n-jobs` (int, `-1` uses all cores)
 
 Tuning uses either exhaustive grid search or randomized candidate trials
 evaluated via cross-validation. The best-performing configuration is
 then refit on the full training data before final test evaluation.
 
-Example:
+Example (random search):
 
     python .\models\model-1.py --enable-tuning=true --tuning-method=random --cv-folds=5 --cv-scoring=f1_macro --cv-n-iter=30 --cv-n-jobs=-1
+
+Example (bayesian search):
+
+    python .\models\model-1.py --enable-tuning=true --tuning-method=bayesian --cv-folds=5 --cv-scoring=f1_macro --cv-n-iter=30 --cv-n-jobs=-1
 
 ------------------------------------------------------------------------
 

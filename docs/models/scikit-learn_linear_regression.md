@@ -35,7 +35,7 @@ When generating via `python .\model_init.py` for `scikit-learn` + `linear_regres
 - `Thorough` is preset to tuning enabled.
 - Custom mode asks `Enable hyperparameter tuning` before direct-fit estimator defaults.
 - When tuning is enabled in Custom mode, direct-fit estimator defaults are auto-defaulted and omitted from the resolved-default summary.
-- In Custom mode, `--cv-n-iter` is asked only when tuning method is `random`.
+- In Custom mode, `--cv-n-iter` is asked when tuning method is `random` or `bayesian`.
 - In Custom mode, when tuning is enabled, `penalty=none` is not offered.
 
 ## Direct Estimator Flags
@@ -61,14 +61,14 @@ Use these when you want the model to search for better parameter values via cros
 
 When tuning is enabled (`--enable-tuning=true`), configure search behavior with:
 
-- `--tuning-method` (`grid|random`)
+- `--tuning-method` (`grid|random|bayesian`)
 - `--penalty=none` is not allowed when `--enable-tuning=true`.
 - `--cv-folds` (int, Number of CV folds) 
 - `--cv-scoring` (`rmse|mae|r2`)
   - `rmse` -> `neg_root_mean_squared_error`
   - `mae` -> `neg_mean_absolute_error`
   - `r2` -> `r2`
-- `--cv-n-iter` (int, : Number of iterations `random search only`)
+- `--cv-n-iter` (int, number of iterations/trials for `random` and `bayesian`)
 - `--cv-n-jobs` (int, parallel workers; `-1` uses all cores)
 
 When tuning is enabled, single-value estimator flags are treated as baseline/default context, and the template expands to deterministic search grids by selected penalty.
@@ -83,6 +83,12 @@ Example (random search):
 
 ```powershell
 python .\models\model-1.py --enable-tuning=true --tuning-method=random --penalty=l2 --cv-folds=5 --cv-scoring=mae --cv-n-iter=30 --cv-n-jobs=-1
+```
+
+Example (bayesian search):
+
+```powershell
+python .\models\model-1.py --enable-tuning=true --tuning-method=bayesian --penalty=l2 --cv-folds=5 --cv-scoring=mae --cv-n-iter=30 --cv-n-jobs=-1
 ```
 
 ## Data Leakage Guardrail

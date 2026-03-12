@@ -4,6 +4,7 @@ import json
 import math
 from functools import partial
 import numpy as np
+import optuna
 import pickle
 import platform
 import sys
@@ -15,8 +16,9 @@ from pathlib import Path
 import pandas as pd
 import sklearn
 import xgboost as xgb
+from sklearn.base import clone
 from sklearn.metrics import max_error, mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
 
 # Ensure project root is importable so generated templates can load shared helpers.
@@ -47,7 +49,7 @@ from libraries.model_template_helpers import (
 	write_model_schemas as _write_model_schemas,
 )
 from libraries.preprocessing_utils import build_tabular_preprocessor as _build_preprocessor, normalize_string_columns as _normalize_string_columns
-from libraries.search_utils import cv_scoring_name as _cv_scoring_name, search_space_size as _search_space_size
+from libraries.search_utils import cv_scoring_name as _cv_scoring_name, enumerate_search_candidates as _enumerate_search_candidates, search_space_size as _search_space_size
 from libraries.cli_helpers import lower_token as _lower_token
 from libraries.xgboost_search_space import XGBoostSearchGridConfig as _XGBoostSearchGridConfig, build_xgboost_search_space as _build_xgboost_search_space
 from libraries.xgboost_template_utils import resolve_xgboost_device as _resolve_xgboost_device
@@ -94,10 +96,10 @@ from libraries.xgboost_template_utils import resolve_xgboost_device as _resolve_
 #   --enable-tuning true|false                      (enable hyperparameter tuning with cross-validation)
 #
 # Hyperparameter tuning                         (used when --enable-tuning=true)
-#   --tuning-method grid|random                     (grid or randomized hyperparameter search)
+#   --tuning-method grid|random|bayesian            (grid or randomized hyperparameter search; bayesian = Optuna-guided search)
 #   --cv-folds <int>                                (number of cross-validation folds)
 #   --cv-scoring rmse|mae|r2                        (metric used during CV tuning)
-#   --cv-n-iter <int>                               (number of random search iterations)
+#   --cv-n-iter <int>                               (number of search iterations/trials for random or bayesian tuning)
 #   --cv-n-jobs <int>                               (CV search parallelism; -1 uses all cores)
 # ---------------------------------------------------------------------
 
@@ -138,7 +140,7 @@ parser.add_argument("--reg-alpha", type=float, default=float("{{XGB_REG_ALPHA_DE
 parser.add_argument("--verbose", type=_lower_token, choices=["0", "1", "2", "auto"], default="1")
 parser.add_argument("--metric-decimals", type=int, default=4)
 parser.add_argument("--enable-tuning", type=_parse_bool, default="{{XGB_ENABLE_TUNING_DEFAULT}}" == "True")
-parser.add_argument("--tuning-method", type=_lower_token, choices=["grid", "random"], default="{{XGB_TUNING_METHOD_DEFAULT}}")
+parser.add_argument("--tuning-method", type=_lower_token, choices=["grid", "random", "bayesian"], default="{{XGB_TUNING_METHOD_DEFAULT}}")
 parser.add_argument("--cv-folds", type=int, default=int("{{XGB_CV_FOLDS_DEFAULT}}"))
 parser.add_argument("--cv-scoring", type=_lower_token, choices=["f1_macro", "accuracy", "roc_auc_ovr"], default="{{XGB_CV_SCORING_DEFAULT}}")
 parser.add_argument("--cv-n-iter", type=int, default=int("{{XGB_CV_N_ITER_DEFAULT}}"))
@@ -355,7 +357,7 @@ if args.enable_tuning:
 			refit=False,
 			random_state=int(args.random_state),
 		)
-	else:
+	elif args.tuning_method == "grid":
 		search = GridSearchCV(
 			estimator=model,
 			param_grid=search_space,
@@ -365,9 +367,52 @@ if args.enable_tuning:
 			verbose=cv_verbose,
 			refit=False,
 		)
+	else:
+		search = None
 	fit_started_at = time.perf_counter()
-	search.fit(X_train, y_train)
-	best_params = dict(search.best_params_)
+	if args.tuning_method in {"random", "grid"}:
+		search.fit(X_train, y_train)
+		best_params = dict(search.best_params_)
+		best_cv_score = float(search.best_score_)
+		best_std = None
+		if hasattr(search, "cv_results_") and "std_test_score" in search.cv_results_:
+			best_std = float(search.cv_results_["std_test_score"][search.best_index_])
+		n_candidates = int(len(search.cv_results_["params"])) if hasattr(search, "cv_results_") else None
+	else:
+		optuna.logging.set_verbosity(optuna.logging.WARNING)
+		candidate_params = _enumerate_search_candidates(search_space)
+		if len(candidate_params) == 0:
+			raise ValueError("No tuning candidates available for bayesian optimization.")
+		n_trials = int(n_iter)
+
+		def _objective(trial: optuna.Trial) -> float:
+			index = int(trial.suggest_int("candidate_index", 0, len(candidate_params) - 1))
+			params = candidate_params[index]
+			estimator = clone(model)
+			estimator.set_params(**params)
+			scores = cross_val_score(
+				estimator,
+				X_train,
+				y_train,
+				scoring=selected_cv_scoring,
+				cv=int(args.cv_folds),
+				n_jobs=int(args.cv_n_jobs),
+			)
+			trial.set_user_attr("score_std", float(np.std(scores, ddof=1)) if len(scores) > 1 else 0.0)
+			trial.set_user_attr("params", _json_safe(params))
+			return float(np.mean(scores))
+
+		study = optuna.create_study(
+			direction="maximize",
+			sampler=optuna.samplers.TPESampler(seed=int(args.random_state)),
+		)
+		study.optimize(_objective, n_trials=int(n_trials), n_jobs=1, show_progress_bar=False)
+		best_trial = study.best_trial
+		best_index = int(best_trial.params["candidate_index"])
+		best_params = dict(candidate_params[best_index])
+		best_cv_score = float(best_trial.value)
+		best_std = float(best_trial.user_attrs.get("score_std")) if best_trial.user_attrs.get("score_std") is not None else None
+		n_candidates = int(len(candidate_params))
 	model.set_params(**best_params)
 
 	best_step = None
@@ -425,22 +470,18 @@ if args.enable_tuning:
 
 	model.fit(X_train, y_train)
 	fit_time_seconds = float(time.perf_counter() - fit_started_at)
-	best_score = float(search.best_score_)
+	best_score = float(best_cv_score)
 	if args.cv_scoring in ("rmse", "mae"):
 		best_score = -best_score
-	best_std = None
-	if hasattr(search, "cv_results_") and "std_test_score" in search.cv_results_:
-		best_std = float(search.cv_results_["std_test_score"][search.best_index_])
-		if args.cv_scoring in ("rmse", "mae"):
-			best_std = abs(best_std)
-	n_candidates = int(len(search.cv_results_["params"])) if hasattr(search, "cv_results_") else None
+	if best_std is not None and args.cv_scoring in ("rmse", "mae"):
+		best_std = abs(best_std)
 	tuning_summary = _build_tuning_summary(
 		enabled=True,
 		method=args.tuning_method,
 		cv_folds=int(args.cv_folds),
 		scoring=args.cv_scoring,
 		scoring_sklearn=selected_cv_scoring,
-		n_iter=int(search.n_iter) if hasattr(search, "n_iter") else None,
+		n_iter=int(n_iter) if args.tuning_method in {"random", "bayesian"} else None,
 		n_candidates=n_candidates,
 		best_score=_round_metric(best_score),
 		best_score_std=_round_metric(best_std) if best_std is not None else None,
@@ -455,7 +496,7 @@ if args.enable_tuning:
 	training_control = _build_training_control(
 		enabled=True,
 		control_type="search_cv",
-		max_steps_configured=int(search.n_iter) if hasattr(search, "n_iter") else int(n_candidates) if n_candidates is not None else n_candidates_upper,
+		max_steps_configured=int(n_iter) if args.tuning_method in {"random", "bayesian"} else int(n_candidates) if n_candidates is not None else n_candidates_upper,
 		steps_completed=int(args.cv_folds) * int(n_candidates) if n_candidates is not None else None,
 		patience=int(args.n_iter_no_change) if args.early_stopping else None,
 		monitor_metric=xgb_eval_metric if args.early_stopping else f"cv_{args.cv_scoring}",
@@ -849,7 +890,7 @@ print(results)
 			"tuning_method": args.tuning_method if tuning_summary["enabled"] else None,
 			"cv_folds": int(args.cv_folds) if tuning_summary["enabled"] else None,
 			"cv_scoring": args.cv_scoring if tuning_summary["enabled"] else None,
-			"cv_n_iter_requested": int(args.cv_n_iter) if (tuning_summary["enabled"] and args.tuning_method == "random") else None,
+			"cv_n_iter_requested": int(args.cv_n_iter) if (tuning_summary["enabled"] and args.tuning_method in {"random", "bayesian"}) else None,
 			"cv_n_iter": int(tuning_summary["n_iter"]) if tuning_summary["enabled"] and tuning_summary["n_iter"] is not None else None,
 			"cv_n_jobs": int(args.cv_n_jobs) if tuning_summary["enabled"] else None,
 		},

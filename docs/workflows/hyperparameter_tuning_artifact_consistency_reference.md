@@ -55,7 +55,7 @@ For consistency with current schema standards:
   - MUST include `training_control`, `selection`, `timing`
   - SHOULD include `tuning` with:
     - `enabled`, `method`, `cv_folds`, `scoring`, `scoring_sklearn`
-    - `n_iter` (random only), `n_candidates`
+   - `n_iter` (random and bayesian), `n_candidates`
     - `best_score`, `best_score_std`, `best_params`
 - `run.json`
   - MUST include training/evaluation context and `artifacts` map

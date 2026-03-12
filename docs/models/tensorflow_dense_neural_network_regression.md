@@ -54,8 +54,8 @@ Selecting `tensorflow` + `dense_nn` (regression):
     enable tuning.
 -   Tuning details are prompted only when you choose
     `Enable hyperparameter tuning = true`.
--   Random search iteration count (`--cv-n-iter`) is requested only when
-    tuning is enabled.
+-   Search iteration/trial count (`--cv-n-iter`) is requested when
+    tuning is enabled and method is `random` or `bayesian`.
 
 ------------------------------------------------------------------------
 
@@ -82,18 +82,23 @@ Example (direct configuration, no tuning):
 
 When tuning is enabled (`--enable-tuning=true`):
 
--   `--tuning-method` (`grid|random`)
+-   `--tuning-method` (`grid|random|bayesian`)
 -   `--cv-scoring` (`rmse`)
--   `--cv-n-iter` (int, number of randomized trials)
+-   `--cv-n-iter` (int, number of randomized trials or bayesian trials)
 
-Tuning uses either exhaustive candidate search (`grid`) or randomized
-candidate trials (`random`) scored on validation RMSE. If no valid
-candidate is found (for example, non-finite trial outputs), the run
-falls back to direct-fit defaults and continues artifact export.
+Tuning uses either exhaustive candidate search (`grid`), randomized
+candidate trials (`random`), or KerasTuner BayesianOptimization
+(`bayesian`) scored on validation RMSE. If no valid candidate is found
+(for example, non-finite trial outputs), the run falls back to
+direct-fit defaults and continues artifact export.
 
-Example:
+Example (random search):
 
     python .\models\model-1.py --enable-tuning=true --tuning-method=random --cv-scoring=rmse --cv-n-iter=20
+
+Example (bayesian search):
+
+    python .\models\model-1.py --enable-tuning=true --tuning-method=bayesian --cv-scoring=rmse --cv-n-iter=20
 
 ------------------------------------------------------------------------
 

@@ -31,7 +31,7 @@ from libraries.cli_helpers import parse_bool_flag as _parse_bool
 #   --penalty=auto|none|l1|l2|elasticnet
 #   --alpha=<float>
 #   --enable-tuning=true|false
-#   --tuning-method=grid|random
+#   --tuning-method=grid|random|bayesian
 #   --cv-folds=<int>
 #   --cv-scoring=rmse|mae|r2
 #   --cv-n-iter=<int>
@@ -1316,8 +1316,8 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(
                 "Invalid flags: scikit-learn tuning defaults are not supported for xgboost"
             )
-        if args.default_xgb_tuning_method is not None and args.default_xgb_tuning_method not in {"grid", "random"}:
-            raise ValueError("Invalid --xgb-tuning-method. Allowed: grid, random")
+        if args.default_xgb_tuning_method is not None and args.default_xgb_tuning_method not in {"grid", "random", "bayesian"}:
+            raise ValueError("Invalid --xgb-tuning-method. Allowed: grid, random, bayesian")
         if args.default_xgb_cv_scoring is not None:
             allowed_scoring = REGRESSION_CV_SCORINGS if family == "regression" else CLASSIFICATION_CV_SCORINGS
             if args.default_xgb_cv_scoring not in allowed_scoring:
@@ -1450,8 +1450,8 @@ def validate_args(args: argparse.Namespace) -> None:
                     "Invalid flags: --rf-enable-tuning/--rf-tuning-method/--rf-cv-folds/"
                     "--rf-cv-scoring/--rf-cv-n-iter/--rf-cv-n-jobs are scikit-learn random_forest-only"
                 )
-            if args.default_logistic_tuning_method is not None and args.default_logistic_tuning_method not in {"grid", "random"}:
-                raise ValueError("Invalid --logistic-tuning-method. Allowed: grid, random")
+            if args.default_logistic_tuning_method is not None and args.default_logistic_tuning_method not in {"grid", "random", "bayesian"}:
+                raise ValueError("Invalid --logistic-tuning-method. Allowed: grid, random, bayesian")
         elif args.model == "linear_regression":
             linear_defaults = DEFAULT_LINEAR_REGRESSION_PARAMS_BY_TEMPLATE[("scikit-learn", "linear_regression", family)]
             effective_lr_enable_tuning = (
@@ -1505,8 +1505,8 @@ def validate_args(args: argparse.Namespace) -> None:
                     "Invalid flags: --rf-enable-tuning/--rf-tuning-method/--rf-cv-folds/"
                     "--rf-cv-scoring/--rf-cv-n-iter/--rf-cv-n-jobs are scikit-learn random_forest-only"
                 )
-            if args.default_lr_tuning_method is not None and args.default_lr_tuning_method not in {"grid", "random"}:
-                raise ValueError("Invalid --lr-tuning-method. Allowed: grid, random")
+            if args.default_lr_tuning_method is not None and args.default_lr_tuning_method not in {"grid", "random", "bayesian"}:
+                raise ValueError("Invalid --lr-tuning-method. Allowed: grid, random, bayesian")
             if args.default_lr_cv_scoring is not None and args.default_lr_cv_scoring not in {"rmse", "mae", "r2"}:
                 raise ValueError("Invalid --lr-cv-scoring. Allowed: rmse, mae, r2")
         else:
@@ -1541,8 +1541,8 @@ def validate_args(args: argparse.Namespace) -> None:
                     "Invalid flags: --logistic-enable-tuning/--logistic-tuning-method/--logistic-cv-folds/"
                     "--logistic-cv-scoring/--logistic-cv-n-iter/--logistic-cv-n-jobs are scikit-learn logistic-only"
                 )
-            if args.default_rf_tuning_method is not None and args.default_rf_tuning_method not in {"grid", "random"}:
-                raise ValueError("Invalid --rf-tuning-method. Allowed: grid, random")
+            if args.default_rf_tuning_method is not None and args.default_rf_tuning_method not in {"grid", "random", "bayesian"}:
+                raise ValueError("Invalid --rf-tuning-method. Allowed: grid, random, bayesian")
             if args.default_rf_cv_scoring is not None:
                 allowed_scoring = REGRESSION_CV_SCORINGS if family == "regression" else CLASSIFICATION_CV_SCORINGS
                 if args.default_rf_cv_scoring not in allowed_scoring:
@@ -1665,8 +1665,8 @@ def validate_args(args: argparse.Namespace) -> None:
                     f"Invalid --tf-cv-scoring '{args.default_tf_cv_scoring}' for task '{args.task}'. "
                     f"Allowed: {allowed}"
                 )
-        if args.default_tf_tuning_method is not None and args.default_tf_tuning_method not in {"grid", "random"}:
-            raise ValueError("Invalid --tf-tuning-method. Allowed: grid, random")
+        if args.default_tf_tuning_method is not None and args.default_tf_tuning_method not in {"grid", "random", "bayesian"}:
+            raise ValueError("Invalid --tf-tuning-method. Allowed: grid, random, bayesian")
         return
 
     raise ValueError(f"Unsupported library: {args.library}")
@@ -1916,7 +1916,7 @@ def main():
         dest="default_lr_tuning_method",
         required=False,
         type=_normalize_choice_token,
-        choices=["grid", "random"],
+        choices=["grid", "random", "bayesian"],
         help="Default tuning method for linear regression template",
     )
     parser.add_argument(
@@ -1976,7 +1976,7 @@ def main():
         dest="default_logistic_tuning_method",
         required=False,
         type=_normalize_choice_token,
-        choices=["grid", "random"],
+        choices=["grid", "random", "bayesian"],
         help="Default tuning method for logistic regression template",
     )
     parser.add_argument(
@@ -2020,7 +2020,7 @@ def main():
         dest="default_rf_tuning_method",
         required=False,
         type=_normalize_choice_token,
-        choices=["grid", "random"],
+        choices=["grid", "random", "bayesian"],
         help="Default tuning method for random forest templates",
     )
     parser.add_argument(
@@ -2085,7 +2085,7 @@ def main():
         dest="default_xgb_tuning_method",
         required=False,
         type=_normalize_choice_token,
-        choices=["grid", "random"],
+        choices=["grid", "random", "bayesian"],
         help="Default tuning method for xgboost templates",
     )
     parser.add_argument(
@@ -2129,7 +2129,7 @@ def main():
         dest="default_tf_tuning_method",
         required=False,
         type=_normalize_choice_token,
-        choices=["grid", "random"],
+        choices=["grid", "random", "bayesian"],
         help="Default tuning method for tensorflow dense templates",
     )
     parser.add_argument(

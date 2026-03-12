@@ -3,6 +3,7 @@ import hashlib
 import json
 from functools import partial
 import pickle
+import tempfile
 import platform
 import sys
 import time
@@ -14,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import sklearn
+import keras_tuner as kt
 import tensorflow as tf
 from sklearn.metrics import (
 	ConfusionMatrixDisplay,
@@ -108,9 +110,9 @@ from libraries.tensorflow_template_utils import (
 #   --min-delta <float>                             (minimum absolute val_loss improvement required to reset early-stopping patience)
 #
 # Hyperparameter tuning                         (used when --enable-tuning=true)
-#   --tuning-method grid|random                     (grid = exhaustive search over candidates; random = random subset)
+#   --tuning-method grid|random|bayesian            (grid = exhaustive search over candidates; random = random subset; bayesian = KerasTuner BayesianOptimization)
 #   --cv-scoring rmse                               (metric used to select best model during tuning)
-#   --cv-n-iter <int>                               (number of random search iterations)
+#   --cv-n-iter <int>                               (number of search iterations/trials for random or bayesian tuning)
 #   --tuning-optimizer auto|adam|sgd|rmsprop|adagrad|adamw
 #   --tuning-activation auto|relu|gelu|tanh
 #   --tuning-regularization auto|none|l1|l2|l1_l2
@@ -135,7 +137,7 @@ parser.add_argument("--min-delta", type=float, default=float("{{MIN_DELTA_DEFAUL
 parser.add_argument("--verbose", type=_lower_token, choices=["0", "1", "2", "auto"], default="1")
 parser.add_argument("--metric-decimals", type=int, default=4)
 parser.add_argument("--enable-tuning", type=_parse_bool, default="{{TF_ENABLE_TUNING_DEFAULT}}" == "True")
-parser.add_argument("--tuning-method", type=_lower_token, choices=["grid", "random"], default="{{TF_TUNING_METHOD_DEFAULT}}")
+parser.add_argument("--tuning-method", type=_lower_token, choices=["grid", "random", "bayesian"], default="{{TF_TUNING_METHOD_DEFAULT}}")
 parser.add_argument("--cv-scoring", type=_lower_token, choices=["f1_macro"], default="{{TF_CV_SCORING_DEFAULT}}")
 parser.add_argument("--cv-n-iter", type=int, default=int("{{TF_CV_N_ITER_DEFAULT}}"))
 parser.add_argument("--tuning-optimizer", type=_lower_token, choices=["auto", "adam", "sgd", "rmsprop", "adagrad", "adamw"], default="{{TF_TUNING_OPTIMIZER_DEFAULT}}")
@@ -384,66 +386,133 @@ if args.enable_tuning:
 	)
 	if len(candidates) == 0:
 		raise ValueError("No TensorFlow tuning candidates remain after applying optimizer/activation/regularization filters.")
-	if args.tuning_method == "random":
-		trial_indices = rng.choice(len(candidates), size=min(int(args.cv_n_iter), len(candidates)), replace=False).tolist()
-	else:
-		trial_indices = list(range(len(candidates)))
-
 	best_candidate = None
 	best_candidate_score = -np.inf
-	for trial_index, index in enumerate(trial_indices, start=1):
-		candidate = candidates[int(index)]
-		if training_verbose >= 2:
-			print(f"Tuning trial {trial_index}/{len(trial_indices)}: {candidate}")
-		tf.keras.backend.clear_session()
-		trial_model = _build_dense_classifier(
-			input_dim=int(X_train_processed.shape[1]),
-			output_units=output_units,
-			output_activation=output_activation,
-			optimizer_name=candidate["optimizer"],
-			learning_rate=float(candidate["learning_rate"]),
-			hidden_layers=list(candidate["hidden_layers"]),
-			dropout=float(candidate["dropout"]),
-			hidden_activation=str(candidate["activation"]),
-			l1=float(candidate["l1"]),
-			l2=float(candidate["l2"]),
-			is_binary=is_binary,
-		)
-		trial_callbacks = [
-			tf.keras.callbacks.EarlyStopping(
-				monitor="val_loss",
-				patience=max(2, int(args.n_iter_no_change)),
-				min_delta=float(args.min_delta),
-				mode="min",
-				restore_best_weights=True,
+	trial_count = 0
+	if args.tuning_method == "bayesian":
+		objective = kt.Objective("score", direction="max")
+
+		class _DenseBayesianTuner(kt.Tuner):
+			def run_trial(self, trial: kt.engine.trial.Trial, *_args, **_kwargs):
+				candidate_index = int(trial.hyperparameters.Int("candidate_index", 0, len(candidates) - 1))
+				candidate = candidates[candidate_index]
+				tf.keras.backend.clear_session()
+				trial_model = _build_dense_classifier(
+					input_dim=int(X_train_processed.shape[1]),
+					output_units=output_units,
+					output_activation=output_activation,
+					optimizer_name=candidate["optimizer"],
+					learning_rate=float(candidate["learning_rate"]),
+					hidden_layers=list(candidate["hidden_layers"]),
+					dropout=float(candidate["dropout"]),
+					hidden_activation=str(candidate["activation"]),
+					l1=float(candidate["l1"]),
+					l2=float(candidate["l2"]),
+					is_binary=is_binary,
+				)
+				trial_callbacks = [
+					tf.keras.callbacks.EarlyStopping(
+						monitor="val_loss",
+						patience=max(2, int(args.n_iter_no_change)),
+						min_delta=float(args.min_delta),
+						mode="min",
+						restore_best_weights=True,
+					)
+				]
+				trial_model.fit(
+					X_tune_train,
+					y_tune_train,
+					epochs=max(10, min(100, int(args.epochs))),
+					batch_size=int(candidate["batch_size"]),
+					validation_data=(X_tune_val, y_tune_val),
+					callbacks=trial_callbacks,
+					verbose=trial_fit_verbose,
+				)
+				trial_probabilities = _predict_class_probabilities(trial_model, X_tune_val, is_binary)
+				score = _classification_score(y_tune_val, trial_probabilities, is_binary, args.cv_scoring)
+				if not np.isfinite(score):
+					score = -np.inf
+				return {"score": float(score)}
+
+		with tempfile.TemporaryDirectory(prefix="kt_bayes_tf_cls_") as _kt_dir:
+			tuner = _DenseBayesianTuner(
+				oracle=kt.oracles.BayesianOptimizationOracle(
+					objective=objective,
+					max_trials=max(1, min(int(args.cv_n_iter), len(candidates))),
+					seed=int(args.random_state),
+				),
+				hypermodel=None,
+				directory=_kt_dir,
+				project_name="dense_nn_classification",
+				overwrite=True,
 			)
-		]
-		trial_model.fit(
-			X_tune_train,
-			y_tune_train,
-			epochs=max(10, min(100, int(args.epochs))),
-			batch_size=int(candidate["batch_size"]),
-			validation_data=(X_tune_val, y_tune_val),
-			callbacks=trial_callbacks,
-			verbose=trial_fit_verbose,
-		)
-		trial_probabilities = _predict_class_probabilities(trial_model, X_tune_val, is_binary)
-		if not np.isfinite(trial_probabilities).all():
-			if training_verbose >= 1:
-				print(f"Skipping tuning trial {trial_index}: non-finite validation probabilities")
-			continue
-		score = _classification_score(y_tune_val, trial_probabilities, is_binary, args.cv_scoring)
-		if not np.isfinite(score):
-			if training_verbose >= 1:
-				print(f"Skipping tuning trial {trial_index}: non-finite score")
-			continue
-		if training_verbose >= 2:
-			print(f"Tuning trial {trial_index} {args.cv_scoring}={_round_metric(score)}")
-		if score > best_candidate_score:
-			best_candidate_score = score
-			best_candidate = candidate
+			tuner.search()
+			best_trials = tuner.oracle.get_best_trials(num_trials=1)
+			trial_count = int(len(tuner.oracle.trials))
+			if len(best_trials) > 0:
+				best_trial = best_trials[0]
+				best_index = int(best_trial.hyperparameters.get("candidate_index"))
+				best_candidate = candidates[best_index]
+				best_candidate_score = float(best_trial.score)
+	else:
+		if args.tuning_method == "random":
+			trial_indices = rng.choice(len(candidates), size=min(int(args.cv_n_iter), len(candidates)), replace=False).tolist()
+		else:
+			trial_indices = list(range(len(candidates)))
+		trial_count = int(len(trial_indices))
+		for trial_index, index in enumerate(trial_indices, start=1):
+			candidate = candidates[int(index)]
 			if training_verbose >= 2:
-				print(f"New best trial at {trial_index}: score={_round_metric(best_candidate_score)}")
+				print(f"Tuning trial {trial_index}/{len(trial_indices)}: {candidate}")
+			tf.keras.backend.clear_session()
+			trial_model = _build_dense_classifier(
+				input_dim=int(X_train_processed.shape[1]),
+				output_units=output_units,
+				output_activation=output_activation,
+				optimizer_name=candidate["optimizer"],
+				learning_rate=float(candidate["learning_rate"]),
+				hidden_layers=list(candidate["hidden_layers"]),
+				dropout=float(candidate["dropout"]),
+				hidden_activation=str(candidate["activation"]),
+				l1=float(candidate["l1"]),
+				l2=float(candidate["l2"]),
+				is_binary=is_binary,
+			)
+			trial_callbacks = [
+				tf.keras.callbacks.EarlyStopping(
+					monitor="val_loss",
+					patience=max(2, int(args.n_iter_no_change)),
+					min_delta=float(args.min_delta),
+					mode="min",
+					restore_best_weights=True,
+				)
+			]
+			trial_model.fit(
+				X_tune_train,
+				y_tune_train,
+				epochs=max(10, min(100, int(args.epochs))),
+				batch_size=int(candidate["batch_size"]),
+				validation_data=(X_tune_val, y_tune_val),
+				callbacks=trial_callbacks,
+				verbose=trial_fit_verbose,
+			)
+			trial_probabilities = _predict_class_probabilities(trial_model, X_tune_val, is_binary)
+			if not np.isfinite(trial_probabilities).all():
+				if training_verbose >= 1:
+					print(f"Skipping tuning trial {trial_index}: non-finite validation probabilities")
+				continue
+			score = _classification_score(y_tune_val, trial_probabilities, is_binary, args.cv_scoring)
+			if not np.isfinite(score):
+				if training_verbose >= 1:
+					print(f"Skipping tuning trial {trial_index}: non-finite score")
+				continue
+			if training_verbose >= 2:
+				print(f"Tuning trial {trial_index} {args.cv_scoring}={_round_metric(score)}")
+			if score > best_candidate_score:
+				best_candidate_score = score
+				best_candidate = candidate
+				if training_verbose >= 2:
+					print(f"New best trial at {trial_index}: score={_round_metric(best_candidate_score)}")
 
 	if best_candidate is None:
 		if phase_logs_enabled:
@@ -455,8 +524,8 @@ if args.enable_tuning:
 			cv_folds=None,
 			scoring=args.cv_scoring,
 			scoring_sklearn=args.cv_scoring,
-			n_iter=int(len(trial_indices)) if args.tuning_method == "random" else None,
-			n_candidates=int(len(trial_indices)),
+			n_iter=int(trial_count) if args.tuning_method in {"random", "bayesian"} else None,
+			n_candidates=int(trial_count),
 			best_score=None,
 			best_score_std=None,
 			best_params=None,
@@ -484,8 +553,8 @@ if args.enable_tuning:
 			cv_folds=None,
 			scoring=args.cv_scoring,
 			scoring_sklearn=args.cv_scoring,
-			n_iter=int(len(trial_indices)) if args.tuning_method == "random" else None,
-			n_candidates=int(len(trial_indices)),
+			n_iter=int(trial_count) if args.tuning_method in {"random", "bayesian"} else None,
+			n_candidates=int(trial_count),
 			best_score=_round_metric(best_candidate_score),
 			best_score_std=None,
 			best_params=_compact_metadata(_json_safe(best_candidate_for_artifacts)),
